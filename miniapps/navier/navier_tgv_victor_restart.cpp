@@ -630,6 +630,7 @@ int main(int argc, char *argv[])
             }
 
             ComputeElementCenterValues(u_gf, pmesh, step + initial_step);
+            ComputeElementCenterValuesScalar(p_gf, pmesh);
             if (Mpi::Root())
             {
                std::cout << "\nOutput element center file saved at cycle " << step + initial_step << "." << std::endl;
