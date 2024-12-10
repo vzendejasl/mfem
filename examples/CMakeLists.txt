@@ -10,6 +10,8 @@
 # CONTRIBUTING.md for details.
 
 list(APPEND ALL_EXE_SRCS
+  victor_periodic_p.cpp
+  victor_periodic_p_convergence.cpp
   ex0.cpp
   ex1.cpp
   ex2.cpp
