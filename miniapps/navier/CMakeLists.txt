@@ -52,6 +52,11 @@ if (MFEM_USE_MPI)
     ${NAVIER_COMMON_FILES}
     LIBRARIES mfem)
 
+  add_mfem_miniapp(navier_tgv_victor_restart_serial
+    MAIN navier_tgv_victor_restart_serial.cpp
+    ${NAVIER_COMMON_FILES}
+    LIBRARIES mfem)
+
   add_mfem_miniapp(navier_shear
     MAIN navier_shear.cpp
     ${NAVIER_COMMON_FILES}

@@ -383,6 +383,8 @@ int main(int argc, char *argv[])
          {
             std::cout << "Restart files found. Continuing from checkpoint at time t = " << t << std::endl;
          }
+         // Store the initial step number at restart
+         initial_step = step + 1;
       }
       else
       {
@@ -392,8 +394,6 @@ int main(int argc, char *argv[])
          }
       }
 
-      // Store the initial step number at restart
-      initial_step = step;
 
    }
 
@@ -588,7 +588,7 @@ int main(int argc, char *argv[])
    real_t t_final = ctx.t_final;
    bool last_step = false;
 
-   // reset step from restart
+   // reset step from restart for flow solver
    step = 0;
    for (; !last_step; ++step)
    {
@@ -599,61 +599,71 @@ int main(int argc, char *argv[])
 
       flowsolver->Step(t, dt, step);
 
-      if ((step - initial_step + 1) % 100 == 0 || last_step)
+      if ((step - initial_step) % 100 == 0 || last_step)
       {
-         flowsolver->ComputeCurl3D(*u_gf, w_gf);
-         ComputeQCriterion(*u_gf, q_gf);
-
-         if (ctx.paraview)
+         // If restarting, skip the first saved checkpoint
+         if (!(ctx.restart && step == 0 && restart_files_found))
          {
-            pvdc->SetCycle(step + initial_step);
-            pvdc->SetTime(t);
-            pvdc->Save();
+            flowsolver->ComputeCurl3D(*u_gf, w_gf);
+            ComputeQCriterion(*u_gf, q_gf);
+
+            if (ctx.paraview)
+            {
+               pvdc->SetCycle(step + initial_step);
+               pvdc->SetTime(t);
+               pvdc->Save();
+               if (Mpi::Root())
+               {
+                  std::cout << "\nParaview file saved." << std::endl;
+               }
+            }
+
+            if (ctx.visit)
+            {
+               dc->SetCycle(step + initial_step);
+               dc->SetTime(t);
+               dc->Save();
+               if (Mpi::Root())
+               {
+                  std::cout << "\nVisit file saved at cycle " << step + initial_step << "." << std::endl;
+               }
+            }
+
+            ComputeElementCenterValues(u_gf, pmesh, step + initial_step);
             if (Mpi::Root())
             {
-               std::cout << "\nParaview file saved." << std::endl;
+               std::cout << "\nOutput element center file saved at cycle " << step + initial_step << "." << std::endl;
             }
-         }
 
-         if (ctx.visit)
-         {
-            dc->SetCycle(step + initial_step);
-            dc->SetTime(t);
-            dc->Save();
+            // Save the checkpoint files
+            SaveCheckpoint(pmesh, u_gf, p_gf, t, step, myid);
             if (Mpi::Root())
             {
-               std::cout << "\nVisit file saved at cycle " << step + initial_step << "." << std::endl;
+               std::cout << "\nCheckpoint saved." << std::endl;
             }
-         }
-
-         ComputeElementCenterValues(u_gf, pmesh, step + initial_step);
-         if (Mpi::Root())
-         {
-            std::cout << "\nOutput element center file saved at cycle " << step + initial_step << "." << std::endl;
-         }
-
-         // Save the checkpoint files
-         SaveCheckpoint(pmesh, u_gf, p_gf, t, step, myid);
-         if (Mpi::Root())
-         {
-            std::cout << "\nCheckpoint saved." << std::endl;
          }
       }
 
       u_inf_loc = u_gf->Normlinf();
       p_inf_loc = p_gf->Normlinf();
+
       u_inf = GlobalLpNorm(infinity(), u_inf_loc, MPI_COMM_WORLD);
       p_inf = GlobalLpNorm(infinity(), p_inf_loc, MPI_COMM_WORLD);
+
       ke = kin_energy.ComputeKineticEnergy(*u_gf);
       flowsolver->ComputeCurl3D(*u_gf, w_gf);
       enstrophy = kin_energy.ComputeEnstrophy(w_gf);
 
       if (Mpi::Root())
       {
-         printf("%.5E %.5E %.5E %.5E %.5E %.5E\n", t, dt, u_inf, p_inf, ke, enstrophy);
-         fprintf(f, "%20.16e     %20.16e     %20.16e\n", t, ke, enstrophy);
-         fflush(f);
-         fflush(stdout);
+         // If restarting, skip the first saved checkpoint
+         if (!(ctx.restart && step == 0 && restart_files_found))
+         {
+           printf("%.5E %.5E %.5E %.5E %.5E %.5E\n", t, dt, u_inf, p_inf, ke, enstrophy);
+           fprintf(f, "%20.16e     %20.16e     %20.16e\n", t, ke, enstrophy);
+           fflush(f);
+           fflush(stdout);
+         }
       }
    }
 
