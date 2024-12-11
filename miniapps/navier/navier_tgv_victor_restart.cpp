@@ -279,8 +279,8 @@ bool IndicesAreConnected(const Table &t, int i, int j)
 
 void VerifyPeriodicMesh(Mesh *mesh);
 
-void ComputeElementCenterValues(ParGridFunction *sol, ParMesh *pmesh, int step);
-void ComputeElementCenterValuesScalar(ParGridFunction *sol, ParMesh *pmesh);
+void ComputeElementCenterValues(ParGridFunction *sol, ParMesh *pmesh, int step, double time);
+void ComputeElementCenterValuesScalar(ParGridFunction *sol, ParMesh *pmesh,int step, double time);
 
 void SaveCheckpoint(ParMesh *pmesh, ParGridFunction *u_gf, ParGridFunction *p_gf,
                     double t, int step, int myid);
@@ -467,8 +467,8 @@ int main(int argc, char *argv[])
       // Set up the flow solver
       flowsolver->Setup(ctx.dt);
 
-      ComputeElementCenterValues(u_gf, pmesh, step);
-      // ComputeElementCenterValuesScalar(u_gf, pmesh);
+      ComputeElementCenterValues(u_gf, pmesh, step, t);
+      ComputeElementCenterValuesScalar(u_gf, pmesh,step, t);
    }
 
    int nel = pmesh->GetNE();
@@ -629,8 +629,8 @@ int main(int argc, char *argv[])
                }
             }
 
-            ComputeElementCenterValues(u_gf, pmesh, step + initial_step);
-            ComputeElementCenterValuesScalar(p_gf, pmesh);
+            ComputeElementCenterValues(u_gf, pmesh, step + initial_step, t);
+            ComputeElementCenterValuesScalar(p_gf, pmesh, step + initial_step, t);
             if (Mpi::Root())
             {
                std::cout << "\nOutput element center file saved at cycle " << step + initial_step << "." << std::endl;
@@ -859,8 +859,14 @@ void ComputeElementCenterValues(ParGridFunction* sol, ParMesh* pmesh, int step)
 
 */
 
-void ComputeElementCenterValues(ParGridFunction* sol, ParMesh* pmesh, int step)
+void ComputeElementCenterValues(ParGridFunction* sol, ParMesh* pmesh, int step,double time)
 {
+    // MPI setup
+    MPI_Comm comm = pmesh->GetComm();
+    int rank, size;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+
     // Local arrays to store the data
     std::vector<double> local_x, local_y, local_z, local_value;
     std::vector<double> local_velx, local_vely, local_velz;
@@ -908,12 +914,6 @@ void ComputeElementCenterValues(ParGridFunction* sol, ParMesh* pmesh, int step)
         local_vely.push_back(u_y);
         local_velz.push_back(u_z);
     }
-
-    // MPI setup
-    MPI_Comm comm = pmesh->GetComm();
-    int rank, size;
-    MPI_Comm_rank(comm, &rank);
-    MPI_Comm_size(comm, &size);
 
     // Gather all data on rank 0
     std::vector<double> all_x, all_y, all_z;
@@ -975,15 +975,16 @@ void ComputeElementCenterValues(ParGridFunction* sol, ParMesh* pmesh, int step)
 
       // Write header only if not restarting
       fprintf(f, "3D Taylor Green Vortex\n");
-      fprintf(f, "order = %d\n", ctx.order);
-      fprintf(f, "step = %d\n", step);
+      fprintf(f, "Order = %d\n", ctx.order);
+      fprintf(f, "Step = %d\n", step);
+      fprintf(f, "Time = %d\n", time);
       fprintf(f, "===================================================================");
       fprintf(f, "========================================================================\n");
       fprintf(f, "            x                      y                      z         ");
       fprintf(f, "            velx                   vely                   velz\n");
 
       // Write data with aligned columns
-      for (size_t i = 0; i < all_x.size(); ++i)
+      for (int i = 0; i < all_x.size(); ++i)
       {
         // Write the initial data point
         fprintf(f, "%20.16e %20.16e %20.16e %20.16e %20.16e %20.16e\n", all_x[i], all_y[i],all_z[i],
@@ -992,11 +993,12 @@ void ComputeElementCenterValues(ParGridFunction* sol, ParMesh* pmesh, int step)
 
       fflush(f);
       fflush(stdout);
+
     }
     
 }
 
-void ComputeElementCenterValuesScalar(ParGridFunction* sol, ParMesh* pmesh)
+void ComputeElementCenterValuesScalar(ParGridFunction* sol, ParMesh* pmesh, int step, double time)
 {
     // Local arrays to store the data
     std::vector<double> local_x, local_y, local_z, local_value;
@@ -1080,48 +1082,37 @@ void ComputeElementCenterValuesScalar(ParGridFunction* sol, ParMesh* pmesh)
     // Write the data to a file in a human-readable format on rank 0
     if (rank == 0)
     {
-        std::ofstream ofs("element_centers_scalar.txt");
-        for (size_t i = 0; i < all_x.size(); ++i)
-        {
-            ofs << all_x[i] << " " << all_y[i] << " " << all_z[i] << " " << all_value[i] << std::endl;
-        }
-        ofs.close();
+      std::string fname = "element_centers_scalar_" + std::to_string(step) + ".txt";
+      FILE *f = NULL;
+      f = fopen(fname.c_str(), "w");
+      if (!f)
+      {
+        std::cerr << "Error opening file " << fname << std::endl;
+        MPI_Abort(MPI_COMM_WORLD,1);
+      }
+
+      // Write header only if not restarting
+      fprintf(f, "3D Taylor Green Vortex\n");
+      fprintf(f, "Order = %d\n", ctx.order);
+      fprintf(f, "Step = %d\n", step);
+      fprintf(f, "Time = %d\n", time);
+      fprintf(f, "===================================================================");
+      fprintf(f, "========================================================================\n");
+      fprintf(f, "            x                      y                      z         ");
+      fprintf(f, "            p     \n");
+
+      // Write data with aligned columns
+      for (size_t i = 0; i < all_x.size(); ++i)
+      {
+        // Write the initial data point
+        fprintf(f, "%20.16e %20.16e %20.16e %20.16e \n", all_x[i], all_y[i],all_z[i],
+                                                                        all_value[i]);
+      }
+
+      fflush(f);
+      fflush(stdout);
+    
     }
-
-    // // Write the data to a file in a human-readable format on rank 0
-    // if (rank == 0)
-    // {
-   
-    //   // std::string fname = "element_centers_" + std::to_string(step) + ".txt";
-    //   std::string fname = "element_centers_scalar.txt";
-    //   FILE *f = NULL;
-    //   f = fopen(fname.c_str(), "w");
-    //   if (!f)
-    //   {
-    //     std::cerr << "Error opening file " << fname << std::endl;
-    //     MPI_Abort(MPI_COMM_WORLD,1);
-    //   }
-
-    //   // Write header only if not restarting
-    //   fprintf(f, "3D Taylor Green Vortex\n");
-    //   fprintf(f, "order = %d\n", ctx.order);
-    //   fprintf(f, "===================================================================");
-    //   fprintf(f, "========================================================================\n");
-    //   fprintf(f, "            x                      y                      z         ");
-    //   fprintf(f, "            p     \n");
-
-    //   // Write data with aligned columns
-    //   for (size_t i = 0; i < all_x.size(); ++i)
-    //   {
-    //     // Write the initial data point
-    //     fprintf(f, "%20.16e %20.16e %20.16e %20.16e \n", all_x[i], all_y[i],all_z[i],
-    //                                                                     all_value[i]);
-    //   }
-
-    //   fflush(f);
-    //   fflush(stdout);
-    // 
-    // }
 }
 
 /*
