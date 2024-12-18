@@ -399,6 +399,33 @@ int main(int argc, char *argv[])
 
    if (!ctx.restart || !restart_files_found)
    {
+
+     /*
+      Mesh orig_mesh("../../data/periodic-cube.mesh");
+      Mesh mesh = Mesh::MakeRefined(orig_mesh, ctx.element_subdivisions,
+                                    BasisType::ClosedUniform);
+      orig_mesh.Clear();
+
+      mesh.EnsureNodes();
+      GridFunction *nodes = mesh.GetNodes();
+      *nodes *= M_PI;
+
+      int nel = mesh.GetNE();
+      if (Mpi::Root())
+      {
+         mfem::out << "Number of elements: " << nel << std::endl;
+      }
+
+      auto *pmesh = new ParMesh(MPI_COMM_WORLD, mesh);
+      mesh.Clear();
+
+      */
+
+      // if (Mpi::Root())
+      // {
+      //    VerifyPeriodicMesh(pmesh);
+      // }
+
       // Initialize as usual
       Mesh *init_mesh;
       Mesh *mesh;
@@ -419,7 +446,10 @@ int main(int argc, char *argv[])
 
       mesh = new Mesh(Mesh::MakePeriodic(*init_mesh, init_mesh->CreatePeriodicVertexMapping(translations)));
 
-      VerifyPeriodicMesh(mesh);
+      if (Mpi::Root())
+      {
+         VerifyPeriodicMesh(mesh);
+      }
 
       // Define a translation function for the mesh nodes
       VectorFunctionCoefficient translate(mesh->Dimension(), [&](const Vector &x_in, Vector &x_out)
@@ -434,6 +464,10 @@ int main(int argc, char *argv[])
 
       mesh->Transform(translate);
 
+      if (Mpi::Root() && (ctx.element_subdivisions > 1))
+      {
+         mfem::out << "Refining the mesh... " << std::endl;
+      }
       // Serial Mesh refinement
       for (int lev = 0; lev < ctx.element_subdivisions; lev++)
       {
@@ -442,7 +476,7 @@ int main(int argc, char *argv[])
 
       // Create the parallel mesh
       pmesh = new ParMesh(MPI_COMM_WORLD, *mesh);
-
+      pmesh->Finalize(true);
       // Parallel Mesh refinement
       for (int lev = 0; lev < ctx.element_subdivisions_parallel; lev++)
       {
@@ -451,6 +485,11 @@ int main(int argc, char *argv[])
 
       delete mesh;
       delete init_mesh;
+
+      if (Mpi::Root())
+      {
+         mfem::out << "Creating the flowsolver. " << std::endl;
+      }
 
       // Create the flow solver
       flowsolver = new NavierSolver(pmesh, ctx.order, ctx.kinvis);
@@ -467,8 +506,13 @@ int main(int argc, char *argv[])
       // Set up the flow solver
       flowsolver->Setup(ctx.dt);
 
+      if (Mpi::Root())
+      {
+         mfem::out << "Done setting up the flowsolver. " << std::endl;
+      }
+
       ComputeElementCenterValues(u_gf, pmesh, step, t);
-      ComputeElementCenterValuesScalar(u_gf, pmesh,step, t);
+      // ComputeElementCenterValuesScalar(u_gf, pmesh,step, t);
    }
 
    int nel = pmesh->GetNE();
@@ -728,137 +772,6 @@ void VerifyPeriodicMesh(mfem::Mesh *mesh)
     std::cout << "Done checking... Periodic in all directions." << std::endl;
 }
 
-/*
-// For debuging: Does not work with serial or parallel refinement!
-void ComputeElementCenterValues(ParGridFunction* sol, ParMesh* pmesh, int step)
-{
-  
-  
-    // Local arrays to store the data
-    std::vector<double> local_x, local_y, local_z;
-    std::vector<double> local_velx, local_vely, local_velz;
-
-    FiniteElementSpace *fes = sol->FESpace();
-
-    // Set the integration point to the center of the reference element
-    IntegrationPoint ip;
-    ip.Set3(0.5, 0.5, 0.5);  // Center of the reference element
-
-    // Loop over local elements
-    int num_elems = pmesh->GetNE();
-    for (int i = 0; i < num_elems; i++)
-    {
-        // Get the element transformation
-        ElementTransformation *Trans = pmesh->GetElementTransformation(i);
-
-        // Evaluate the solution at the element center
-        Trans->SetIntPoint(&ip);
-
-        // Create a vector to hold the velocity components
-        Vector u_val(fes->GetVDim()); // Typically 3 for velocity
-
-        // Get the vector value at the integration point
-        sol->GetVectorValue(*Trans, ip, u_val);
-
-        // Extract the components
-        double u_x = u_val(0);
-        double u_y = u_val(1);
-        double u_z = u_val(2);
-
-        // Transform the reference point to physical coordinates
-        Vector phys_coords(3);
-        Trans->Transform(ip, phys_coords);
-
-        double x_center = phys_coords[0];
-        double y_center = phys_coords[1];
-        double z_center = phys_coords[2];
-
-        // Store the data
-        local_x.push_back(x_center);
-        local_y.push_back(y_center);
-        local_z.push_back(z_center);
-
-        local_velx.push_back(u_x);
-        local_vely.push_back(u_y);
-        local_velz.push_back(u_z);
-    }
-
-    // In serial, we have all data locally, so we can directly write to file.
-    // Create a filename that includes the step number
-    std::ostringstream fname_stream;
-    // fname_stream << "element_centers_step_" << step << ".txt";
-    fname_stream << "element_centers_vec" << ".txt";
-    std::string fname = fname_stream.str();
-
-    FILE *f = fopen(fname.c_str(), "w");
-    if (!f)
-    {
-        std::cerr << "Error opening file " << fname << std::endl;
-        abort();
-    }
-
-    // Write header
-    fprintf(f, "3D Taylor Green Vortex\n");
-    fprintf(f, "order = %d\n", ctx.order);
-    fprintf(f, "step = %d\n", step);
-    fprintf(f, "===================================================================");
-    fprintf(f, "========================================================================\n");
-    fprintf(f, "            x                      y                      z         ");
-    fprintf(f, "            velx                   vely                   velz\n");
-
-    // Write data with aligned columns
-    for (size_t i = 0; i < local_x.size(); ++i)
-    {
-        fprintf(f, "%20.16e %20.16e %20.16e %20.16e %20.16e %20.16e\n",
-                local_x[i], local_y[i], local_z[i],
-                local_velx[i], local_vely[i], local_velz[i]);
-    }
-
-    fclose(f);
-
-
-    std::ofstream ofs("element_centers_vec.txt");
-    if (!ofs.is_open())
-    {
-        std::cerr << "Error: Unable to open element_centers.txt for writing." << std::endl;
-        return;
-    }
-
-    // Write descriptive header
-    ofs << "3D Element Centers\n";
-    ofs << "===============================================================================\n";
-
-    // Write column headers with variable name
-    ofs << std::left << std::setw(20) << " "
-        << std::left << std::setw(20) << "x"
-        << std::left << std::setw(20) << "y"
-        << std::left << std::setw(20) << "z"
-        << std::left << std::setw(20) << ("u_x")
-        << std::left << std::setw(20) << ("u_y")
-        << std::left << std::setw(20) << ("u_z")
-        << "\n";
-
-    // Set formatting options
-    ofs << std::scientific << std::setprecision(16);
-
-    // Write data with aligned columns
-    for (size_t i = 0; i < local_x.size(); ++i)
-    {
-        ofs << std::setw(20) << local_x[i] << " "
-            << std::setw(20) << local_y[i] << " "
-            << std::setw(20) << local_z[i] << " "
-            << std::setw(20) << local_velx[i] << " "
-            << std::setw(20) << local_vely[i] << " "
-            << std::setw(20) << local_velz[i] << "\n";
-    }
-
-    ofs.close();
-    std::cout << "Element center values written to element_centers.txt" << std::endl;
-    
-}
-
-*/
-
 void ComputeElementCenterValues(ParGridFunction* sol, ParMesh* pmesh, int step,double time)
 {
     // MPI setup
@@ -1114,102 +1027,6 @@ void ComputeElementCenterValuesScalar(ParGridFunction* sol, ParMesh* pmesh, int 
     
     }
 }
-
-/*
-void ComputeElementCenterValues(ParGridFunction* sol, ParMesh* pmesh)
-{
-    // Local arrays to store the data
-    std::vector<double> local_x, local_y, local_z, local_value;
-    Vector velx, vely, velz;
-
-    FiniteElementSpace *fes = sol->FESpace();
-
-    // Set the integration point to the center of the reference element
-    IntegrationPoint ip;
-    ip.Set3(0.5, 0.5, 0.5);  // Center of the reference element
-
-    // Loop over local elements
-    for (int i = 0; i < pmesh->GetNE(); i++)
-    {
-        // Get the element transformation
-        ElementTransformation *Trans = pmesh->GetElementTransformation(i);
-
-        // Evaluate the solution at the element center
-        Trans->SetIntPoint(&ip);
-        // double value = sol->GetValue(*Trans, ip);
-        double value = sol->GetValue(*Trans, ip, 1);
-
-        // Transform the reference point to physical coordinates
-        Vector phys_coords(3);
-        Trans->Transform(ip, phys_coords);
-
-        double x_center = phys_coords[0];
-        double y_center = phys_coords[1];
-        double z_center = phys_coords[2];
-
-        // Store the data
-        local_x.push_back(x_center);
-        local_y.push_back(y_center);
-        local_z.push_back(z_center);
-        local_value.push_back(value);
-    }
-
-    // MPI setup
-    MPI_Comm comm = pmesh->GetComm();
-    int rank, size;
-    MPI_Comm_rank(comm, &rank);
-    MPI_Comm_size(comm, &size);
-
-    // Gather all data on rank 0
-    std::vector<double> all_x, all_y, all_z, all_value;
-    int local_num_elements = local_x.size();
-    std::vector<int> all_num_elements(size);
-    std::vector<int> displs(size);
-
-    MPI_Gather(&local_num_elements, 1, MPI_INT, 
-        all_num_elements.data(), 1, MPI_INT, 0, comm);
-
-    if (rank == 0)
-    {
-        int total_elements = 0;
-        displs[0] = 0;
-        for (int i = 0; i < size; ++i)
-        {
-            total_elements += all_num_elements[i];
-            if (i > 0)
-            {
-                displs[i] = displs[i - 1] + all_num_elements[i - 1];
-            }
-        }
-
-        all_x.resize(total_elements);
-        all_y.resize(total_elements);
-        all_z.resize(total_elements);
-        all_value.resize(total_elements);
-    }
-
-    MPI_Gatherv(local_x.data(), local_num_elements, MPI_DOUBLE, 
-        all_x.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-    MPI_Gatherv(local_y.data(), local_num_elements, MPI_DOUBLE, 
-        all_y.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-    MPI_Gatherv(local_z.data(), local_num_elements, MPI_DOUBLE, 
-        all_z.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-    MPI_Gatherv(local_value.data(), local_num_elements, MPI_DOUBLE, 
-        all_value.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-
-    // Write the data to a file in a human-readable format on rank 0
-    if (rank == 0)
-    {
-        std::ofstream ofs("element_centers.txt");
-        for (size_t i = 0; i < all_x.size(); ++i)
-        {
-            ofs << all_x[i] << " " << all_y[i] << " " << all_z[i] << " " << all_value[i] << std::endl;
-        }
-        ofs.close();
-    }
-    
-}
-*/
 
 void SaveCheckpoint(ParMesh *pmesh, ParGridFunction *u_gf, ParGridFunction *p_gf,
                     double t, int step, int myid)

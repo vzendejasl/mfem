@@ -416,7 +416,6 @@ int main(int argc, char *argv[])
    }
    else
    {
-     std::cout << "Hkljkljkljlkj" << std::endl;
       std::string fname(MakeParFilename("tgv-checkpoint.", myid));
       std::ifstream ifs(fname);
       MFEM_VERIFY(ifs.good(), "Checkpoint file " << fname << " not found.");

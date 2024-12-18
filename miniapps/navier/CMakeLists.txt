@@ -52,8 +52,8 @@ if (MFEM_USE_MPI)
     ${NAVIER_COMMON_FILES}
     LIBRARIES mfem)
 
-  add_mfem_miniapp(navier_tgv_victor_restart_serial
-    MAIN navier_tgv_victor_restart_serial.cpp
+  add_mfem_miniapp(periodic_mesh_test
+    MAIN periodic_mesh_test.cpp
     ${NAVIER_COMMON_FILES}
     LIBRARIES mfem)
 
