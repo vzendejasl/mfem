@@ -13,13 +13,20 @@
 // Unsteady flow of a decaying vortex is computed and compared against a known,
 // analytical solution.
 //
-// TODO: Incorporate restart. We can read a mesh from a restart file, but we
-// need to save all the field variales as well and load those too. 
+
+// TODO: 
+// 1. Add option to set cycle for saving checkpoint files and post process
+// files seperatelty
+// 2. Add option to read in desired Reynolds number
+// 3. Store Element data at center in binary for effiecnecy?
+// 4. Compute fft of data directly?
+// 5. Implement the correct CFL criteria based on polynomial order
 
 #include "navier_solver.hpp"
 #include <fstream>
 #include <algorithm>
 #include <iostream>
+#include <string>
 
 using namespace mfem;
 using namespace navier;
@@ -29,7 +36,8 @@ struct s_NavierContext
    int element_subdivisions = 0;
    int element_subdivisions_parallel = 0;
    int order = 2;
-   real_t kinvis = 1.0 / 1600.0;
+   real_t reynum = 1600;
+   real_t kinvis = 1.0 / reynum;
    real_t t_final = 10 * 1e-3;
    real_t dt = 1e-3;
    bool pa = true;
@@ -41,6 +49,10 @@ struct s_NavierContext
    bool paraview = false;
    bool binary = false;
    bool restart = false;
+   int checkpoint_cycle = 100;
+   int element_center_cycle = 100;
+   int data_dump_cycle = 100;
+
 } ctx;
 
 void vel_tgv(const Vector &x, real_t t, Vector &u)
@@ -279,7 +291,7 @@ bool IndicesAreConnected(const Table &t, int i, int j)
 
 void VerifyPeriodicMesh(Mesh *mesh);
 
-void ComputeElementCenterValues(ParGridFunction *sol, ParMesh *pmesh, int step, double time);
+void ComputeElementCenterValues(ParGridFunction *sol, ParMesh *pmesh, int step, double time, const std::string &suffix);
 void ComputeElementCenterValuesScalar(ParGridFunction *sol, ParMesh *pmesh,int step, double time);
 
 void SaveCheckpoint(ParMesh *pmesh, ParGridFunction *u_gf, ParGridFunction *p_gf,
@@ -349,6 +361,10 @@ int main(int argc, char *argv[])
       "-no-cr",
       "--no-checkresult",
       "Enable or disable checking of the result. Returns -1 on failure.");
+   args.AddOption(&ctx.reynum, "-Re", "--Renolds-number", "Reynolds Number.");
+   args.AddOption(&ctx.checkpoint_cycle, "-cpc", "--Checkpoint-Cycle", "Checkpoint Cycle.");
+   args.AddOption(&ctx.element_center_cycle, "-ecc", "--Element-Center-Cycle", "Element Center Cycle.");
+   args.AddOption(&ctx.data_dump_cycle, "-ddc", "--Data-Dump-Cycle", "Data Dump Cycle.");
    args.Parse();
    if (!args.Good())
    {
@@ -400,33 +416,7 @@ int main(int argc, char *argv[])
    if (!ctx.restart || !restart_files_found)
    {
 
-     /*
-      Mesh orig_mesh("../../data/periodic-cube.mesh");
-      Mesh mesh = Mesh::MakeRefined(orig_mesh, ctx.element_subdivisions,
-                                    BasisType::ClosedUniform);
-      orig_mesh.Clear();
-
-      mesh.EnsureNodes();
-      GridFunction *nodes = mesh.GetNodes();
-      *nodes *= M_PI;
-
-      int nel = mesh.GetNE();
-      if (Mpi::Root())
-      {
-         mfem::out << "Number of elements: " << nel << std::endl;
-      }
-
-      auto *pmesh = new ParMesh(MPI_COMM_WORLD, mesh);
-      mesh.Clear();
-
-      */
-
-      // if (Mpi::Root())
-      // {
-      //    VerifyPeriodicMesh(pmesh);
-      // }
-
-      // Initialize as usual
+      // Initialize as mesh
       Mesh *init_mesh;
       Mesh *mesh;
 
@@ -511,11 +501,11 @@ int main(int argc, char *argv[])
          mfem::out << "Done setting up the flowsolver. " << std::endl;
       }
 
-      ComputeElementCenterValues(u_gf, pmesh, step, t);
+      ComputeElementCenterValues(u_gf, pmesh, step, t,"Velocity");
       // ComputeElementCenterValuesScalar(u_gf, pmesh,step, t);
    }
 
-   int nel = pmesh->GetNE();
+   int nel = pmesh->GetGlobalNE();
    if (Mpi::Root())
    {
       mfem::out << "Number of elements: " << nel << std::endl;
@@ -535,7 +525,13 @@ int main(int argc, char *argv[])
    ParaViewDataCollection *pvdc = NULL;
    if (ctx.paraview)
    {
-      pvdc = new ParaViewDataCollection("DatOutputParaivew/tgv_output", pmesh);
+      std::string paraview_dir = std::string("ParaviewData_") 
+                                               + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
+                                               + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                               + "Order" + std::to_string(ctx.order)
+                                               + "/tgv_output_paraview";
+
+      pvdc = new ParaViewDataCollection(paraview_dir, pmesh);
       pvdc->SetDataFormat(VTKFormat::BINARY32);
       pvdc->SetHighOrderOutput(true);
       pvdc->SetLevelsOfDetail(ctx.order);
@@ -562,7 +558,12 @@ int main(int argc, char *argv[])
       else
       {
          int precision = 8;
-         dc = new VisItDataCollection("DataOutputVisit/tgv_output_visit", pmesh);
+         std::string visit_dir = std::string("VisitData_") 
+                                                  + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
+                                                  + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                                  + "P" + std::to_string(ctx.order)
+                                                  + "/tgv_output_visit";
+         dc = new VisItDataCollection(visit_dir,pmesh);
          dc->SetPrecision(precision);
       }
       dc->SetCycle(step + initial_step);
@@ -576,21 +577,31 @@ int main(int argc, char *argv[])
 
    real_t u_inf_loc = u_gf->Normlinf();
    real_t p_inf_loc = p_gf->Normlinf();
+
    real_t u_inf = GlobalLpNorm(infinity(), u_inf_loc, MPI_COMM_WORLD);
    real_t p_inf = GlobalLpNorm(infinity(), p_inf_loc, MPI_COMM_WORLD);
+
    real_t ke = kin_energy.ComputeKineticEnergy(*u_gf);
    real_t enstrophy = kin_energy.ComputeEnstrophy(w_gf);
 
-   std::string fname = "tgv_out_p_" + std::to_string(ctx.order) + ".txt";
+   // Compute dx and the cfl
+   double dx = (2.0*M_PI)/ (ctx.num_pts - 1.0);
+   double cfl;
+   cfl = (u_inf * ctx.dt)/dx;
+
+   std::string fname = std::string("tgv_out_") 
+                                            + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
+                                            + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                            + "P" + std::to_string(ctx.order)
+                                            + ".txt";
    FILE *f = NULL;
 
    if (Mpi::Root())
    {
       int nel1d = static_cast<int>(std::round(pow(nel, 1.0 / 3.0)));
       int ngridpts = p_gf->ParFESpace()->GlobalVSize();
-      printf("%11s %11s %11s %11s %11s %11s\n", "Time", "dt", "u_inf", "p_inf", "ke", "enstrophy");
-      printf("%.5E %.5E %.5E %.5E %.5E %.5E\n", t, ctx.dt, u_inf, p_inf, ke, enstrophy);
-
+      printf("%11s %11s %11s %11s %11s %11s %11s\n", "Time", "dt", "u_inf", "p_inf", "ke", "enstrophy", "CFL");
+      printf("%.5E %.5E %.5E %.5E %.5E %.5E %.5E\n", t, ctx.dt, u_inf, p_inf, ke, enstrophy, cfl);
 
       // Determine the file mode based on whether we're restarting
 
@@ -613,6 +624,7 @@ int main(int argc, char *argv[])
       {
           // Write header only if not restarting
           fprintf(f, "3D Taylor Green Vortex\n");
+          fprintf(f, "Reynolds Number = %d\n", ctx.reynum);
           fprintf(f, "order = %d\n", ctx.order);
           fprintf(f, "grid = %d x %d x %d\n", nel1d, nel1d, nel1d);
           fprintf(f, "dofs per component = %d\n", ngridpts);
@@ -643,12 +655,11 @@ int main(int argc, char *argv[])
 
       flowsolver->Step(t, dt, step);
 
-      if ((step - initial_step) % 100 == 0 || last_step)
+      if ((step - initial_step) % ctx.data_dump_cycle == 0 || last_step)
       {
          // If restarting, skip the first saved checkpoint
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
-            flowsolver->ComputeCurl3D(*u_gf, w_gf);
             ComputeQCriterion(*u_gf, q_gf);
 
             if (ctx.paraview)
@@ -673,18 +684,37 @@ int main(int argc, char *argv[])
                }
             }
 
-            ComputeElementCenterValues(u_gf, pmesh, step + initial_step, t);
-            ComputeElementCenterValuesScalar(p_gf, pmesh, step + initial_step, t);
+         }
+      }
+
+      if ((step - initial_step) % ctx.element_center_cycle == 0 || last_step)
+      {
+         // If restarting, skip the first saved checkpoint
+         if (!(ctx.restart && step == 0 && restart_files_found))
+         {
+            flowsolver->ComputeCurl3D(*u_gf, w_gf);
+
+            ComputeElementCenterValues( u_gf, pmesh, step + initial_step, t, "Velocity");
+            ComputeElementCenterValues(&w_gf, pmesh, step + initial_step, t, "Vorticity");
+
             if (Mpi::Root())
             {
                std::cout << "\nOutput element center file saved at cycle " << step + initial_step << "." << std::endl;
             }
 
+         }
+      }
+
+      if ((step - initial_step) % ctx.checkpoint_cycle == 0 || last_step)
+      {
+         // If restarting, skip the first saved checkpoint
+         if (!(ctx.restart && step == 0 && restart_files_found))
+         {
             // Save the checkpoint files
-            SaveCheckpoint(pmesh, u_gf, p_gf, t, step, myid);
+            SaveCheckpoint(pmesh, u_gf, p_gf, t, step + initial_step, myid);
             if (Mpi::Root())
             {
-               std::cout << "\nCheckpoint saved." << std::endl;
+               std::cout << "\nCheckpoint file saved at cycle " << step + initial_step << "." << std::endl;
             }
          }
       }
@@ -701,10 +731,12 @@ int main(int argc, char *argv[])
 
       if (Mpi::Root())
       {
+         // Recompte the cfl
+         cfl = (u_inf * ctx.dt)/dx;
          // If restarting, skip the first saved checkpoint
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
-           printf("%.5E %.5E %.5E %.5E %.5E %.5E\n", t, dt, u_inf, p_inf, ke, enstrophy);
+           printf("%.5E %.5E %.5E %.5E %.5E %.5E %.5E\n", t, ctx.dt, u_inf, p_inf, ke, enstrophy, cfl);
            fprintf(f, "%20.16e     %20.16e     %20.16e\n", t, ke, enstrophy);
            fflush(f);
            fflush(stdout);
@@ -772,7 +804,11 @@ void VerifyPeriodicMesh(mfem::Mesh *mesh)
     std::cout << "Done checking... Periodic in all directions." << std::endl;
 }
 
-void ComputeElementCenterValues(ParGridFunction* sol, ParMesh* pmesh, int step,double time)
+void ComputeElementCenterValues(ParGridFunction* sol,
+                                ParMesh* pmesh,
+                                int step,
+                                double time,
+                                const std::string &suffix)
 {
     // MPI setup
     MPI_Comm comm = pmesh->GetComm();
@@ -780,37 +816,64 @@ void ComputeElementCenterValues(ParGridFunction* sol, ParMesh* pmesh, int step,d
     MPI_Comm_rank(comm, &rank);
     MPI_Comm_size(comm, &size);
 
-    // Local arrays to store the data
-    std::vector<double> local_x, local_y, local_z, local_value;
+    // Construct the main directory name with suffix
+    std::string main_dir = std::string("ElementCenters") + suffix
+                                             + "_Re" + std::to_string(static_cast<int>(ctx.reynum)) 
+                                             + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                             + "P" + std::to_string(ctx.order);
+
+    // Create main directory for element centers with suffix
+    {
+        std::string command = "mkdir -p " + main_dir;
+        int ret = system(command.c_str());
+        if (ret != 0 && rank == 0)
+        {
+            std::cerr << "Error creating " << main_dir << " directory!" << std::endl;
+        }
+    }
+
+    // Create subdirectory for this cycle step
+    std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
+    {
+        std::string command = "mkdir -p " + cycle_dir;
+        int ret = system(command.c_str());
+        if (ret != 0 && rank == 0)
+        {
+            std::cerr << "Error creating " << cycle_dir << " directory!" << std::endl;
+        }
+    }
+
+    // Local arrays to store data
+    std::vector<double> local_x, local_y, local_z;
     std::vector<double> local_velx, local_vely, local_velz;
 
     FiniteElementSpace *fes = sol->FESpace();
 
     // Set the integration point to the center of the reference element
     IntegrationPoint ip;
-    ip.Set3(0.5, 0.5, 0.5);  // Center of the reference element
+    ip.Set3(0.5, 0.5, 0.5); // Center of element
 
     // Loop over local elements
     for (int i = 0; i < pmesh->GetNE(); i++)
     {
-        // Get the element transformation
+        // Get element transformation
         ElementTransformation *Trans = pmesh->GetElementTransformation(i);
 
-        // Evaluate the solution at the element center
+        // Evaluate at center
         Trans->SetIntPoint(&ip);
 
-        // Create a vector to hold the velocity components
-        Vector u_val(sol->FESpace()->GetVDim()); // GetVDim() returns the vector dimension (should be 3)
+        // Get vector dimension (should be 3 for velocity)
+        int vdim = fes->GetVDim();
+        Vector u_val(vdim);
         
-        // Get the vector value at the integration point
+        // Get vector value at ip
         sol->GetVectorValue(*Trans, ip, u_val);
-        
-        // Extract the components
+
         double u_x = u_val(0);
         double u_y = u_val(1);
         double u_z = u_val(2);
         
-        // Transform the reference point to physical coordinates
+        // Physical coordinates of element center
         Vector phys_coords(3);
         Trans->Transform(ip, phys_coords);
 
@@ -818,25 +881,25 @@ void ComputeElementCenterValues(ParGridFunction* sol, ParMesh* pmesh, int step,d
         double y_center = phys_coords[1];
         double z_center = phys_coords[2];
 
-        // Store the data
+        // Store data locally
         local_x.push_back(x_center);
         local_y.push_back(y_center);
         local_z.push_back(z_center);
-
         local_velx.push_back(u_x);
         local_vely.push_back(u_y);
         local_velz.push_back(u_z);
     }
 
     // Gather all data on rank 0
-    std::vector<double> all_x, all_y, all_z;
-    std::vector<double> all_velx, all_vely, all_velz;
-    int local_num_elements = local_x.size();
+    int local_num_elements = (int)local_x.size();
     std::vector<int> all_num_elements(size);
     std::vector<int> displs(size);
 
     MPI_Gather(&local_num_elements, 1, MPI_INT, 
-        all_num_elements.data(), 1, MPI_INT, 0, comm);
+               all_num_elements.data(), 1, MPI_INT, 0, comm);
+
+    std::vector<double> all_x, all_y, all_z;
+    std::vector<double> all_velx, all_vely, all_velz;
 
     if (rank == 0)
     {
@@ -860,56 +923,52 @@ void ComputeElementCenterValues(ParGridFunction* sol, ParMesh* pmesh, int step,d
     }
 
     MPI_Gatherv(local_x.data(), local_num_elements, MPI_DOUBLE, 
-        all_x.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+                all_x.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
     MPI_Gatherv(local_y.data(), local_num_elements, MPI_DOUBLE, 
-        all_y.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+                all_y.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
     MPI_Gatherv(local_z.data(), local_num_elements, MPI_DOUBLE, 
-        all_z.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+                all_z.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+    MPI_Gatherv(local_velx.data(), local_num_elements, MPI_DOUBLE,
+                all_velx.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+    MPI_Gatherv(local_vely.data(), local_num_elements, MPI_DOUBLE,
+                all_vely.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+    MPI_Gatherv(local_velz.data(), local_num_elements, MPI_DOUBLE,
+                all_velz.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
 
-    MPI_Gatherv(local_velx.data(), local_num_elements, MPI_DOUBLE, 
-        all_velx.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-    MPI_Gatherv(local_vely.data(), local_num_elements, MPI_DOUBLE, 
-        all_vely.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-    MPI_Gatherv(local_velz.data(), local_num_elements, MPI_DOUBLE, 
-        all_velz.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-
-    // Write the data to a file in a human-readable format on rank 0
     if (rank == 0)
     {
-   
-      std::string fname = "element_centers_" + std::to_string(step) + ".txt";
-      FILE *f = NULL;
-      f = fopen(fname.c_str(), "w");
-      if (!f)
-      {
-        std::cerr << "Error opening file " << fname << std::endl;
-        MPI_Abort(MPI_COMM_WORLD,1);
-      }
+        // Construct the filename inside the cycle directory
+        std::string fname = cycle_dir + "/element_centers_" + std::to_string(step) + ".txt";
+        FILE *f = fopen(fname.c_str(), "w");
+        if (!f)
+        {
+            std::cerr << "Error opening file " << fname << std::endl;
+            MPI_Abort(MPI_COMM_WORLD,1);
+        }
 
-      // Write header only if not restarting
-      fprintf(f, "3D Taylor Green Vortex\n");
-      fprintf(f, "Order = %d\n", ctx.order);
-      fprintf(f, "Step = %d\n", step);
-      fprintf(f, "Time = %d\n", time);
-      fprintf(f, "===================================================================");
-      fprintf(f, "========================================================================\n");
-      fprintf(f, "            x                      y                      z         ");
-      fprintf(f, "            velx                   vely                   velz\n");
+        // Write header
+        fprintf(f, "3D Taylor Green Vortex\n");
+        fprintf(f, "Order = %d\n", ctx.order);
+        fprintf(f, "Step = %d\n", step);
+        fprintf(f, "Time = %e\n", time);
+        fprintf(f, "===================================================================");
+        fprintf(f, "==========================================================================\n");
+        fprintf(f, "            x                      y                      z         ");
+        fprintf(f, "            vecx                   vecy                   velc\n");
 
-      // Write data with aligned columns
-      for (int i = 0; i < all_x.size(); ++i)
-      {
-        // Write the initial data point
-        fprintf(f, "%20.16e %20.16e %20.16e %20.16e %20.16e %20.16e\n", all_x[i], all_y[i],all_z[i],
-                                                                        all_velx[i], all_vely[i], all_velz[i]);
-      }
+        // Write data
+        for (size_t i = 0; i < all_x.size(); ++i)
+        {
+            fprintf(f, "%20.16e %20.16e %20.16e %20.16e %20.16e %20.16e\n",
+                    all_x[i], all_y[i], all_z[i],
+                    all_velx[i], all_vely[i], all_velz[i]);
+        }
 
-      fflush(f);
-      fflush(stdout);
-
+        fflush(f);
+        fclose(f);
     }
-    
 }
+
 
 void ComputeElementCenterValuesScalar(ParGridFunction* sol, ParMesh* pmesh, int step, double time)
 {
@@ -1028,48 +1087,63 @@ void ComputeElementCenterValuesScalar(ParGridFunction* sol, ParMesh* pmesh, int 
     }
 }
 
+
 void SaveCheckpoint(ParMesh *pmesh, ParGridFunction *u_gf, ParGridFunction *p_gf,
                     double t, int step, int myid)
 {
-    // Helper function to print ParGridFunction properties
-    auto PrintGridFunctionProperties = [](const ParGridFunction &gf, const std::string &name, int myid)
+    // Construct the main directory name with suffix
+    std::string main_dir = std::string("CheckPoint_")
+                                             + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
+                                             + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                             + "P" + std::to_string(ctx.order);
+    // Create main checkpoint directory
     {
-        const ParFiniteElementSpace *fes = gf.ParFESpace();
-        std::cout << "Processor " << myid << " - Grid Function: " << name << std::endl;
-        std::cout << "  VDim: " << fes->GetVDim() << std::endl;
-        std::cout << "  NDofs: " << fes->GetNDofs() << std::endl;
-        std::cout << "  Global VSize: " << fes->GlobalVSize() << std::endl;
-        std::cout << "  Local VSize: " << gf.Size() << std::endl;
-        std::cout << "  Norm L2: " << gf.Norml2() << std::endl;
-        std::cout << "  Mesh Elements: " << fes->GetMesh()->GetNE() << std::endl;
-        std::cout << "  ParMesh Group Size: " << fes->GetParMesh()->GetNGroups() << std::endl;
-    };
+        std::string command = "mkdir -p " + main_dir;
+        int ret = system(command.c_str());
+        if (ret != 0 && myid == 0)
+        {
+            std::cerr << "Error creating tgv_check_point directory!" << std::endl;
+        }
+    }
 
-    // Initialize error flag
+    // Create subdirectory for this cycle step
+    std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
+    {
+        std::string command = "mkdir -p " + cycle_dir;
+        int ret = system(command.c_str());
+        if (ret != 0 && myid == 0)
+        {
+            std::cerr << "Error creating " << cycle_dir << " directory!" << std::endl;
+        }
+    }
+
+    // Adjust filenames to be in the cycle directory
+    std::string mesh_fname = cycle_dir + "/tgv-checkpoint.mesh." + std::to_string(myid);
+    std::string u_fname    = cycle_dir + "/tgv-checkpoint.u." + std::to_string(myid);
+    std::string p_fname    = cycle_dir + "/tgv-checkpoint.p." + std::to_string(myid);
+
     bool error_flag = false;
 
     // Save the mesh
-    std::string mesh_fname = MakeParFilename("tgv-checkpoint.mesh.", myid);
-
-    // Open an output file stream for the mesh
-    std::ofstream mesh_ofs(mesh_fname.c_str());
-    mesh_ofs.precision(16);
-
-    if (!mesh_ofs.good())
     {
-        error_flag = true;
-    }
-    else
-    {
-        // Use ParPrint to write the mesh to the file
-        pmesh->ParPrint(mesh_ofs);
-        mesh_ofs.close();
+        std::ofstream mesh_ofs(mesh_fname.c_str());
+        mesh_ofs.precision(16);
+
+        if (!mesh_ofs.good())
+        {
+            error_flag = true;
+        }
+        else
+        {
+            pmesh->ParPrint(mesh_ofs);
+            mesh_ofs.close();
+        }
     }
 
     // Save the time and step number (only on root processor)
     if (myid == 0)
     {
-        std::ofstream t_ofs("tgv-checkpoint.time");
+        std::ofstream t_ofs((cycle_dir + "/tgv-checkpoint.time").c_str());
         t_ofs.precision(16);
         if (!t_ofs.good())
         {
@@ -1083,38 +1157,34 @@ void SaveCheckpoint(ParMesh *pmesh, ParGridFunction *u_gf, ParGridFunction *p_gf
         }
     }
 
-    // Print properties of u_gf and p_gf before saving
-    PrintGridFunctionProperties(*u_gf, "u_gf", myid);
-    PrintGridFunctionProperties(*p_gf, "p_gf", myid);
-
     // Save the velocity field
-    std::string u_fname = MakeParFilename("tgv-checkpoint.u.", myid);
-    std::ofstream u_ofs(u_fname.c_str());
-    u_ofs.precision(16);
-
-    if (!u_ofs.good())
     {
-        error_flag = true;
-    }
-    else
-    {
-        u_gf->Save(u_ofs);
-        u_ofs.close();
+        std::ofstream u_ofs(u_fname.c_str());
+        u_ofs.precision(16);
+        if (!u_ofs.good())
+        {
+            error_flag = true;
+        }
+        else
+        {
+            u_gf->Save(u_ofs);
+            u_ofs.close();
+        }
     }
 
     // Save the pressure field
-    std::string p_fname = MakeParFilename("tgv-checkpoint.p.", myid);
-    std::ofstream p_ofs(p_fname.c_str());
-    p_ofs.precision(16);
-
-    if (!p_ofs.good())
     {
-        error_flag = true;
-    }
-    else
-    {
-        p_gf->Save(p_ofs);
-        p_ofs.close();
+        std::ofstream p_ofs(p_fname.c_str());
+        p_ofs.precision(16);
+        if (!p_ofs.good())
+        {
+            error_flag = true;
+        }
+        else
+        {
+            p_gf->Save(p_ofs);
+            p_ofs.close();
+        }
     }
 
     // Use MPI to check if any process has encountered an error
@@ -1131,232 +1201,203 @@ void SaveCheckpoint(ParMesh *pmesh, ParGridFunction *u_gf, ParGridFunction *p_gf
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
-    // Compute norms before reloading
+    // Compute norms before reloading (original fields)
     double u_norm = u_gf->Norml2();
     double p_norm = p_gf->Norml2();
 
     if (myid == 0)
     {
-        std::cout << "Saving checkpoint: t = " << t << ", step = " << step << std::endl;
-        std::cout << "u_gf Norml2 = " << u_norm << ", p_gf Norml2 = " << p_norm << std::endl;
+        std::cout << "Checkpoint saved at step " << step << ", time " << t << std::endl;
+        std::cout << "Original fields: u_gf Norml2 = " << u_norm << ", p_gf Norml2 = " << p_norm << std::endl;
     }
 
     // Reload the data and compute norms
-    // Open input file streams for the velocity and pressure fields
-    std::ifstream u_ifs(u_fname.c_str());
-    std::ifstream p_ifs(p_fname.c_str());
-
-    // Check for errors during file opening
-    error_flag = false;
-    if (!u_ifs.good())
     {
-        error_flag = true;
-    }
-    if (!p_ifs.good())
-    {
-        error_flag = true;
-    }
+        std::ifstream u_ifs(u_fname.c_str());
+        std::ifstream p_ifs(p_fname.c_str());
 
-    // Use MPI to check if any process has encountered an error
-    local_error_flag = error_flag ? 1 : 0;
-    MPI_Allreduce(&local_error_flag, &global_error_flag, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
+        // Check for errors during file opening
+        bool reload_error = false;
+        if (!u_ifs.good()) { reload_error = true; }
+        if (!p_ifs.good()) { reload_error = true; }
 
-    if (global_error_flag)
-    {
+        int reload_error_flag = reload_error ? 1 : 0;
+        int global_reload_error_flag;
+        MPI_Allreduce(&reload_error_flag, &global_reload_error_flag, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
+
+        if (global_reload_error_flag)
+        {
+            if (myid == 0)
+            {
+                std::cerr << "Error opening checkpoint files for reloading. Aborting." << std::endl;
+            }
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+
+        ParGridFunction temp_u_gf(pmesh, u_ifs);
+        ParGridFunction temp_p_gf(pmesh, p_ifs);
+
+        u_ifs.close();
+        p_ifs.close();
+
+        double temp_u_norm = temp_u_gf.Norml2();
+        double temp_p_norm = temp_p_gf.Norml2();
+
         if (myid == 0)
         {
-            std::cerr << "Error opening checkpoint files for reloading. Aborting." << std::endl;
-        }
-        MPI_Abort(MPI_COMM_WORLD, 1);
-    }
-
-    // Create temporary grid functions by reading from the files
-    ParGridFunction temp_u_gf(pmesh, u_ifs);
-    ParGridFunction temp_p_gf(pmesh, p_ifs);
-
-    u_ifs.close();
-    p_ifs.close();
-
-    // Print properties of temp_u_gf and temp_p_gf after loading
-    PrintGridFunctionProperties(temp_u_gf, "temp_u_gf", myid);
-    PrintGridFunctionProperties(temp_p_gf, "temp_p_gf", myid);
-
-    // Compute norms after reloading
-    double temp_u_norm = temp_u_gf.Norml2();
-    double temp_p_norm = temp_p_gf.Norml2();
-
-    // Compare norms to check if they match
-    double u_diff = std::abs(u_norm - temp_u_norm);
-    double p_diff = std::abs(p_norm - temp_p_norm);
-    const double tol = 1e-8; // Adjusted tolerance for floating-point comparison
-
-    if (myid == 0)
-    {
-        std::cout << "After reloading: u_gf Norml2 = " << temp_u_norm
-                  << ", p_gf Norml2 = " << temp_p_norm << std::endl;
-
-        if (u_diff < tol && p_diff < tol)
-        {
-            std::cout << "Checkpoint verification successful: norms match." << std::endl;
-        }
-        else
-        {
-            std::cerr << "Checkpoint verification failed: norms do not match!" << std::endl;
-            std::cerr << "Difference in u_gf Norml2: " << u_diff << std::endl;
-            std::cerr << "Difference in p_gf Norml2: " << p_diff << std::endl;
+            std::cout << "After reloading in SaveCheckpoint: u_gf Norml2 = " << temp_u_norm
+                      << ", p_gf Norml2 = " << temp_p_norm << std::endl;
         }
     }
 
-    // Ensure all processes reach this point before proceeding
     MPI_Barrier(MPI_COMM_WORLD);
+}
+
+// Helper function to find the last checkpoint step if none is provided
+// This scans "tgv_check_point/cycle_XXXX" directories and finds the maximum step number.
+int FindLastCheckpointStep()
+{
+    // We'll rely on a shell command to list directories; adapt as needed.
+    // "ls tgv_check_point | grep cycle_" will list cycle directories.
+    // We'll parse the largest number from "cycle_<step>".
+
+    // Construct the main directory name with suffix
+    std::string main_dir = std::string("CheckPoint_")
+                                             + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
+                                             + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                             + "P" + std::to_string(ctx.order);
+
+    // Using popen to run shell command and read output
+    std::string command = "ls " + main_dir + " | grep cycle_ | sed 's/cycle_//' | sort -n | tail -1";
+    FILE *pipe = popen(command.c_str(),"r");
+    if (!pipe) return -1;
+    char buffer[128];
+    std::string result = "";
+    while (fgets(buffer, 128, pipe) != NULL)
+    {
+        result += buffer;
+    }
+    pclose(pipe);
+
+    // Trim whitespace
+    result.erase(std::remove_if(result.begin(), result.end(), ::isspace), result.end());
+    if (result.empty())
+    {
+        return -1; // no checkpoints
+    }
+
+    return std::stoi(result);
 }
 
 bool LoadCheckpoint(ParMesh *&pmesh, ParGridFunction *&u_gf, ParGridFunction *&p_gf,
                     NavierSolver *&flowsolver, double &t, int &step, int myid, const s_NavierContext &ctx)
 {
-    // Helper function to print ParGridFunction properties
-    auto PrintGridFunctionProperties = [](const ParGridFunction &gf, const std::string &name, int myid)
+    // If no step given, find last checkpoint step
+    int provided_step = -1; // Assume no step provided
+    if (provided_step < 0)
     {
-        const ParFiniteElementSpace *fes = gf.ParFESpace();
-        std::cout << "Processor " << myid << " - Grid Function: " << name << std::endl;
-        std::cout << "  VDim: " << fes->GetVDim() << std::endl;
-        std::cout << "  NDofs: " << fes->GetNDofs() << std::endl;
-        std::cout << "  Global VSize: " << fes->GlobalVSize() << std::endl;
-        std::cout << "  Local VSize: " << gf.Size() << std::endl;
-        std::cout << "  Norm L2: " << gf.Norml2() << std::endl;
-        std::cout << "  Mesh Elements: " << fes->GetMesh()->GetNE() << std::endl;
-        std::cout << "  ParMesh Group Size: " << fes->GetParMesh()->GetNGroups() << std::endl;
-    };
-
-    // Check if all checkpoint files exist
-    bool all_files_exist = true;
-
-    // Declare filenames at the beginning
-    std::string mesh_fname = MakeParFilename("tgv-checkpoint.mesh.", myid);
-    std::string u_fname = MakeParFilename("tgv-checkpoint.u.", myid);
-    std::string p_fname = MakeParFilename("tgv-checkpoint.p.", myid);
-
-    // Check mesh file
-    std::ifstream mesh_ifs(mesh_fname);
-    if (!mesh_ifs.good())
-    {
-        all_files_exist = false;
+        provided_step = FindLastCheckpointStep();
+        if (provided_step < 0)
+        {
+            // No checkpoints found
+            return false;
+        }
     }
-    mesh_ifs.close();
 
-    // Check time file (only on root processor)
+    // Construct directory for given step
+    std::string cycle_dir = "tgv_check_point/cycle_" + std::to_string(provided_step);
+
+    std::string mesh_fname = cycle_dir + "/tgv-checkpoint.mesh." + std::to_string(myid);
+    std::string u_fname = cycle_dir + "/tgv-checkpoint.u." + std::to_string(myid);
+    std::string p_fname = cycle_dir + "/tgv-checkpoint.p." + std::to_string(myid);
+
+    // Check files
+    {
+        std::ifstream mesh_ifs(mesh_fname); 
+        if (!mesh_ifs.good()) return false; 
+        mesh_ifs.close();
+    }
+
     if (myid == 0)
     {
-        std::ifstream t_ifs("tgv-checkpoint.time");
-        if (!t_ifs.good())
-        {
-            all_files_exist = false;
-        }
+        std::ifstream t_ifs((cycle_dir + "/tgv-checkpoint.time").c_str());
+        if (!t_ifs.good()) return false;
         t_ifs.close();
     }
 
-    // Check velocity field file
-    std::ifstream u_ifs(u_fname);
-    if (!u_ifs.good())
     {
-        all_files_exist = false;
+        std::ifstream u_ifs(u_fname);
+        if (!u_ifs.good()) return false;
+        u_ifs.close();
     }
-    u_ifs.close();
 
-    // Check pressure field file
-    std::ifstream p_ifs(p_fname);
-    if (!p_ifs.good())
     {
-        all_files_exist = false;
+        std::ifstream p_ifs(p_fname);
+        if (!p_ifs.good()) return false;
+        p_ifs.close();
     }
-    p_ifs.close();
 
-    // Use MPI to ensure all processors agree on the existence of files
-    int all_files_exist_int = all_files_exist ? 1 : 0;
+    int all_files_exist_int = 1;
     int global_all_files_exist_int;
     MPI_Allreduce(&all_files_exist_int, &global_all_files_exist_int, 1, MPI_INT, MPI_LAND, MPI_COMM_WORLD);
-
     if (global_all_files_exist_int == 0)
     {
-        // Files not found
         return false;
     }
 
-    // Now proceed to load the files
-    // Read the mesh
-    std::ifstream mesh_ifs2(mesh_fname);
-    pmesh = new ParMesh(MPI_COMM_WORLD, mesh_ifs2);
-    mesh_ifs2.close();
+    // Load the mesh
+    {
+        std::ifstream mesh_ifs2(mesh_fname);
+        pmesh = new ParMesh(MPI_COMM_WORLD, mesh_ifs2);
+        mesh_ifs2.close();
+    }
 
     // Read the time and step number (only on root processor)
     if (myid == 0)
     {
-        std::ifstream t_ifs2("tgv-checkpoint.time");
+        std::ifstream t_ifs2((cycle_dir + "/tgv-checkpoint.time").c_str());
         t_ifs2 >> t;
         t_ifs2 >> step;
         t_ifs2.close();
         std::cout << "Loaded time t = " << t << ", step = " << step << std::endl;
     }
 
-    // Broadcast the time and step number to all processors
     MPI_Bcast(&t, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     MPI_Bcast(&step, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-    // Create the flow solver with the loaded mesh
     flowsolver = new NavierSolver(pmesh, ctx.order, ctx.kinvis);
     flowsolver->EnablePA(ctx.pa);
     flowsolver->EnableNI(ctx.ni);
 
-    // Get the existing grid functions from the flowsolver
     u_gf = flowsolver->GetCurrentVelocity();
     p_gf = flowsolver->GetCurrentPressure();
 
-    // Load the velocity field into a temporary grid function
-    std::ifstream u_ifs2(u_fname);
-    if (!u_ifs2.good())
     {
-        if (myid == 0)
-        {
-            std::cerr << "Error opening velocity checkpoint file " << u_fname << std::endl;
-        }
-        return false;
+        std::ifstream u_ifs2(u_fname);
+        ParGridFunction temp_u_gf(pmesh, u_ifs2);
+        u_ifs2.close();
+
+        std::ifstream p_ifs2(p_fname);
+        ParGridFunction temp_p_gf(pmesh, p_ifs2);
+        p_ifs2.close();
+
+        *u_gf = temp_u_gf;
+        *p_gf = temp_p_gf;
     }
-    ParGridFunction temp_u_gf(pmesh, u_ifs2);
-    u_ifs2.close();
 
-    // Load the pressure field into a temporary grid function
-    std::ifstream p_ifs2(p_fname);
-    if (!p_ifs2.good())
-    {
-        if (myid == 0)
-        {
-            std::cerr << "Error opening pressure checkpoint file " << p_fname << std::endl;
-        }
-        return false;
-    }
-    ParGridFunction temp_p_gf(pmesh, p_ifs2);
-    p_ifs2.close();
+    flowsolver->Setup(ctx.dt);
 
-    // Copy the data from the temporary grid functions to the existing ones
-    *u_gf = temp_u_gf;
-    *p_gf = temp_p_gf;
-
-    // Print norms for debugging
+    // Compute norms after loading
     double u_norm = u_gf->Norml2();
     double p_norm = p_gf->Norml2();
 
     if (myid == 0)
     {
-        std::cout << "Loaded checkpoint: u_gf Norml2 = " << u_norm
-                  << ", p_gf Norml2 = " << p_norm << std::endl;
+        std::cout << "After loading from checkpoint in LoadCheckpoint: u_gf Norml2 = "
+                  << u_norm << ", p_gf Norml2 = " << p_norm << std::endl;
     }
-
-    // Set up the flow solver to initialize internal structures
-    flowsolver->Setup(ctx.dt);
-
-    // Print properties of u_gf and p_gf before saving
-    PrintGridFunctionProperties(*u_gf, "u_gf", myid);
-    PrintGridFunctionProperties(*p_gf, "p_gf", myid);
 
     return true;
 }
+
+

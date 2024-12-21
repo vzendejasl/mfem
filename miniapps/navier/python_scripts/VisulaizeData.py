@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 # file_to_extract_data = '/p/lustre1/zendejas/mfem_parallel/mfem/miniapps/navier/element_centers_scalar.txt'
 # file_to_extract_data = '/p/lustre1/zendejas/mfem_parallel/mfem/miniapps/navier/element_centers_0.txt'
 # file_to_extract_data = '/p/lustre1/zendejas/mfem_parallel/mfem/miniapps/navier//taylor_green_3d_64_cubed/element_centers_56699.txt'
-file_to_extract_data = '/g/g11/zendejas/Documents/mfem_build/mfem/miniapps/navier/element_centers_scalar_0.txt'
+file_to_extract_data = '/p/lustre1/zendejas/TGV/mfem/tgv_32/ElementCentersVelocity/cycle_0/element_centers_0.txt'
 data = np.genfromtxt(file_to_extract_data, delimiter=' ', skip_header=6)
 
 # Assign column data
@@ -16,9 +16,9 @@ solution = data[:, 3]
 
 # Round the coordinates to avoid floating-point precision issues
 # Choose a decimal precision that matches your grid spacing resolution.
-xpos_rounded = np.round(xpos, decimals=12)
-ypos_rounded = np.round(ypos, decimals=12)
-zpos_rounded = np.round(zpos, decimals=12)
+xpos_rounded = np.round(xpos, decimals=15)
+ypos_rounded = np.round(ypos, decimals=15)
+zpos_rounded = np.round(zpos, decimals=15)
 
 # Determine unique coordinates after rounding
 x_unique = np.unique(xpos_rounded)
@@ -48,9 +48,9 @@ values_grid = np.full((nx, ny, nz), np.nan)  # Using NaN to identify unassigned 
 
 # Step 4: Assign data to the grid array
 for i in range(actual_num_points):
-    xi = np.where(x_unique == xpos[i])[0][0]
-    yi = np.where(y_unique == ypos[i])[0][0]
-    zi = np.where(z_unique == zpos[i])[0][0]
+    xi = np.where(x_unique == xpos_rounded[i])[0][0]
+    yi = np.where(y_unique == ypos_rounded[i])[0][0]
+    zi = np.where(z_unique == zpos_rounded[i])[0][0]
     values_grid[xi, yi, zi] = solution[i]
     
     
