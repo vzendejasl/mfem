@@ -22,11 +22,19 @@ using namespace mfem;
 // Exact solution function
 double u_exact(const Vector &x);
 
+// Exact solution function
+double u_exact_vec(const Vector &x, Vector &u);
+
 // Function to compute the convergence rates
 void ComputeAveragingConvergence(int order, int refinements);
 
+void ComputeAveragingConvergenceVectorField(int order, int refinements);
+
 // Function to compute errors at cell centers
 void ComputeCellCenterErrors(ParGridFunction* sol, ParFiniteElementSpace* fes, ParMesh* pmesh,
+                             double &global_error);
+
+void ComputeCellCenterErrorsVector(ParGridFunction* sol, ParFiniteElementSpace* fes, ParMesh* pmesh,
                              double &global_error);
 
 void ComputeElementCenterValues(ParGridFunction* sol, ParFiniteElementSpace* fes, ParMesh* pmesh);
@@ -73,6 +81,7 @@ int main(int argc, char *argv[])
 
    // Perform convergence study
    ComputeAveragingConvergence(order, refinements);
+   ComputeAveragingConvergenceVectorField(order, refinements);
 
    // Finalize MPI.
    Mpi::Finalize();
@@ -157,7 +166,6 @@ void ComputeAveragingConvergence(int order, int refinements)
       mesh->Transform(translate_set_mesh);
 
       int dim = mesh->Dimension();
-
 
       // Refine the mesh in serial if needed
       int ser_ref_levels = 0; // No additional serial refinements
@@ -244,6 +252,167 @@ void ComputeAveragingConvergence(int order, int refinements)
 
 }
 
+void ComputeAveragingConvergenceVectorField(int order, int refinements)
+{
+   int myid = Mpi::WorldRank();
+   int num_procs = Mpi::WorldSize();
+
+   // Create list to append data to text file
+   std::vector<HYPRE_Int> dofs_list;
+   std::vector<double> h_list, error_list, rate_list;
+
+   // Header for output
+   if (myid == 0)
+   {
+      cout << setw(8) << "DOFs" << setw(16) << "h" << setw(16) << "Avg Error"
+           << setw(16) << "Rate" << endl;
+      cout << string(64, '-') << endl;
+   }
+
+   double h0 = 0.0;
+   double error0 = 0.0;
+
+   for (int level = 0; level <= refinements; ++level)
+   {
+      // Adjust mesh parameters based on refinement level
+      int ref_factor = 1 << level;
+      int current_nx = nx * ref_factor;
+      int current_ny = ny * ref_factor;
+      int current_nz = nz * ref_factor;
+
+      // Mesh boundaries (unit cube)
+      double x1 = 0.0, x2 = 1.0;
+      double y1 = 0.0, y2 = 1.0;
+      double z1 = 0.0, z2 = 1.0;
+
+      Mesh *mesh;
+      Mesh *init_mesh;
+
+      // 3D Mesh
+      if (current_nz > 1)
+      {
+            init_mesh = new Mesh(Mesh::MakeCartesian3D(current_nx,
+                                                       current_ny,
+                                                       current_nz,
+                                                       Element::HEXAHEDRON,
+                                                       x2 - x1,
+                                                       y2 - y1,
+                                                       z2 - z1));
+         Vector x_translation({x2 - x1, 0.0, 0.0});
+         Vector y_translation({0.0, y2 - y1, 0.0});
+         Vector z_translation({0.0, 0.0, z2 - z1});
+
+         std::vector<Vector> translations = {x_translation, y_translation, z_translation};
+
+         mesh = new Mesh(Mesh::MakePeriodic(*init_mesh,
+                                            init_mesh->CreatePeriodicVertexMapping(translations)));
+
+         delete init_mesh;
+      }
+      else
+      {
+         // Handle 2D mesh if needed
+      }
+
+      // Define a translation function for the mesh nodes
+      VectorFunctionCoefficient translate_set_mesh(mesh->Dimension(), [&](const Vector &x_in, Vector &x_out){
+
+         x_out[0] = x_in[0] + x1; // Translate x-coordinate
+         x_out[1] = x_in[1] + y1; // Translate y-coordinate
+         if (mesh->Dimension() == 3)
+         {
+            x_out[2] = x_in[2] + z1; // Translate z-coordinate
+         }
+      });
+
+      // Apply translation to the mesh
+      mesh->Transform(translate_set_mesh);
+
+      int dim = mesh->Dimension();
+
+      // Refine the mesh in serial if needed
+      int ser_ref_levels = 0; // No additional serial refinements
+      for (int lev = 0; lev < ser_ref_levels; lev++)
+      {
+         mesh->UniformRefinement();
+      }
+      if (mesh->NURBSext)
+      {
+         mesh->SetCurvature(max(order, 1));
+      }
+
+      // Create the parallel mesh
+      ParMesh pmesh(MPI_COMM_WORLD, *mesh);
+      delete mesh;
+
+      int par_ref_levels = 0; // No additional parallel refinements
+      for (int lev = 0; lev < par_ref_levels; lev++)
+      {
+         pmesh.UniformRefinement();
+      }
+
+      pmesh.GetBoundingBox(bb_min, bb_max, max(order, 1));
+
+      // Finite element space
+      H1_FECollection fec(order, dim);
+      ParFiniteElementSpace fespace(&pmesh, &fec);
+
+      // Project the exact solution onto the finite element space
+      ParGridFunction u(&fespace);
+      VectorFunctionCoefficient u_ex_coeff(dim, u_exact_vec);
+      u.ProjectCoefficient(u_ex_coeff);
+
+      // Compute the error at cell centers
+      double global_error;
+      ComputeCellCenterErrorsVector(&u, &fespace, &pmesh, global_error);
+
+      // Mesh size h
+      double h_min, h_max, kappa_min, kappa_max;
+      pmesh.GetCharacteristics(h_min, h_max, kappa_min, kappa_max);
+
+      // Compute convergence rate
+      double rate = 0.0;
+      if (level > 0 && global_error > 1e-16)
+      {
+         rate = log(global_error/error0) / log(h_min/h0);
+      }
+
+      // Compute global DOFs and global NE on all processes
+      // (These call do an MPI reduce internally)
+      HYPRE_Int global_true_vsize = fespace.GlobalTrueVSize();
+      HYPRE_Int global_ne = pmesh.GetGlobalNE();
+
+      // Output results
+      if (myid == 0)
+      {
+          cout << setw(8) << global_true_vsize << setw(16) << h_min
+               << setw(16) << global_error << setw(16) << rate << endl;
+      }
+
+      dofs_list.push_back(global_true_vsize);
+      h_list.push_back(h_min);
+      error_list.push_back(global_error);
+      rate_list.push_back(rate);
+
+      // Update previous values
+      h0 = h_min;
+      error0 = global_error;
+   }
+
+   // After the loop, write data to a text file from process 0
+   if (myid == 0)
+   {
+      std::ofstream ofs("convergence_data_vec.txt");
+      ofs << "DOFs h Avg_Error Rate" << std::endl;
+      for (size_t i = 0; i < dofs_list.size(); ++i)
+      {
+         ofs << dofs_list[i] << " " << h_list[i] << " " << error_list[i] << " " << rate_list[i] << std::endl;
+      }
+      ofs.close();
+   }
+
+}
+
 // Modified exact solution to include higher frequencies
 double u_exact(const Vector &x)
 {
@@ -251,6 +420,23 @@ double u_exact(const Vector &x)
                                     kappa * x[2]));
    return val;
    
+}
+
+
+
+// Modified exact solution to include higher frequencies
+double u_exact_vec(const Vector &x, Vector &u)
+{
+    real_t xi = x(0);
+    real_t yi = x(1);
+    real_t zi = x(2);
+
+    // Incorporate the same scaling as the scalar exact solution
+    double scale = 3.0 * kappa * kappa;
+
+    u(0) = scale * sin(kappa * xi) * cos(kappa * yi) * cos(kappa * zi);
+    u(1) = -scale * cos(kappa * xi) * sin(kappa * yi) * cos(kappa * zi);
+    u(2) = 0.0;
 }
 
 // // Modified exact solution to include higher frequencies
@@ -415,6 +601,70 @@ void ComputeElementCenterValues(ParGridFunction* sol, ParFiniteElementSpace* fes
     
 }
 
+// Compute errors at cell centers
+void ComputeCellCenterErrorsVector(ParGridFunction* sol, ParFiniteElementSpace* fes, ParMesh* pmesh,
+                             double &global_error)
+{
+    // MPI setup
+    MPI_Comm comm = pmesh->GetComm();
+    int rank, size;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+
+    double global_error_x, global_error_y, global_error_z;
+    double local_error_x, local_error_y, local_error_z;
+
+    // Set the integration point to the center of the reference element
+    IntegrationPoint ip;
+    ip.Set3(0.5001, 0.5, 0.5); // Center of element
+
+    // Loop over local elements
+    for (int i = 0; i < pmesh->GetNE(); i++)
+    {
+        // Get element transformation
+        ElementTransformation *Trans = pmesh->GetElementTransformation(i);
+
+        // Evaluate at center
+        Trans->SetIntPoint(&ip);
+
+        // Get vector dimension (should be 3 for velocity)
+        int vdim = fes->GetVDim();
+        Vector u_val(vdim);
+        
+        // Get vector value at ip
+        sol->GetVectorValue(*Trans, ip, u_val);
+
+        double u_x = u_val(0);
+        double u_y = u_val(1);
+        double u_z = u_val(2);
+        
+        // Physical coordinates of element center
+        Vector phys_coords(3);
+        Trans->Transform(ip, phys_coords);
+
+        Vector u_exact(3); 
+        u_exact_vec(phys_coords,u_exact);
+
+        // Compute error
+        double error_x = u_x - u_exact(0);
+        double error_y = u_y - u_exact(1);
+        double error_z = u_z - u_exact(2);
+
+        // Accumulate squared error
+        local_error_x += error_x * error_x;
+        local_error_y += error_y * error_y;
+        local_error_z += error_z * error_z;
+
+    }
+
+   // Sum the local errors over all processors
+   MPI_Allreduce(&local_error_x, &global_error_x, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+   MPI_Allreduce(&local_error_y, &global_error_y, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+   MPI_Allreduce(&local_error_z, &global_error_z, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+   global_error = std::max(std::max(global_error_x, global_error_y), global_error_z);
+}
+
 /*
 // Compute errors at cell centers
 void ComputeCellCenterErrors(ParGridFunction* sol, ParFiniteElementSpace* fes, ParMesh* pmesh,
@@ -553,3 +803,4 @@ void ComputeCellCenterErrors(ParGridFunction* sol, ParFiniteElementSpace* fes, P
 
 }
 */
+

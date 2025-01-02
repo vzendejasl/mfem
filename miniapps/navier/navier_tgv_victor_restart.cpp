@@ -17,10 +17,8 @@
 // TODO: 
 // 1. Add option to set cycle for saving checkpoint files and post process
 // files seperatelty
-// 2. Add option to read in desired Reynolds number
-// 3. Store Element data at center in binary for effiecnecy?
-// 4. Compute fft of data directly?
-// 5. Implement the correct CFL criteria based on polynomial order
+// 2. Store Element data at center in binary for effiecnecy?
+// 3. Compute fft of data directly?
 
 #include "navier_solver.hpp"
 #include <fstream>
@@ -584,10 +582,9 @@ int main(int argc, char *argv[])
    real_t ke = kin_energy.ComputeKineticEnergy(*u_gf);
    real_t enstrophy = kin_energy.ComputeEnstrophy(w_gf);
 
-   // Compute dx and the cfl
-   double dx = (2.0*M_PI)/ (ctx.num_pts - 1.0);
-   double cfl;
-   cfl = (u_inf * ctx.dt)/dx;
+   // Compute the cfl
+   real_t cfl;
+   cfl = flowsolver->ComputeCFL(*u_gf, ctx.dt);
 
    std::string fname = std::string("tgv_out_") 
                                             + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
@@ -624,7 +621,7 @@ int main(int argc, char *argv[])
       {
           // Write header only if not restarting
           fprintf(f, "3D Taylor Green Vortex\n");
-          fprintf(f, "Reynolds Number = %d\n", ctx.reynum);
+          fprintf(f, "Reynolds Number = %d\n", static_cast<int>(ctx.reynum));
           fprintf(f, "order = %d\n", ctx.order);
           fprintf(f, "grid = %d x %d x %d\n", nel1d, nel1d, nel1d);
           fprintf(f, "dofs per component = %d\n", ngridpts);
@@ -638,7 +635,6 @@ int main(int argc, char *argv[])
       fflush(f);
       fflush(stdout);
    }
-
 
    real_t dt = ctx.dt;
    real_t t_final = ctx.t_final;
@@ -654,6 +650,7 @@ int main(int argc, char *argv[])
       }
 
       flowsolver->Step(t, dt, step);
+      cfl = flowsolver->ComputeCFL(*u_gf, ctx.dt);
 
       if ((step - initial_step) % ctx.data_dump_cycle == 0 || last_step)
       {
@@ -731,8 +728,6 @@ int main(int argc, char *argv[])
 
       if (Mpi::Root())
       {
-         // Recompte the cfl
-         cfl = (u_inf * ctx.dt)/dx;
          // If restarting, skip the first saved checkpoint
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
@@ -822,26 +817,34 @@ void ComputeElementCenterValues(ParGridFunction* sol,
                                              + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
                                              + "P" + std::to_string(ctx.order);
 
-    // Create main directory for element centers with suffix
-    {
+    // Create subdirectory for this cycle step
+    std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
+
+    // Construct the filename inside the cycle directory
+    std::string fname = cycle_dir + "/element_centers_" + std::to_string(step) + ".txt";
+
+    if (rank == 0){
+      {
+        // Create main directory for element centers with suffix
         std::string command = "mkdir -p " + main_dir;
         int ret = system(command.c_str());
         if (ret != 0 && rank == 0)
         {
             std::cerr << "Error creating " << main_dir << " directory!" << std::endl;
         }
+      }
+
+      {
+          std::string command = "mkdir -p " + cycle_dir;
+          int ret = system(command.c_str());
+          if (ret != 0 && rank == 0)
+          {
+              std::cerr << "Error creating " << cycle_dir << " directory!" << std::endl;
+          }
+      }
     }
 
-    // Create subdirectory for this cycle step
-    std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
-    {
-        std::string command = "mkdir -p " + cycle_dir;
-        int ret = system(command.c_str());
-        if (ret != 0 && rank == 0)
-        {
-            std::cerr << "Error creating " << cycle_dir << " directory!" << std::endl;
-        }
-    }
+    MPI_Barrier(MPI_COMM_WORLD);
 
     // Local arrays to store data
     std::vector<double> local_x, local_y, local_z;
@@ -937,8 +940,6 @@ void ComputeElementCenterValues(ParGridFunction* sol,
 
     if (rank == 0)
     {
-        // Construct the filename inside the cycle directory
-        std::string fname = cycle_dir + "/element_centers_" + std::to_string(step) + ".txt";
         FILE *f = fopen(fname.c_str(), "w");
         if (!f)
         {
@@ -1096,26 +1097,32 @@ void SaveCheckpoint(ParMesh *pmesh, ParGridFunction *u_gf, ParGridFunction *p_gf
                                              + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
                                              + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
                                              + "P" + std::to_string(ctx.order);
-    // Create main checkpoint directory
-    {
-        std::string command = "mkdir -p " + main_dir;
-        int ret = system(command.c_str());
-        if (ret != 0 && myid == 0)
-        {
-            std::cerr << "Error creating tgv_check_point directory!" << std::endl;
-        }
-    }
 
     // Create subdirectory for this cycle step
     std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
-    {
-        std::string command = "mkdir -p " + cycle_dir;
-        int ret = system(command.c_str());
-        if (ret != 0 && myid == 0)
+
+    if (myid == 0){
+        // Create main checkpoint directory
         {
-            std::cerr << "Error creating " << cycle_dir << " directory!" << std::endl;
+            std::string command = "mkdir -p " + main_dir;
+            int ret = system(command.c_str());
+            if (ret != 0 && myid == 0)
+            {
+                std::cerr << "Error creating tgv_check_point directory!" << std::endl;
+            }
+        }
+
+        {
+            std::string command = "mkdir -p " + cycle_dir;
+            int ret = system(command.c_str());
+            if (ret != 0 && myid == 0)
+            {
+                std::cerr << "Error creating " << cycle_dir << " directory!" << std::endl;
+            }
         }
     }
+
+    MPI_Barrier(MPI_COMM_WORLD);
 
     // Adjust filenames to be in the cycle directory
     std::string mesh_fname = cycle_dir + "/tgv-checkpoint.mesh." + std::to_string(myid);
@@ -1296,16 +1303,31 @@ bool LoadCheckpoint(ParMesh *&pmesh, ParGridFunction *&u_gf, ParGridFunction *&p
     int provided_step = -1; // Assume no step provided
     if (provided_step < 0)
     {
-        provided_step = FindLastCheckpointStep();
-        if (provided_step < 0)
+        int last_step = -1;
+        if (myid == 0)
+        {
+          last_step = FindLastCheckpointStep();
+        }
+
+        // now broadcast to every rank
+        MPI_Bcast(&last_step, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+        if (last_step < 0)
         {
             // No checkpoints found
             return false;
         }
+        provided_step = last_step;
     }
 
+    // Construct the main directory name with suffix
+    std::string main_dir = std::string("CheckPoint_")
+                                             + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
+                                             + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                             + "P" + std::to_string(ctx.order);
+
     // Construct directory for given step
-    std::string cycle_dir = "tgv_check_point/cycle_" + std::to_string(provided_step);
+    std::string cycle_dir = main_dir + "/cycle_" + std::to_string(provided_step);
 
     std::string mesh_fname = cycle_dir + "/tgv-checkpoint.mesh." + std::to_string(myid);
     std::string u_fname = cycle_dir + "/tgv-checkpoint.u." + std::to_string(myid);
