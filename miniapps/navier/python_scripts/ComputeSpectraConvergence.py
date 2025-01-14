@@ -10,28 +10,33 @@ L = 2.0 * np.pi
 energy_scale = U0**2 * L  # = 2π for U0=1 and L=2π
 
 directories = {
-    "32_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_32/ElementCentersVelocity/",
-    "64_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_64/ElementCentersVelocity/",
-    "128_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_128/ElementCentersVelocity/",
-    "256_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_256/ElementCentersVelocity/"
+    # "32_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_32/ElementCentersVelocity/",
+    "64_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64/ElementCentersVelocity/",
+    "128_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128/ElementCentersVelocity/",
+    "256_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_256/ElementCentersVelocity/",
+    "384_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_384/ElementCentersVelocity_Re1600NumPtsPerDir48P2/"
 }
 
 files_to_extract = {
-    "32_pts": [
-        #directories["32_pts"] + 'cycle_7000/element_centers_7000.txt',
-        directories["32_pts"] + 'cycle_8000/element_centers_8000.txt'
-    ],
+    # "32_pts": [
+    #     #directories["32_pts"] + 'cycle_7000/element_centers_7000.txt',
+    #     directories["32_pts"] + 'cycle_8000/element_centers_8000.txt'
+    # ],
     "64_pts": [
         #directories["64_pts"] + 'cycle_7000/element_centers_7000.txt',
-        directories["64_pts"] + 'cycle_8000/element_centers_8000.txt',
+        directories["64_pts"] + 'cycle_9000/element_centers_9000.txt',
     ],
     "128_pts": [
         #directories["128_pts"] + 'cycle_7000/element_centers_7000.txt',
-        directories["128_pts"] + 'cycle_8002/element_centers_8002.txt',
+        directories["128_pts"] + 'cycle_9000/element_centers_9000.txt',
     ],
       "256_pts": [
         #directories["128_pts"] + 'cycle_7000/element_centers_7000.txt',
-        directories["256_pts"] + 'cycle_8000/element_centers_8000.txt',
+        directories["256_pts"] + 'cycle_9002/element_centers_9002.txt',
+    ],
+    "384_pts": [
+        #directories["128_pts"] + 'cycle_7000/element_centers_7000.txt',
+        directories["384_pts"] + 'cycle_9002/element_centers_9002.txt',
     ]
 }
 
@@ -39,8 +44,42 @@ styles = {
     "32_pts": {'marker': 'o', 'linestyle': '-', 'color': 'blue'},
     "64_pts": {'marker': 's', 'linestyle': '--', 'color': 'red'},
     "128_pts": {'marker': 's', 'linestyle': '--', 'color': 'black'},
-    "256_pts": {'marker': 's', 'linestyle': '--', 'color': 'purple'}
+    "256_pts": {'marker': 's', 'linestyle': '--', 'color': 'purple'},
+    "384_pts": {'marker': 's', 'linestyle': '--', 'color': 'magenta'}
 }
+
+# directories = {
+#     "64_pts_o2": "/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_64/ElementCentersVelocity/",
+#     "64_pts_o3": "/p/lustre1/zendejas/TGV/mfem/Order3_Re400/tgv_64/ElementCentersVelocity/",
+#     "128_pts_o2": "/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_128/ElementCentersVelocity/",
+#     "128_pts_o3": "/p/lustre1/zendejas/TGV/mfem/Order3_Re400/tgv_128/ElementCentersVelocity/",
+# }
+
+# files_to_extract = {
+#     "64_pts_o2":  [
+#         #directories["32_pts"] + 'cycle_7000/element_centers_7000.txt',
+#         directories["64_pts_o2"] + 'cycle_8000/element_centers_8000.txt'
+#     ],
+#     "64_pts_o3":  [
+#         #directories["32_pts"] + 'cycle_7000/element_centers_7000.txt',
+#         directories["64_pts_o3"] + 'cycle_8000/element_centers_8000.txt'
+#     ],
+#     "128_pts_o2":  [
+#         #directories["32_pts"] + 'cycle_7000/element_centers_7000.txt',
+#         directories["128_pts_o2"] + 'cycle_8002/element_centers_8002.txt'
+#     ],
+#     "128_pts_o3":  [
+#         #directories["32_pts"] + 'cycle_7000/element_centers_7000.txt',
+#         directories["128_pts_o3"] + 'cycle_8002/element_centers_8002.txt'
+#     ],
+# }
+
+# styles = {
+#      "64_pts_o2": {'marker': 'o', 'linestyle': '-', 'color': 'blue'},
+#     "64_pts_o3": {'marker': 's', 'linestyle': '--', 'color': 'red'},
+#     "128_pts_o2": {'marker': 's', 'linestyle': '--', 'color': 'black'},
+#      "128_pts_o3": {'marker': 's', 'linestyle': '--', 'color': 'purple'}
+# }
 
 plt.figure(figsize=(10, 8))
 
@@ -230,7 +269,7 @@ if 'k_bin_centers' in locals() and k_bin_centers.size > 0:
     plt.loglog(k_bin_centers, E_line, 'r--', label='k$^{-5/3}$ slope')
 
 #plt.ylim(1e-9, 1e4)
-plt.xlim(1, 256)  # Start from k=1 to avoid log(0) issues
+plt.xlim(1, 384)  # Start from k=1 to avoid log(0) issues
 plt.xlabel('Nondimensional Wavenumber $k^*$')
 plt.ylabel('Nondimensional $k^2 E(k)$')
 plt.title('Nondimensionalized Energy Spectra of the 3D Taylor-Green Vortex')

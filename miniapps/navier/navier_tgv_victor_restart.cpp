@@ -15,8 +15,9 @@
 //
 
 // TODO: 
-// 1. Add option to set cycle for saving checkpoint files and post process
-// files seperatelty
+// 1. Conduit deos not return back time step.Something is wrong with
+// pressure.  Visit reload works fine. 
+// Should I also implement sidre? I think so. 
 // 2. Store Element data at center in binary for effiecnecy?
 // 3. Compute fft of data directly?
 
@@ -46,8 +47,8 @@ struct s_NavierContext
    bool visit = true;
    bool paraview = false;
    bool binary = false;
-   bool restart = false;
-   int checkpoint_cycle = 100;
+   bool conduit = false;
+   bool restart = true;
    int element_center_cycle = 100;
    int data_dump_cycle = 100;
 
@@ -271,7 +272,95 @@ void ComputeQCriterion(ParGridFunction &u, ParGridFunction &q)
    }
 }
 
+// Computes Q = 0.5*nu*( \nabla u - transpose(\nabla u) )
+void ComputeQDissipation(ParGridFunction &u, ParGridFunction &q)
+{
+   FiniteElementSpace *v_fes = u.FESpace();
+   FiniteElementSpace *fes = q.FESpace();
 
+   // AccumulateAndCountZones
+   Array<int> zones_per_vdof;
+   zones_per_vdof.SetSize(fes->GetVSize());
+   zones_per_vdof = 0;
+
+   q = 0.0;
+
+   // Local interpolation
+   int elndofs;
+   Array<int> v_dofs, dofs;
+   Vector vals;
+   Vector loc_data;
+   int vdim = v_fes->GetVDim();
+   DenseMatrix grad_hat;
+   DenseMatrix dshape;
+   DenseMatrix grad;
+
+   for (int e = 0; e < fes->GetNE(); ++e)
+   {
+      fes->GetElementVDofs(e, dofs);
+      v_fes->GetElementVDofs(e, v_dofs);
+      u.GetSubVector(v_dofs, loc_data);
+      vals.SetSize(dofs.Size());
+      ElementTransformation *tr = fes->GetElementTransformation(e);
+      const FiniteElement *el = fes->GetFE(e);
+      elndofs = el->GetDof();
+      int dim = el->GetDim();
+      dshape.SetSize(elndofs, dim);
+
+      for (int dof = 0; dof < elndofs; ++dof)
+      {
+         // Project
+         const IntegrationPoint &ip = el->GetNodes().IntPoint(dof);
+         tr->SetIntPoint(&ip);
+
+         // Eval
+         // GetVectorGradientHat
+         el->CalcDShape(tr->GetIntPoint(), dshape);
+         grad_hat.SetSize(vdim, dim);
+         DenseMatrix loc_data_mat(loc_data.GetData(), elndofs, vdim);
+         MultAtB(loc_data_mat, dshape, grad_hat);
+
+         const DenseMatrix &Jinv = tr->InverseJacobian();
+         grad.SetSize(grad_hat.Height(), Jinv.Width());
+         Mult(grad_hat, Jinv, grad);
+
+         real_t q_val = 0.5 * (sq(grad(0, 0)) + sq(grad(1, 1)) + sq(grad(2, 2)))
+                        + grad(0, 1) * grad(1, 0) + grad(0, 2) * grad(2, 0)
+                        + grad(1, 2) * grad(2, 1);
+
+         vals(dof) = q_val;
+      }
+
+      // Accumulate values in all dofs, count the zones.
+      for (int j = 0; j < dofs.Size(); j++)
+      {
+         int ldof = dofs[j];
+         q(ldof) += vals[j];
+         zones_per_vdof[ldof]++;
+      }
+   }
+
+   // Communication
+
+   // Count the zones globally.
+   GroupCommunicator &gcomm = q.ParFESpace()->GroupComm();
+   gcomm.Reduce<int>(zones_per_vdof, GroupCommunicator::Sum);
+   gcomm.Bcast(zones_per_vdof);
+
+   // Accumulate for all vdofs.
+   gcomm.Reduce<real_t>(q.GetData(), GroupCommunicator::Sum);
+   gcomm.Bcast<real_t>(q.GetData());
+
+   // Compute means
+   for (int i = 0; i < q.Size(); i++)
+   {
+      const int nz = zones_per_vdof[i];
+      if (nz)
+      {
+         q(i) /= nz;
+      }
+   }
+}
 
 // Check to make sure mesh is periodic
 template<typename T>
@@ -290,12 +379,10 @@ bool IndicesAreConnected(const Table &t, int i, int j)
 void VerifyPeriodicMesh(Mesh *mesh);
 
 void ComputeElementCenterValues(ParGridFunction *sol, ParMesh *pmesh, int step, double time, const std::string &suffix);
+
 void ComputeElementCenterValuesScalar(ParGridFunction *sol, ParMesh *pmesh,int step, double time);
 
-void SaveCheckpoint(ParMesh *pmesh, ParGridFunction *u_gf, ParGridFunction *p_gf,
-                    double t, int step, int myid);
-
-bool LoadCheckpoint(ParMesh *&pmesh, ParGridFunction *&u_gf, ParGridFunction *&p_gf,
+bool LoadCheckpoint(ParMesh *& pmesh, ParGridFunction *&u_gf, ParGridFunction *&p_gf,
                     NavierSolver *&flowsolver, double &t, int &step, int myid, const s_NavierContext &ctx);
 
 int main(int argc, char *argv[])
@@ -360,7 +447,6 @@ int main(int argc, char *argv[])
       "--no-checkresult",
       "Enable or disable checking of the result. Returns -1 on failure.");
    args.AddOption(&ctx.reynum, "-Re", "--Renolds-number", "Reynolds Number.");
-   args.AddOption(&ctx.checkpoint_cycle, "-cpc", "--Checkpoint-Cycle", "Checkpoint Cycle.");
    args.AddOption(&ctx.element_center_cycle, "-ecc", "--Element-Center-Cycle", "Element Center Cycle.");
    args.AddOption(&ctx.data_dump_cycle, "-ddc", "--Data-Dump-Cycle", "Data Dump Cycle.");
    args.Parse();
@@ -378,12 +464,14 @@ int main(int argc, char *argv[])
    }
 
    ParMesh *pmesh = nullptr;
+   Mesh *mesh = nullptr;
    ParGridFunction *u_gf = nullptr;
    ParGridFunction *p_gf = nullptr;
+   NavierSolver *flowsolver = nullptr;
+
    double t = 0.0;
    int step = 0;
    int initial_step = 0;
-   NavierSolver *flowsolver = nullptr;
 
    bool restart_files_found = false;
 
@@ -399,6 +487,9 @@ int main(int argc, char *argv[])
          }
          // Store the initial step number at restart
          initial_step = step + 1;
+
+         // Reset step from restart for flow solver
+         step = 0;
       }
       else
       {
@@ -416,7 +507,6 @@ int main(int argc, char *argv[])
 
       // Initialize as mesh
       Mesh *init_mesh;
-      Mesh *mesh;
 
       init_mesh = new Mesh(Mesh::MakeCartesian3D(ctx.num_pts,
                                                  ctx.num_pts,
@@ -456,6 +546,7 @@ int main(int argc, char *argv[])
       {
          mfem::out << "Refining the mesh... " << std::endl;
       }
+
       // Serial Mesh refinement
       for (int lev = 0; lev < ctx.element_subdivisions; lev++)
       {
@@ -465,13 +556,13 @@ int main(int argc, char *argv[])
       // Create the parallel mesh
       pmesh = new ParMesh(MPI_COMM_WORLD, *mesh);
       pmesh->Finalize(true);
+
       // Parallel Mesh refinement
       for (int lev = 0; lev < ctx.element_subdivisions_parallel; lev++)
       {
          pmesh->UniformRefinement();
       }
 
-      delete mesh;
       delete init_mesh;
 
       if (Mpi::Root())
@@ -509,10 +600,10 @@ int main(int argc, char *argv[])
       mfem::out << "Number of elements: " << nel << std::endl;
    }
 
-   // Initialize w_gf and q_gf using the finite element spaces
    ParFiniteElementSpace *velocity_fespace = u_gf->ParFESpace();
    ParFiniteElementSpace *pressure_fespace = p_gf->ParFESpace();
    
+   // Initialize w_gf and q_gf using the finite element spaces
    ParGridFunction w_gf(velocity_fespace);
    ParGridFunction q_gf(pressure_fespace);
 
@@ -526,6 +617,9 @@ int main(int argc, char *argv[])
       std::string paraview_dir = std::string("ParaviewData_") 
                                                + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
                                                + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                               + "RefLv" + std::to_string(
+                                                   ctx.element_subdivisions 
+                                                 + ctx.element_subdivisions_parallel) 
                                                + "Order" + std::to_string(ctx.order)
                                                + "/tgv_output_paraview";
 
@@ -533,7 +627,11 @@ int main(int argc, char *argv[])
       pvdc->SetDataFormat(VTKFormat::BINARY32);
       pvdc->SetHighOrderOutput(true);
       pvdc->SetLevelsOfDetail(ctx.order);
-      pvdc->SetCycle(step + initial_step);
+      if (restart_files_found){
+        pvdc->SetCycle(initial_step - 1);
+      }else{
+        pvdc->SetCycle(initial_step);
+      }
       pvdc->SetTime(t);
       pvdc->RegisterField("velocity", u_gf);
       pvdc->RegisterField("pressure", p_gf);
@@ -555,22 +653,74 @@ int main(int argc, char *argv[])
       }
       else
       {
-         int precision = 8;
          std::string visit_dir = std::string("VisitData_") 
                                                   + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
                                                   + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                                  + "RefLv" + std::to_string(
+                                                      ctx.element_subdivisions 
+                                                    + ctx.element_subdivisions_parallel) 
                                                   + "P" + std::to_string(ctx.order)
                                                   + "/tgv_output_visit";
-         dc = new VisItDataCollection(visit_dir,pmesh);
-         dc->SetPrecision(precision);
+
+         dc = new VisItDataCollection(MPI_COMM_WORLD,visit_dir, pmesh);
       }
-      dc->SetCycle(step + initial_step);
+      int precision = 16;
+      dc->SetPrecision(precision);
+      if (restart_files_found){
+        dc->SetCycle(initial_step - 1);
+      }else{
+        dc->SetCycle(initial_step);
+      }
       dc->SetTime(t);
+      dc->SetFormat(DataCollection::PARALLEL_FORMAT);
       dc->RegisterField("velocity", u_gf);
       dc->RegisterField("pressure", p_gf);
       dc->RegisterField("vorticity", &w_gf);
       dc->RegisterField("qcriterion", &q_gf);
       dc->Save();
+   }
+
+
+   ConduitDataCollection *cdc = NULL;
+   if (ctx.conduit)
+   {
+#ifdef MFEM_USE_CONDUIT
+         // // Create a parallel ConduitDataCollection
+         // cdc = new ConduitDataCollection(MPI_COMM_WORLD, collection_name, pmesh);
+
+         std::string conduit_dir = std::string("ConduitData_") 
+                                                  + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
+                                                  + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                                  + "RefLv" + std::to_string(
+                                                      ctx.element_subdivisions 
+                                                    + ctx.element_subdivisions_parallel) 
+                                                  + "P" + std::to_string(ctx.order)
+                                                  + "/tgv_output_conduit";
+
+         cdc = new ConduitDataCollection(MPI_COMM_WORLD,conduit_dir, pmesh);
+
+         // Set the Conduit relay protocol (options include "hdf5", "json", "conduit_json", "conduit_bin")
+         cdc->SetProtocol("hdf5"); // Using "json" for human-readable output
+         {
+           int precision = 16;
+           cdc->SetPrecision(precision);
+           cdc->SetFormat(DataCollection::PARALLEL_FORMAT);
+           if (restart_files_found){
+             cdc->SetCycle(initial_step - 1);
+           }else{
+             cdc->SetCycle(initial_step);
+           }
+           cdc->SetTime(t);
+           cdc->RegisterField("velocity", u_gf);
+           cdc->RegisterField("pressure", p_gf);
+           cdc->RegisterField("vorticity", &w_gf);
+           cdc->RegisterField("qcriterion", &q_gf);
+           cdc->Save();
+         }
+#else
+         MFEM_ABORT("Must build with MFEM_USE_CONDUIT=YES for binary output.");
+#endif
+
    }
 
    real_t u_inf_loc = u_gf->Normlinf();
@@ -589,6 +739,9 @@ int main(int argc, char *argv[])
    std::string fname = std::string("tgv_out_") 
                                             + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
                                             + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                            + "RefLv" + std::to_string(
+                                                ctx.element_subdivisions 
+                                              + ctx.element_subdivisions_parallel) 
                                             + "P" + std::to_string(ctx.order)
                                             + ".txt";
    FILE *f = NULL;
@@ -640,8 +793,6 @@ int main(int argc, char *argv[])
    real_t t_final = ctx.t_final;
    bool last_step = false;
 
-   // reset step from restart for flow solver
-   step = 0;
    for (; !last_step; ++step)
    {
       if (t + dt >= t_final - dt / 2)
@@ -658,6 +809,7 @@ int main(int argc, char *argv[])
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
             ComputeQCriterion(*u_gf, q_gf);
+            flowsolver->ComputeCurl3D(*u_gf, w_gf);
 
             if (ctx.paraview)
             {
@@ -675,12 +827,55 @@ int main(int argc, char *argv[])
                dc->SetCycle(step + initial_step);
                dc->SetTime(t);
                dc->Save();
+
                if (Mpi::Root())
                {
                   std::cout << "\nVisit file saved at cycle " << step + initial_step << "." << std::endl;
                }
+
+               mfem::real_t u_inf_loc = dc->GetField("velocity")->Normlinf();
+               mfem::real_t p_inf_loc = dc->GetField("pressure")->Normlinf();
+
+               mfem::real_t u_inf = mfem::GlobalLpNorm(mfem::infinity(), 
+                                                             u_inf_loc, 
+                                                             MPI_COMM_WORLD);
+               mfem::real_t p_inf = mfem::GlobalLpNorm(mfem::infinity(), 
+                                                             p_inf_loc, 
+                                                             MPI_COMM_WORLD);
+               if (Mpi::Root())
+               {
+                   std::cout << "After loading from checkpoint in LoadCheckpoint: u_gf Norml2 = "
+                             << u_inf << ", p_gf Norml2 = " << p_inf << std::endl;
+               }
             }
 
+            if (ctx.conduit)
+            {
+               cdc->SetCycle(step + initial_step);
+               cdc->SetTime(t);
+               cdc->Save();
+
+               if (Mpi::Root())
+               {
+                  std::cout << "\nConduit file saved at cycle " << step + initial_step << "." << std::endl;
+               }
+
+               mfem::real_t u_inf_loc = cdc->GetField("velocity")->Normlinf();
+               mfem::real_t p_inf_loc = cdc->GetField("pressure")->Normlinf();
+
+               mfem::real_t u_inf = mfem::GlobalLpNorm(mfem::infinity(), 
+                                                             u_inf_loc, 
+                                                             MPI_COMM_WORLD);
+               mfem::real_t p_inf = mfem::GlobalLpNorm(mfem::infinity(), 
+                                                             p_inf_loc, 
+                                                             MPI_COMM_WORLD);
+                  
+               if (Mpi::Root())
+               {
+                   std::cout << "After loading from checkpoint in LoadCheckpoint: u_gf Norml2 = "
+                             << u_inf << ", p_gf Norml2 = " << p_inf << std::endl;
+               }
+            }
          }
       }
 
@@ -699,20 +894,6 @@ int main(int argc, char *argv[])
                std::cout << "\nOutput element center file saved at cycle " << step + initial_step << "." << std::endl;
             }
 
-         }
-      }
-
-      if ((step - initial_step) % ctx.checkpoint_cycle == 0 || last_step)
-      {
-         // If restarting, skip the first saved checkpoint
-         if (!(ctx.restart && step == 0 && restart_files_found))
-         {
-            // Save the checkpoint files
-            SaveCheckpoint(pmesh, u_gf, p_gf, t, step + initial_step, myid);
-            if (Mpi::Root())
-            {
-               std::cout << "\nCheckpoint file saved at cycle " << step + initial_step << "." << std::endl;
-            }
          }
       }
 
@@ -759,6 +940,7 @@ int main(int argc, char *argv[])
 
    delete flowsolver;
    delete pmesh;
+   delete mesh;
 
    return 0;
 }
@@ -815,6 +997,9 @@ void ComputeElementCenterValues(ParGridFunction* sol,
     std::string main_dir = std::string("ElementCenters") + suffix
                                              + "_Re" + std::to_string(static_cast<int>(ctx.reynum)) 
                                              + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                             + "RefLv" + std::to_string(
+                                                 ctx.element_subdivisions 
+                                               + ctx.element_subdivisions_parallel) 
                                              + "P" + std::to_string(ctx.order);
 
     // Create subdirectory for this cycle step
@@ -1089,6 +1274,234 @@ void ComputeElementCenterValuesScalar(ParGridFunction* sol, ParMesh* pmesh, int 
 }
 
 
+// Helper function to find the last checkpoint step if none is provided
+int FindLastCheckpointStep()
+{
+    // We'll rely on a shell command to list directories; adapt as needed.
+    // "ls tgv_check_point | grep cycle_" will list cycle directories.
+    // We'll parse the largest number from "cycle_<step>".
+
+    std::string main_dir;
+    std::string command;
+    if(ctx.visit){
+      main_dir = std::string("VisitData_") 
+                                   + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
+                                   + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                   + "RefLv" + std::to_string(
+                                       ctx.element_subdivisions 
+                                     + ctx.element_subdivisions_parallel) 
+                                   + "P" + std::to_string(ctx.order);
+      // Using popen to run shell command and read output
+      command = "ls " + main_dir + " | grep mfem.root |"  
+                                  + " sed 's/tgv_output_visit_//' | sort -n | tail -1 | sed 's/.mfem_root//'";
+    }
+    else if(ctx.conduit){
+      main_dir = std::string("ConduitData_") 
+                                   + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
+                                   + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                   + "RefLv" + std::to_string(
+                                       ctx.element_subdivisions 
+                                     + ctx.element_subdivisions_parallel) 
+                                   + "P" + std::to_string(ctx.order);
+      // Using popen to run shell command and read output
+      command = "ls " + main_dir + " | grep .root |"  
+                                  + " sed 's/tgv_output_conduit_//' | sort -n | tail -1 | sed 's/.root//'";
+    }
+    else{
+      MFEM_ABORT("Can only search for visit or conduit data for restarting.");
+    }
+
+    FILE *pipe = popen(command.c_str(),"r");
+    if (!pipe) return -1;
+    char buffer[128];
+    std::string result = "";
+    while (fgets(buffer, 128, pipe) != NULL)
+    {
+        result += buffer;
+    }
+    pclose(pipe);
+
+    // Trim whitespace
+    result.erase(std::remove_if(result.begin(), result.end(), ::isspace), result.end());
+    if (result.empty())
+    {
+        return -1; // no checkpoints
+    }
+
+    return std::stoi(result);
+}
+
+
+bool LoadCheckpoint(ParMesh *&pmesh, ParGridFunction *&u_gf, ParGridFunction *&p_gf,
+                    NavierSolver *&flowsolver, double &t, int &step, int myid, const s_NavierContext &ctx)
+{
+    // If no step given, find last checkpoint step
+    int provided_step = -1; // Assume no step provided
+    if (provided_step < 0)
+    {
+        int last_step = -1;
+        if (myid == 0)
+        {
+          last_step = FindLastCheckpointStep();
+        }
+
+        // now broadcast to every rank
+        MPI_Bcast(&last_step, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+        if (last_step < 0)
+        {
+            // No checkpoints found
+            return false;
+        }
+        provided_step = last_step;
+    }
+
+   GridFunction *loaded_u_gf = nullptr;
+   GridFunction *loaded_p_gf = nullptr;
+
+   int precision = 16;
+   if (ctx.visit)
+   {
+      std::string visit_dir = std::string("VisitData_") 
+                                               + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
+                                               + "NumPtsPerDir" + std::to_string(ctx.num_pts) 
+                                               + "RefLv" + std::to_string(
+                                                   ctx.element_subdivisions 
+                                                 + ctx.element_subdivisions_parallel) 
+                                               + "P" + std::to_string(ctx.order)
+                                               + "/tgv_output_visit";
+
+      // Construct directory for given step
+      std::string cycle_dir = visit_dir + std::to_string(provided_step);
+
+      // Create a parallel ConduitDataCollection
+      mfem::DataCollection *dc_load = new mfem::VisItDataCollection(MPI_COMM_WORLD,visit_dir, nullptr);
+
+      // Set precision
+      dc_load->SetPrecision(precision);
+
+      // Load the mesh and associated fields (if any)
+      dc_load->Load(provided_step);
+
+      // Retrieve the loaded mesh
+      auto *pmesh_loaded= dynamic_cast<mfem::ParMesh*>(dc_load->GetMesh());
+
+      pmesh = pmesh_loaded;
+
+      if(mfem::Mpi::Root()){
+        if (!pmesh_loaded)
+        {
+          mfem::out << "[ERROR] Failed to create MFEM mesh." << std::endl;
+        }
+        std::cout << "Mesh data loaded from VisitDataCollection." << std::endl;
+      }
+
+      loaded_u_gf = dc_load->GetField("velocity");
+      loaded_p_gf = dc_load->GetField("pressure");
+
+      step = dc_load->GetCycle();
+      t = dc_load->GetTime();
+   }
+      else if(ctx.conduit)
+      {
+#ifdef MFEM_USE_CONDUIT
+      std::string conduit_dir = std::string("ConduitData_") 
+                                               + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
+                                               + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                               + "RefLv" + std::to_string(
+                                                   ctx.element_subdivisions 
+                                                 + ctx.element_subdivisions_parallel) 
+                                               + "P" + std::to_string(ctx.order)
+                                               + "/tgv_output_conduit";
+
+      // Construct directory for given step
+      std::string cycle_dir = conduit_dir + std::to_string(provided_step);
+
+      // Create a parallel ConduitDataCollection
+      ConduitDataCollection *cdc_load = new ConduitDataCollection(MPI_COMM_WORLD,conduit_dir, nullptr);
+
+      // Set precision
+      cdc_load->SetPrecision(precision);
+
+      // Set the Conduit relay protocol (options include "hdf5", "json", "conduit_json", "conduit_bin")
+      cdc_load->SetProtocol("hdf5"); // Using "json" for human-readable output
+
+      // Load the mesh and associated fields (if any)
+      cdc_load->Load(provided_step);
+
+      // Retrieve the loaded mesh
+      auto *pmesh_loaded = dynamic_cast<mfem::ParMesh*>(cdc_load->GetMesh());
+
+      pmesh = pmesh_loaded;
+
+      if(mfem::Mpi::Root()){
+        if (!pmesh)
+        {
+          mfem::out << "[ERROR] Failed to create MFEM mesh." << std::endl;
+        }
+
+        std::cout << "Mesh data loaded from ConduitDataCollection." << std::endl;
+      }
+
+      loaded_u_gf = cdc_load->GetField("velocity");
+      loaded_p_gf = cdc_load->GetField("pressure");
+
+      step = cdc_load->GetCycle();
+      t = cdc_load->GetTime();
+#else
+      MFEM_ABORT("Must build with MFEM_USE_CONDUIT=YES for binary output.");
+#endif
+
+   }
+   else{
+     MFEM_ABORT("Can only restart with visit or conduit");
+   }
+
+    // Read the time and step number (only on root processor)
+    if (myid == 0)
+    {
+        std::cout << "Loaded time t = " << t << ", step = " << step << std::endl;
+    }
+
+    MPI_Bcast(&t, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&step, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    flowsolver = new NavierSolver(pmesh, ctx.order, ctx.kinvis);
+
+    flowsolver->EnablePA(ctx.pa);
+    flowsolver->EnableNI(ctx.ni);
+
+    u_gf = flowsolver->GetCurrentVelocity();
+    p_gf = flowsolver->GetCurrentPressure();
+
+    ParGridFunction temp_u_gf(u_gf->ParFESpace(),loaded_u_gf);
+    ParGridFunction temp_p_gf(p_gf->ParFESpace(),loaded_p_gf);
+
+    *u_gf = temp_u_gf;
+    *p_gf = temp_p_gf;
+
+    flowsolver->Setup(ctx.dt);
+
+    mfem::real_t u_inf_loc = u_gf->Normlinf();
+    mfem::real_t p_inf_loc = p_gf->Normlinf();
+
+    mfem::real_t u_inf = mfem::GlobalLpNorm(mfem::infinity(), 
+                                                  u_inf_loc, 
+                                                  MPI_COMM_WORLD);
+    mfem::real_t p_inf = mfem::GlobalLpNorm(mfem::infinity(), 
+                                                  p_inf_loc, 
+                                                  MPI_COMM_WORLD);
+       
+    if (Mpi::Root())
+    {
+        std::cout << "After loading from checkpoint in LoadCheckpoint: u_gf Norml2 = "
+                  << u_inf << ", p_gf Norml2 = " << p_inf << std::endl;
+    }
+
+    return true;
+}
+
+/*
 void SaveCheckpoint(ParMesh *pmesh, ParGridFunction *u_gf, ParGridFunction *p_gf,
                     double t, int step, int myid)
 {
@@ -1096,6 +1509,9 @@ void SaveCheckpoint(ParMesh *pmesh, ParGridFunction *u_gf, ParGridFunction *p_gf
     std::string main_dir = std::string("CheckPoint_")
                                              + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
                                              + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                             + "RefLv" + std::to_string(
+                                                 ctx.element_subdivisions 
+                                               + ctx.element_subdivisions_parallel) 
                                              + "P" + std::to_string(ctx.order);
 
     // Create subdirectory for this cycle step
@@ -1260,42 +1676,6 @@ void SaveCheckpoint(ParMesh *pmesh, ParGridFunction *u_gf, ParGridFunction *p_gf
     MPI_Barrier(MPI_COMM_WORLD);
 }
 
-// Helper function to find the last checkpoint step if none is provided
-// This scans "tgv_check_point/cycle_XXXX" directories and finds the maximum step number.
-int FindLastCheckpointStep()
-{
-    // We'll rely on a shell command to list directories; adapt as needed.
-    // "ls tgv_check_point | grep cycle_" will list cycle directories.
-    // We'll parse the largest number from "cycle_<step>".
-
-    // Construct the main directory name with suffix
-    std::string main_dir = std::string("CheckPoint_")
-                                             + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
-                                             + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
-                                             + "P" + std::to_string(ctx.order);
-
-    // Using popen to run shell command and read output
-    std::string command = "ls " + main_dir + " | grep cycle_ | sed 's/cycle_//' | sort -n | tail -1";
-    FILE *pipe = popen(command.c_str(),"r");
-    if (!pipe) return -1;
-    char buffer[128];
-    std::string result = "";
-    while (fgets(buffer, 128, pipe) != NULL)
-    {
-        result += buffer;
-    }
-    pclose(pipe);
-
-    // Trim whitespace
-    result.erase(std::remove_if(result.begin(), result.end(), ::isspace), result.end());
-    if (result.empty())
-    {
-        return -1; // no checkpoints
-    }
-
-    return std::stoi(result);
-}
-
 bool LoadCheckpoint(ParMesh *&pmesh, ParGridFunction *&u_gf, ParGridFunction *&p_gf,
                     NavierSolver *&flowsolver, double &t, int &step, int myid, const s_NavierContext &ctx)
 {
@@ -1421,5 +1801,5 @@ bool LoadCheckpoint(ParMesh *&pmesh, ParGridFunction *&u_gf, ParGridFunction *&p
 
     return true;
 }
-
+*/
 
