@@ -2,13 +2,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import re
 
-# Given parameters
-U0 = 1.0
-L = 2.0 * np.pi
-
-# Normalization constants
-energy_scale = U0**2 * L  # = 2π for U0=1 and L=2π
-
 directories = {
     # "32_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_32/ElementCentersVelocity/",
     "64_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64/ElementCentersVelocity/",
@@ -42,10 +35,10 @@ files_to_extract = {
 
 styles = {
     "32_pts": {'marker': 'o', 'linestyle': '-', 'color': 'blue'},
-    "64_pts": {'marker': 's', 'linestyle': '--', 'color': 'red'},
-    "128_pts": {'marker': 's', 'linestyle': '--', 'color': 'black'},
-    "256_pts": {'marker': 's', 'linestyle': '--', 'color': 'purple'},
-    "384_pts": {'marker': 's', 'linestyle': '--', 'color': 'magenta'}
+    "64_pts": {'marker': 's', 'linestyle': '--', 'color': 'magenta'},
+    "128_pts": {'marker': 's', 'linestyle': '--', 'color': 'blue'},
+    "256_pts": {'marker': 's', 'linestyle': '--', 'color': 'red'},
+    "384_pts": {'marker': 's', 'linestyle': '--', 'color': 'cyan'}
 }
 
 # directories = {
@@ -215,9 +208,9 @@ for resolution_label, file_list in files_to_extract.items():
 
         # Compute wavenumbers in cycles per length unit
         # Since L=2π, using d=dx/(2π)=1/nx simplifies the wavenumbers to integer multiples.
-        kx = np.fft.fftfreq(nx, d=dx/(2*np.pi))
-        ky = np.fft.fftfreq(ny, d=dy/(2*np.pi))
-        kz = np.fft.fftfreq(nz, d=dz/(2*np.pi))
+        kx = np.fft.fftfreq(nx, d=dx)
+        ky = np.fft.fftfreq(ny, d=dy)
+        kz = np.fft.fftfreq(nz, d=dz)
 
         kx = np.fft.fftshift(kx)
         ky = np.fft.fftshift(ky)
@@ -239,13 +232,11 @@ for resolution_label, file_list in files_to_extract.items():
         # Bin the energy density to obtain E(k) for plotting
         E_k, _ = np.histogram(k_flat, bins=k_bins, weights=energy_flat)
 
-        # Normalize the energy by energy_scale
-        E_k /= energy_scale
-
         label_str = f"{resolution_label}, Step {step_number_extracted}, Time {time_extracted:.3e}"
 
         # Plot E(k) * k^2 vs k (exactly as in your reference code)
-        plt.loglog(k_bin_centers, E_k*k_bin_centers**2,
+        #plt.loglog(k_bin_centers, E_k*k_bin_centers**2,
+        plt.loglog(k_bin_centers, E_k,           
                    marker=style['marker'], linestyle=style['linestyle'], color=style['color'],
                    label=label_str)
 
@@ -264,15 +255,15 @@ if 'k_bin_centers' in locals() and k_bin_centers.size > 0:
     else:
         k_ref = k_bin_centers[0]
     
-    E_ref = 1e3  # Arbitrary reference energy scaling
+    E_ref = .1e1  # Arbitrary reference energy scaling
     E_line = E_ref * (k_bin_centers / k_ref)**(-5.0/3.0)
     plt.loglog(k_bin_centers, E_line, 'r--', label='k$^{-5/3}$ slope')
 
 #plt.ylim(1e-9, 1e4)
-plt.xlim(1, 384)  # Start from k=1 to avoid log(0) issues
-plt.xlabel('Nondimensional Wavenumber $k^*$')
-plt.ylabel('Nondimensional $k^2 E(k)$')
-plt.title('Nondimensionalized Energy Spectra of the 3D Taylor-Green Vortex')
+#plt.xlim(1, 384)  # Start from k=1 to avoid log(0) issues
+plt.xlabel('Wavenumber $k$')
+plt.ylabel('$E(k)$')
+plt.title('Energy Spectra of the 3D Taylor-Green Vortex')
 plt.legend()
 plt.grid(True, which="both", ls="--")
 plt.tight_layout()

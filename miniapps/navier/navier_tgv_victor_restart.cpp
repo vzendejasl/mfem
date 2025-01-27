@@ -166,6 +166,134 @@ public:
   
       return 0.5 * global_integral / volume;
   }
+
+  void ComputeGridPtsRequirementsTurb(ParGridFunction &u, real_t Kolmogorov_length, real_t *hmin_eta , real_t *kmax_eta)
+  {
+
+      ParMesh *pmesh_u = u.ParFESpace()->GetParMesh();
+      FiniteElementSpace *fes = u.FESpace();
+      int vdim = fes->GetVDim();
+
+      real_t local_hmin_eta = 0.0; 
+      real_t local_kmax_eta = 0.0;
+
+      for (int e = 0; e < fes->GetNE(); ++e)
+      {
+         real_t hmin = pmesh_u->GetElementSize(e, 1) /
+                            (real_t) fes->GetElementOrder(0);
+         real_t kmax = M_PI/hmin;
+
+         // For a resolved simulatin hmin/eta should be < 2.1 (Pope)
+         local_hmin_eta = fmax(local_hmin_eta, hmin/Kolmogorov_length); 
+
+         // For a resolved simulatin kmax*eta should be > 1.5 (Pope)
+         local_kmax_eta = fmax(local_kmax_eta,kmax*Kolmogorov_length);
+      }
+
+      real_t hmin_eta_global = 0.0;
+      MPI_Allreduce(&local_hmin_eta,
+                    &hmin_eta_global,
+                    1,
+                    MPITypeMap<real_t>::mpi_type,
+                    MPI_MAX,
+                    pmesh_u->GetComm());
+
+      real_t kmax_eta_global = 0.0;
+      MPI_Allreduce(&local_kmax_eta,
+                    &kmax_eta_global,
+                    1,
+                    MPITypeMap<real_t>::mpi_type,
+                    MPI_MAX,
+                    pmesh_u->GetComm());
+
+      *hmin_eta = hmin_eta_global;
+      *kmax_eta = kmax_eta_global;
+  }
+
+  real_t ComputeKolmogorovLength(ParGridFunction &d_gf)
+  {
+      double max_dissipation = 0.0;
+  
+      // Iterate over the entire grid function to find the maximum dissipation value
+      for (int i = 0; i < d_gf.Size(); ++i) {
+          max_dissipation = std::max(max_dissipation, d_gf(i));
+      }
+  
+      // Reduce across all MPI processes to ensure global maximum
+      double global_max_dissipation;
+      MPI_Allreduce(&max_dissipation, &global_max_dissipation, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+  
+      // Compute the Kolmogorov length scale using the maximum dissipation
+      real_t kolmogorov_length = pow((ctx.kinvis * ctx.kinvis * ctx.kinvis) / global_max_dissipation, 0.25);
+
+      return kolmogorov_length;
+  }
+
+  real_t ComputeAveragedDissipation(ParGridFunction &d)
+  {
+      Vector d_vec;
+      const FiniteElement *fe;
+      ElementTransformation *T;
+      FiniteElementSpace *fes = d.FESpace();
+      real_t integ = 0.0;
+
+      double totalVolume = 0.0;
+      double totalDissipation = 0.0;
+  
+      for (int i = 0; i < fes->GetNE(); i++)
+      {
+          fe = fes->GetFE(i);
+          int intorder = 2 * fe->GetOrder();
+          const IntegrationRule *ir = &IntRules.Get(fe->GetGeomType(), intorder);
+
+          d.GetValues(i, *ir, d_vec);
+          T = fes->GetElementTransformation(i);
+
+          // Prepare to compute the integral and volume over this element
+          double volume_per_cell = 0.0;
+          double elem_diss = 0.0;
+  
+          for (int j = 0; j < ir->GetNPoints(); j++)
+          {
+              const IntegrationPoint &ip = ir->IntPoint(j);
+              T->SetIntPoint(&ip);
+  
+              // Evaluate the solution at this integration point
+              real_t local_diss = d_vec(j);
+     
+              // Compute the Jacobian determinant at the current integration point
+              real_t detJ = T->Weight();
+              real_t weight = ip.weight;
+
+              volume_per_cell += weight*detJ;
+              elem_diss   += local_diss * detJ * weight;
+
+          }
+          totalVolume +=volume_per_cell;
+          totalDissipation += elem_diss;
+      }
+  
+      double globalDissipation = 0.0;
+      double globalVolume   = 0.0;
+
+      MPI_Allreduce(&totalVolume,
+                    &globalVolume,
+                    1,
+                    MPITypeMap<real_t>::mpi_type,
+                    MPI_SUM,
+                    MPI_COMM_WORLD);
+
+      MPI_Allreduce(&totalDissipation,
+                    &globalDissipation,
+                    1,
+                    MPITypeMap<real_t>::mpi_type,
+                    MPI_SUM,
+                    MPI_COMM_WORLD);
+
+      
+      return globalDissipation/globalVolume;
+  }
+  
    
 
    ~QuantitiesOfInterest() { delete mass_lf; };
@@ -272,18 +400,18 @@ void ComputeQCriterion(ParGridFunction &u, ParGridFunction &q)
    }
 }
 
-// Computes Q = 0.5*nu*( \nabla u - transpose(\nabla u) )
-void ComputeQDissipation(ParGridFunction &u, ParGridFunction &q)
+// Computes \eta = 2*\nu*(\nabla u + trans(\nabla u))^2
+void ComputeDissipation(ParGridFunction &u, ParGridFunction &d)
 {
    FiniteElementSpace *v_fes = u.FESpace();
-   FiniteElementSpace *fes = q.FESpace();
+   FiniteElementSpace *fes = d.FESpace();
 
    // AccumulateAndCountZones
    Array<int> zones_per_vdof;
    zones_per_vdof.SetSize(fes->GetVSize());
    zones_per_vdof = 0;
 
-   q = 0.0;
+   d = 0.0;
 
    // Local interpolation
    int elndofs;
@@ -294,6 +422,7 @@ void ComputeQDissipation(ParGridFunction &u, ParGridFunction &q)
    DenseMatrix grad_hat;
    DenseMatrix dshape;
    DenseMatrix grad;
+
 
    for (int e = 0; e < fes->GetNE(); ++e)
    {
@@ -324,42 +453,41 @@ void ComputeQDissipation(ParGridFunction &u, ParGridFunction &q)
          grad.SetSize(grad_hat.Height(), Jinv.Width());
          Mult(grad_hat, Jinv, grad);
 
-         real_t q_val = 0.5 * (sq(grad(0, 0)) + sq(grad(1, 1)) + sq(grad(2, 2)))
-                        + grad(0, 1) * grad(1, 0) + grad(0, 2) * grad(2, 0)
-                        + grad(1, 2) * grad(2, 1);
+         real_t d_val =   sq(grad(0, 0)) + sq(grad(1, 1)) + sq(grad(2, 2))
+                        + 0.5*(sq(grad(0,1) + grad(1,0)) + sq(grad(0,2) + grad(2,0))  
+                        + sq(grad(1,2) + grad(2,1))); 
 
-         vals(dof) = q_val;
+         vals(dof) = 2.0*ctx.kinvis*d_val;
       }
 
       // Accumulate values in all dofs, count the zones.
       for (int j = 0; j < dofs.Size(); j++)
       {
          int ldof = dofs[j];
-         q(ldof) += vals[j];
+         d(ldof) += vals[j];
          zones_per_vdof[ldof]++;
       }
    }
 
-   // Communication
-
    // Count the zones globally.
-   GroupCommunicator &gcomm = q.ParFESpace()->GroupComm();
+   GroupCommunicator &gcomm = d.ParFESpace()->GroupComm();
    gcomm.Reduce<int>(zones_per_vdof, GroupCommunicator::Sum);
    gcomm.Bcast(zones_per_vdof);
 
    // Accumulate for all vdofs.
-   gcomm.Reduce<real_t>(q.GetData(), GroupCommunicator::Sum);
-   gcomm.Bcast<real_t>(q.GetData());
+   gcomm.Reduce<real_t>(d.GetData(), GroupCommunicator::Sum);
+   gcomm.Bcast<real_t>(d.GetData());
 
    // Compute means
-   for (int i = 0; i < q.Size(); i++)
+   for (int i = 0; i < d.Size(); i++)
    {
       const int nz = zones_per_vdof[i];
       if (nz)
       {
-         q(i) /= nz;
+         d(i) /= nz;
       }
    }
+
 }
 
 // Check to make sure mesh is periodic
@@ -606,9 +734,11 @@ int main(int argc, char *argv[])
    // Initialize w_gf and q_gf using the finite element spaces
    ParGridFunction w_gf(velocity_fespace);
    ParGridFunction q_gf(pressure_fespace);
+   ParGridFunction d_gf(pressure_fespace);
 
    flowsolver->ComputeCurl3D(*u_gf, w_gf);
    ComputeQCriterion(*u_gf, q_gf);
+   ComputeDissipation(*u_gf, d_gf);
    QuantitiesOfInterest kin_energy(pmesh);
 
    ParaViewDataCollection *pvdc = NULL;
@@ -677,6 +807,7 @@ int main(int argc, char *argv[])
       dc->RegisterField("pressure", p_gf);
       dc->RegisterField("vorticity", &w_gf);
       dc->RegisterField("qcriterion", &q_gf);
+      dc->RegisterField("dissipation", &d_gf);
       dc->Save();
    }
 
@@ -715,6 +846,7 @@ int main(int argc, char *argv[])
            cdc->RegisterField("pressure", p_gf);
            cdc->RegisterField("vorticity", &w_gf);
            cdc->RegisterField("qcriterion", &q_gf);
+           cdc->RegisterField("dissipation", &d_gf);
            cdc->Save();
          }
 #else
@@ -731,6 +863,11 @@ int main(int argc, char *argv[])
 
    real_t ke = kin_energy.ComputeKineticEnergy(*u_gf);
    real_t enstrophy = kin_energy.ComputeEnstrophy(w_gf);
+   real_t kolmLenScl = kin_energy.ComputeKolmogorovLength(d_gf);
+   real_t hmin_eta = 0.0;
+   real_t kmax_eta = 0.0;
+   kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta);
+   real_t vol_avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
 
    // Compute the cfl
    real_t cfl;
@@ -778,11 +915,16 @@ int main(int argc, char *argv[])
           fprintf(f, "order = %d\n", ctx.order);
           fprintf(f, "grid = %d x %d x %d\n", nel1d, nel1d, nel1d);
           fprintf(f, "dofs per component = %d\n", ngridpts);
+          fprintf(f, "===============================================================================");
+          fprintf(f, "===============================================================================");
           fprintf(f, "===============================================================================\n");
-          fprintf(f, "        time                   kinetic energy                   enstrophy\n");
+          fprintf(f, "        time                   kinetic energy               enstrophy");
+          fprintf(f, "           Average Dissipation     Min Kolmogorov Length Scale");
+          fprintf(f, "           K_max*eta (>1.5)        hmin/eta (<2.1) \n");
 
           // Write the initial data point
-          fprintf(f, "%20.16e     %20.16e     %20.16e\n", t, ke, enstrophy);
+           fprintf(f, "%20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e\n",
+                       t, ke, enstrophy, vol_avg_diss, kolmLenScl, kmax_eta, hmin_eta);
       } 
 
       fflush(f);
@@ -907,13 +1049,19 @@ int main(int argc, char *argv[])
       flowsolver->ComputeCurl3D(*u_gf, w_gf);
       enstrophy = kin_energy.ComputeEnstrophy(w_gf);
 
+      ComputeDissipation(*u_gf, d_gf);
+      kolmLenScl = kin_energy.ComputeKolmogorovLength(d_gf);
+      kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta);
+      vol_avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
+
       if (Mpi::Root())
       {
          // If restarting, skip the first saved checkpoint
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
            printf("%.5E %.5E %.5E %.5E %.5E %.5E %.5E\n", t, ctx.dt, u_inf, p_inf, ke, enstrophy, cfl);
-           fprintf(f, "%20.16e     %20.16e     %20.16e\n", t, ke, enstrophy);
+           fprintf(f, "%20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e\n",
+                       t, ke, enstrophy, vol_avg_diss, kolmLenScl, kmax_eta, hmin_eta);
            fflush(f);
            fflush(stdout);
          }
