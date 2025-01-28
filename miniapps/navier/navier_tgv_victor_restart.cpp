@@ -290,7 +290,6 @@ public:
                     MPI_SUM,
                     MPI_COMM_WORLD);
 
-      
       return globalDissipation/globalVolume;
   }
   
@@ -590,6 +589,8 @@ int main(int argc, char *argv[])
    {
       args.PrintOptions(mfem::out);
    }
+   // Update kinematic viscosity
+   ctx.kinvis = 1.0 / ctx.reynum;
 
    ParMesh *pmesh = nullptr;
    Mesh *mesh = nullptr;

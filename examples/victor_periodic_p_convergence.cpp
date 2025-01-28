@@ -44,7 +44,7 @@ Vector bb_min, bb_max;
 
 // Mesh parameters (as per your code)
 int nx = 5, ny = 5, nz = 5;
-double freq = 1.0;
+double freq = 2.0;
 double kappa;;
 
 int main(int argc, char *argv[])
@@ -355,7 +355,7 @@ void ComputeAveragingConvergenceVectorField(int order, int refinements)
 
       // Finite element space
       H1_FECollection fec(order, dim);
-      ParFiniteElementSpace fespace(&pmesh, &fec);
+      ParFiniteElementSpace fespace(&pmesh, &fec, dim);
 
       // Project the exact solution onto the finite element space
       ParGridFunction u(&fespace);
@@ -416,8 +416,12 @@ void ComputeAveragingConvergenceVectorField(int order, int refinements)
 // Modified exact solution to include higher frequencies
 double u_exact(const Vector &x)
 {
-   double val = 3.0 * kappa * kappa * (sin(kappa * x[0]) * sin(kappa * x[1]) * sin(
-                                    kappa * x[2]));
+   // double val = 3.0 * kappa * kappa * (sin(kappa*x[0]) * 
+   //                                     sin(kappa*x[1]) * 
+   //                                     sin(kappa*x[2]));
+   double val = 2 + sin(kappa*(x[0]))*
+                    cos(kappa*(x[1]))*
+                    cos(kappa*(x[2]));
    return val;
    
 }
@@ -431,11 +435,12 @@ double u_exact_vec(const Vector &x, Vector &u)
     real_t yi = x(1);
     real_t zi = x(2);
 
-    // Incorporate the same scaling as the scalar exact solution
-    double scale = 3.0 * kappa * kappa;
-
-    u(0) = scale * sin(kappa * xi) * cos(kappa * yi) * cos(kappa * zi);
-    u(1) = -scale * cos(kappa * xi) * sin(kappa * yi) * cos(kappa * zi);
+    u(0) =  sin(kappa*xi+0.01189) * 
+            cos(kappa*yi+0.1189) * 
+            cos(kappa*zi+0.31189);
+    u(1) = -cos(kappa*xi+0.21189) *
+            sin(kappa*yi+0.1189) *
+            cos(kappa*zi+2.31189);
     u(2) = 0.0;
 }
 
@@ -611,8 +616,13 @@ void ComputeCellCenterErrorsVector(ParGridFunction* sol, ParFiniteElementSpace* 
     MPI_Comm_rank(comm, &rank);
     MPI_Comm_size(comm, &size);
 
+
     double global_error_x, global_error_y, global_error_z;
     double local_error_x, local_error_y, local_error_z;
+
+    local_error_x = 0.0;
+    local_error_y = 0.0;
+    local_error_z = 0.0;
 
     // Set the integration point to the center of the reference element
     IntegrationPoint ip;
@@ -654,7 +664,6 @@ void ComputeCellCenterErrorsVector(ParGridFunction* sol, ParFiniteElementSpace* 
         local_error_x += error_x * error_x;
         local_error_y += error_y * error_y;
         local_error_z += error_z * error_z;
-
     }
 
    // Sum the local errors over all processors
@@ -663,6 +672,7 @@ void ComputeCellCenterErrorsVector(ParGridFunction* sol, ParFiniteElementSpace* 
    MPI_Allreduce(&local_error_z, &global_error_z, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
 
    global_error = std::max(std::max(global_error_x, global_error_y), global_error_z);
+   global_error = sqrt(global_error/pmesh->GetGlobalNE());
 }
 
 /*
