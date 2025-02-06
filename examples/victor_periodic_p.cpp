@@ -264,11 +264,11 @@ int main(int argc, char *argv[])
    bool structured_mesh = false;
    integral_width = 0.2;
 
-   double x2 = 1.0;
+   double x2 = M_PI;
    double x1 = 0.0;
-   double y2 = 1.0;
+   double y2 = M_PI;
    double y1 = 0.0;
-   double z2 = 1.0;
+   double z2 = M_PI;
    double z1 = 0.0;
 
 
@@ -912,8 +912,9 @@ double u0_function(const Vector &x)
    // return ( erfc(w*(X(0)-cx-rx))*erfc(-w*(X(0)-cx+rx)) *
    //          erfc(w*(X(1)-cy-ry))*erfc(-w*(X(1)-cy+ry)) )/16;
    
-   double center = (bb_min[0] + bb_max[0]) * 0.5;
-   return 0.5*(1 + tanh((x(0)- center)/integral_width));
+   // double center = (bb_min[0] + bb_max[0]) * 0.5;
+   // return 0.5*(1 + tanh((x(0)- center)/integral_width));
+   return sin(x(0))*cos(x(1))*cos(x(2));
    
    // return sin(2*M_PI*x(0));
 

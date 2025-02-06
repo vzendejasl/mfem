@@ -110,9 +110,19 @@ int main(int argc, char *argv[])
    ParGridFunction w_gf(*u_gf);
    flowsolver.ComputeCurl2D(*u_gf, w_gf);
 
-   ParaViewDataCollection pvdc("shear_output", pmesh);
-   pvdc.SetDataFormat(VTKFormat::BINARY32);
-   pvdc.SetHighOrderOutput(true);
+   // ParaViewDataCollection pvdc("shear_output", pmesh);
+   // pvdc.SetDataFormat(VTKFormat::BINARY32);
+   // pvdc.SetHighOrderOutput(true);
+   // pvdc.SetLevelsOfDetail(ctx.order);
+   // pvdc.SetCycle(0);
+   // pvdc.SetTime(t);
+   // pvdc.RegisterField("velocity", u_gf);
+   // pvdc.RegisterField("pressure", p_gf);
+   // pvdc.RegisterField("vorticity", &w_gf);
+   // pvdc.Save();
+
+   VisItDataCollection pvdc("shear_output", pmesh);
+   pvdc.SetFormat(DataCollection::PARALLEL_FORMAT);
    pvdc.SetLevelsOfDetail(ctx.order);
    pvdc.SetCycle(0);
    pvdc.SetTime(t);

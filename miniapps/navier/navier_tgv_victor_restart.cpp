@@ -210,7 +210,26 @@ public:
       *kmax_eta = kmax_eta_global;
   }
 
-  real_t ComputeKolmogorovLength(ParGridFunction &d_gf)
+  // real_t ComputeKolmogorovLength(ParGridFunction &d_gf)
+  // {
+  //     double max_dissipation = 0.0;
+  // 
+  //     // Iterate over the entire grid function to find the maximum dissipation value
+  //     for (int i = 0; i < d_gf.Size(); ++i) {
+  //         max_dissipation = std::max(max_dissipation, d_gf(i));
+  //     }
+  // 
+  //     // Reduce across all MPI processes to ensure global maximum
+  //     double global_max_dissipation;
+  //     MPI_Allreduce(&max_dissipation, &global_max_dissipation, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+  // 
+  //     // Compute the Kolmogorov length scale using the maximum dissipation
+  //     real_t kolmogorov_length = pow((ctx.kinvis * ctx.kinvis * ctx.kinvis) / global_max_dissipation, 0.25);
+
+  //     return kolmogorov_length;
+  // }
+
+  void ComputeKolmogorovAndTayloMicroLength(ParGridFunction &d_gf, real_t *kolmogorov_length, real_t *lambda_min, real_t ke)
   {
       double max_dissipation = 0.0;
   
@@ -223,10 +242,12 @@ public:
       double global_max_dissipation;
       MPI_Allreduce(&max_dissipation, &global_max_dissipation, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
   
-      // Compute the Kolmogorov length scale using the maximum dissipation
-      real_t kolmogorov_length = pow((ctx.kinvis * ctx.kinvis * ctx.kinvis) / global_max_dissipation, 0.25);
+      
+      // Compute the smallest Kolmogorov length scale using the maximum dissipation
+      *kolmogorov_length = pow((ctx.kinvis * ctx.kinvis * ctx.kinvis) / global_max_dissipation, 0.25);
 
-      return kolmogorov_length;
+      // Compute the smallest Taylor Micro scale using the maximum dissipation
+      *lambda_min = pow(10.0*ke/global_max_dissipation/ctx.reynum, 0.50);
   }
 
   real_t ComputeAveragedDissipation(ParGridFunction &d)
@@ -637,17 +658,18 @@ int main(int argc, char *argv[])
       // Initialize as mesh
       Mesh *init_mesh;
 
+      real_t length = 2*M_PI;
       init_mesh = new Mesh(Mesh::MakeCartesian3D(ctx.num_pts,
                                                  ctx.num_pts,
                                                  ctx.num_pts,
                                                  Element::HEXAHEDRON,
-                                                 2.0 * M_PI,
-                                                 2.0 * M_PI,
-                                                 2.0 * M_PI, false));
+                                                 length,
+                                                 length,
+                                                 length, false));
 
-      Vector x_translation({2.0 * M_PI, 0.0, 0.0});
-      Vector y_translation({0.0, 2.0 * M_PI, 0.0});
-      Vector z_translation({0.0, 0.0, 2.0 * M_PI});
+      Vector x_translation({length, 0.0, 0.0});
+      Vector y_translation({0.0, length, 0.0});
+      Vector z_translation({0.0, 0.0, length});
 
       std::vector<Vector> translations = {x_translation, y_translation, z_translation};
 
@@ -657,6 +679,14 @@ int main(int argc, char *argv[])
       {
          VerifyPeriodicMesh(mesh);
       }
+      
+      // Mesh *mesh = new Mesh(Mesh::MakeCartesian3D(ctx.num_pts,
+      //                                            ctx.num_pts,
+      //                                            ctx.num_pts,
+      //                                            Element::HEXAHEDRON,
+      //                                            length,
+      //                                            length,
+      //                                            length, false));
 
       // Define a translation function for the mesh nodes
       VectorFunctionCoefficient translate(mesh->Dimension(), [&](const Vector &x_in, Vector &x_out)
@@ -669,7 +699,19 @@ int main(int argc, char *argv[])
            x_out[2] = x_in[2] + shift; // Translate z-coordinate
          } });
 
-      mesh->Transform(translate);
+      // Define a translation function for the mesh nodes
+      VectorFunctionCoefficient scale(mesh->Dimension(), [&](const Vector &x_in, Vector &x_out)
+                                          {
+         double scale = 1.0;
+
+         x_out[0] = x_in[0]/scale ; // Translate x-coordinate
+         x_out[1] = x_in[1]/scale ; // Translate y-coordinate
+         if (mesh->Dimension() == 3){
+           x_out[2] = x_in[2]/scale; // Translate z-coordinate
+         } });
+
+      // mesh->Transform(translate);
+      // mesh->Transform(scale);
 
       if (Mpi::Root() && (ctx.element_subdivisions > 1))
       {
@@ -864,9 +906,13 @@ int main(int argc, char *argv[])
 
    real_t ke = kin_energy.ComputeKineticEnergy(*u_gf);
    real_t enstrophy = kin_energy.ComputeEnstrophy(w_gf);
-   real_t kolmLenScl = kin_energy.ComputeKolmogorovLength(d_gf);
+
+   real_t kolmLenScl = 0.0;
+   real_t lambda_min = 0.0;
    real_t hmin_eta = 0.0;
    real_t kmax_eta = 0.0;
+
+   kin_energy.ComputeKolmogorovAndTayloMicroLength(d_gf,&kolmLenScl, &lambda_min, ke);
    kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta);
    real_t vol_avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
 
@@ -920,12 +966,12 @@ int main(int argc, char *argv[])
           fprintf(f, "===============================================================================");
           fprintf(f, "===============================================================================\n");
           fprintf(f, "        time                   kinetic energy               enstrophy");
-          fprintf(f, "           Average Dissipation     Min Kolmogorov Length Scale");
+          fprintf(f, "           Average Dissipation     Min Kolmogorov Length Scale   Min Taylor Length Scale");
           fprintf(f, "           K_max*eta (>1.5)        hmin/eta (<2.1) \n");
 
           // Write the initial data point
-           fprintf(f, "%20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e\n",
-                       t, ke, enstrophy, vol_avg_diss, kolmLenScl, kmax_eta, hmin_eta);
+           fprintf(f, "%20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e     %20.16e\n",
+                       t, ke, enstrophy, vol_avg_diss, kolmLenScl, lambda_min, kmax_eta, hmin_eta);
       } 
 
       fflush(f);
@@ -1051,7 +1097,7 @@ int main(int argc, char *argv[])
       enstrophy = kin_energy.ComputeEnstrophy(w_gf);
 
       ComputeDissipation(*u_gf, d_gf);
-      kolmLenScl = kin_energy.ComputeKolmogorovLength(d_gf);
+      kin_energy.ComputeKolmogorovAndTayloMicroLength(d_gf,&kolmLenScl, &lambda_min, ke);
       kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta);
       vol_avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
 
@@ -1061,8 +1107,8 @@ int main(int argc, char *argv[])
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
            printf("%.5E %.5E %.5E %.5E %.5E %.5E %.5E\n", t, ctx.dt, u_inf, p_inf, ke, enstrophy, cfl);
-           fprintf(f, "%20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e\n",
-                       t, ke, enstrophy, vol_avg_diss, kolmLenScl, kmax_eta, hmin_eta);
+           fprintf(f, "%20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e     %20.16e\n",
+                       t, ke, enstrophy, vol_avg_diss, kolmLenScl, lambda_min, kmax_eta, hmin_eta);
            fflush(f);
            fflush(stdout);
          }
