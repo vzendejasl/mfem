@@ -210,26 +210,9 @@ public:
       *kmax_eta = kmax_eta_global;
   }
 
-  // real_t ComputeKolmogorovLength(ParGridFunction &d_gf)
-  // {
-  //     double max_dissipation = 0.0;
-  // 
-  //     // Iterate over the entire grid function to find the maximum dissipation value
-  //     for (int i = 0; i < d_gf.Size(); ++i) {
-  //         max_dissipation = std::max(max_dissipation, d_gf(i));
-  //     }
-  // 
-  //     // Reduce across all MPI processes to ensure global maximum
-  //     double global_max_dissipation;
-  //     MPI_Allreduce(&max_dissipation, &global_max_dissipation, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-  // 
-  //     // Compute the Kolmogorov length scale using the maximum dissipation
-  //     real_t kolmogorov_length = pow((ctx.kinvis * ctx.kinvis * ctx.kinvis) / global_max_dissipation, 0.25);
-
-  //     return kolmogorov_length;
-  // }
-
-  void ComputeKolmogorovAndTayloMicroLength(ParGridFunction &d_gf, real_t *kolmogorov_length, real_t *lambda_min, real_t ke)
+  void ComputeKolmogorovAndTayloMicroLength(ParGridFunction &d_gf, real_t vol_avg_dissipation, real_t *kolmogorov_length, 
+                                                                   real_t *lambda, real_t *avg_kolmogorov_length, 
+                                                                   real_t *kolmogorov_time_scale, real_t ke)
   {
       double max_dissipation = 0.0;
   
@@ -244,10 +227,19 @@ public:
   
       
       // Compute the smallest Kolmogorov length scale using the maximum dissipation
+      // eta = (nu^3/diss_max)^0.25
       *kolmogorov_length = pow((ctx.kinvis * ctx.kinvis * ctx.kinvis) / global_max_dissipation, 0.25);
 
+      // eta = (nu^3/<diss>)^0.25
+      *avg_kolmogorov_length = pow((ctx.kinvis * ctx.kinvis * ctx.kinvis) / vol_avg_dissipation, 0.25);
+
       // Compute the smallest Taylor Micro scale using the maximum dissipation
-      *lambda_min = pow(10.0*ke/global_max_dissipation/ctx.reynum, 0.50);
+      // lambda = sqrt(10*<ke>/<diss>*KE), <> -> volume average
+      *lambda = pow(10.0*ke/vol_avg_dissipation/ctx.reynum, 0.50);
+
+      // Kolmogorov tiem scale
+      // Tau_eta = sqrt(\nu/diss_max)
+      *kolmogorov_time_scale = pow(ctx.kinvis/global_max_dissipation,0.50);
   }
 
   real_t ComputeAveragedDissipation(ParGridFunction &d)
@@ -908,13 +900,20 @@ int main(int argc, char *argv[])
    real_t enstrophy = kin_energy.ComputeEnstrophy(w_gf);
 
    real_t kolmLenScl = 0.0;
-   real_t lambda_min = 0.0;
+   real_t avg_kolmLenScl = 0.0;
+   real_t avg_lambda = 0.0;
+   real_t kolmTimeScl = 0.0;
    real_t hmin_eta = 0.0;
    real_t kmax_eta = 0.0;
+   real_t u_rms =  pow(2.0/3.0*ke,0.5);
 
-   kin_energy.ComputeKolmogorovAndTayloMicroLength(d_gf,&kolmLenScl, &lambda_min, ke);
+   real_t avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
+   kin_energy.ComputeKolmogorovAndTayloMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, ke);
    kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta);
-   real_t vol_avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
+
+   // Taylor Reynolds Number
+   // Re_lambda = u' lambda/nu
+   real_t Re_taylor = u_rms*avg_lambda/ctx.kinvis;
 
    // Compute the cfl
    real_t cfl;
@@ -928,7 +927,17 @@ int main(int argc, char *argv[])
                                               + ctx.element_subdivisions_parallel) 
                                             + "P" + std::to_string(ctx.order)
                                             + ".txt";
+
+   std::string fname_turb = std::string("tgv_out_turb_") 
+                                            + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
+                                            + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                            + "RefLv" + std::to_string(
+                                                ctx.element_subdivisions 
+                                              + ctx.element_subdivisions_parallel) 
+                                            + "P" + std::to_string(ctx.order)
+                                            + ".txt";
    FILE *f = NULL;
+   FILE *f_turb = NULL;
 
    if (Mpi::Root())
    {
@@ -947,10 +956,17 @@ int main(int argc, char *argv[])
       }
 
       f = fopen(fname.c_str(), file_mode);
+      f_turb = fopen(fname_turb.c_str(), file_mode);
 
       if (!f)
       {
         std::cerr << "Error opening file " << fname << std::endl;
+        MPI_Abort(MPI_COMM_WORLD,1);
+      }
+
+      if (!f_turb)
+      {
+        std::cerr << "Error opening file " << fname_turb << std::endl;
         MPI_Abort(MPI_COMM_WORLD,1);
       }
 
@@ -962,19 +978,34 @@ int main(int argc, char *argv[])
           fprintf(f, "order = %d\n", ctx.order);
           fprintf(f, "grid = %d x %d x %d\n", nel1d, nel1d, nel1d);
           fprintf(f, "dofs per component = %d\n", ngridpts);
-          fprintf(f, "===============================================================================");
-          fprintf(f, "===============================================================================");
           fprintf(f, "===============================================================================\n");
           fprintf(f, "        time                   kinetic energy               enstrophy");
-          fprintf(f, "           Average Dissipation     Min Kolmogorov Length Scale   Min Taylor Length Scale");
-          fprintf(f, "           K_max*eta (>1.5)        hmin/eta (<2.1) \n");
 
           // Write the initial data point
-           fprintf(f, "%20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e     %20.16e\n",
-                       t, ke, enstrophy, vol_avg_diss, kolmLenScl, lambda_min, kmax_eta, hmin_eta);
+           fprintf(f, "%20.16e     %20.16e     %20.16e\n", t, ke, enstrophy);
+
+          // Write header only if not restarting
+          fprintf(f_turb, "3D Taylor Green Vortex (turbulence metrics)\n");
+          fprintf(f_turb, "Reynolds Number = %d\n", static_cast<int>(ctx.reynum));
+          fprintf(f_turb, "order = %d\n", ctx.order);
+          fprintf(f_turb, "grid = %d x %d x %d\n", nel1d, nel1d, nel1d);
+          fprintf(f_turb, "dofs per component = %d\n", ngridpts);
+          fprintf(f_turb, "===============================================================================");
+          fprintf(f_turb, "===============================================================================");
+          fprintf(f_turb, "=========================================================================================\n");
+          fprintf(f_turb, "Average Dissipation     Min Kolmogorov Length Scale    Taylor Length Scale");
+          fprintf(f_turb, "        Average Kolm Len          Kolmogorov Time Scale            Taylor Re");
+          fprintf(f_turb, "                      u_rms                     K_max*eta (>1.5)           hmin/eta (<2.1)  \n");
+
+          // Write the initial data point
+           fprintf(f_turb, "%20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e     %20.16e\n",
+                       avg_diss, kolmLenScl, avg_lambda, 
+                       avg_kolmLenScl, kolmTimeScl, Re_taylor, 
+                       u_rms, kmax_eta, hmin_eta);
       } 
 
       fflush(f);
+      fflush(f_turb);
       fflush(stdout);
    }
 
@@ -1097,9 +1128,11 @@ int main(int argc, char *argv[])
       enstrophy = kin_energy.ComputeEnstrophy(w_gf);
 
       ComputeDissipation(*u_gf, d_gf);
-      kin_energy.ComputeKolmogorovAndTayloMicroLength(d_gf,&kolmLenScl, &lambda_min, ke);
+      avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
+      kin_energy.ComputeKolmogorovAndTayloMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda,&avg_kolmLenScl,&kolmTimeScl, ke);
       kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta);
-      vol_avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
+      Re_taylor = u_rms*avg_lambda/ctx.kinvis;
+      u_rms =  pow(2.0/3.0*ke,0.5);
 
       if (Mpi::Root())
       {
@@ -1107,9 +1140,13 @@ int main(int argc, char *argv[])
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
            printf("%.5E %.5E %.5E %.5E %.5E %.5E %.5E\n", t, ctx.dt, u_inf, p_inf, ke, enstrophy, cfl);
-           fprintf(f, "%20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e     %20.16e\n",
-                       t, ke, enstrophy, vol_avg_diss, kolmLenScl, lambda_min, kmax_eta, hmin_eta);
+           fprintf(f, "%20.16e     %20.16e     %20.16e\n", t, ke, enstrophy);
+           fprintf(f_turb, "%20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e     %20.16e\n",
+                       avg_diss, kolmLenScl, avg_lambda, 
+                       avg_kolmLenScl, kolmTimeScl, Re_taylor, 
+                       u_rms, kmax_eta, hmin_eta);
            fflush(f);
+           fflush(f_turb);
            fflush(stdout);
          }
       }

@@ -4,10 +4,12 @@ import re
 
 directories = {
     # "32_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_32/ElementCentersVelocity/",
-    "64_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64/ElementCentersVelocity/",
-    "128_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128/ElementCentersVelocity/",
-    "256_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_256/ElementCentersVelocity/",
-    "384_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_384/ElementCentersVelocity_Re1600NumPtsPerDir48P2/"
+    #"64_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64/ElementCentersVelocity/",
+    #"128_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128/ElementCentersVelocity/",
+    "128_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re3200/tgv_128/ElementCentersVelocity_Re3200NumPtsPerDir32RefLv2P2/",
+    "256_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re3200/tgv_256/ElementCentersVelocity_Re3200NumPtsPerDir32RefLv3P2/"
+    #"256_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_256/ElementCentersVelocity/",
+    #"384_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_384/ElementCentersVelocity_Re1600NumPtsPerDir48P2/"
 }
 
 files_to_extract = {
@@ -15,22 +17,22 @@ files_to_extract = {
     #     #directories["32_pts"] + 'cycle_7000/element_centers_7000.txt',
     #     directories["32_pts"] + 'cycle_8000/element_centers_8000.txt'
     # ],
-    "64_pts": [
-        #directories["64_pts"] + 'cycle_7000/element_centers_7000.txt',
-        directories["64_pts"] + 'cycle_9000/element_centers_9000.txt',
-    ],
+    # "64_pts": [
+    #     #directories["64_pts"] + 'cycle_7000/element_centers_7000.txt',
+    #     directories["64_pts"] + 'cycle_9000/element_centers_9000.txt',
+    # ],
     "128_pts": [
         #directories["128_pts"] + 'cycle_7000/element_centers_7000.txt',
-        directories["128_pts"] + 'cycle_9000/element_centers_9000.txt',
+        directories["128_pts"] + 'cycle_8800/element_centers_8800.txt',
     ],
       "256_pts": [
         #directories["128_pts"] + 'cycle_7000/element_centers_7000.txt',
-        directories["256_pts"] + 'cycle_9002/element_centers_9002.txt',
+        directories["256_pts"] + 'cycle_8806/element_centers_8806.txt',
     ],
-    "384_pts": [
-        #directories["128_pts"] + 'cycle_7000/element_centers_7000.txt',
-        directories["384_pts"] + 'cycle_9002/element_centers_9002.txt',
-    ]
+    # "384_pts": [
+    #     #directories["128_pts"] + 'cycle_7000/element_centers_7000.txt',
+    #     directories["384_pts"] + 'cycle_9002/element_centers_9002.txt',
+    # ]
 }
 
 styles = {
