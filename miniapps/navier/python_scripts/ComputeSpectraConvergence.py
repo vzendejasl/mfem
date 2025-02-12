@@ -6,8 +6,9 @@ directories = {
     # "32_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_32/ElementCentersVelocity/",
     #"64_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64/ElementCentersVelocity/",
     #"128_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128/ElementCentersVelocity/",
-    "128_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re3200/tgv_128/ElementCentersVelocity_Re3200NumPtsPerDir32RefLv2P2/",
-    "256_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re3200/tgv_256/ElementCentersVelocity_Re3200NumPtsPerDir32RefLv3P2/"
+    "Re400":  "/p/lustre1/zendejas/TGV/mfem/Order2_Re400/old2/tgv_128/ElementCentersVelocity_Re400NumPtsPerDir32RefLv2P2/",
+    "Re1600": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_384/ElementCentersVelocity_Re1600NumPtsPerDir48RefLv3P2/",
+    "Re3200": "/p/lustre1/zendejas/TGV/mfem/Order2_Re3200/tgv_256/ElementCentersVelocity_Re3200NumPtsPerDir32RefLv3P2/"
     #"256_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_256/ElementCentersVelocity/",
     #"384_pts": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_384/ElementCentersVelocity_Re1600NumPtsPerDir48P2/"
 }
@@ -21,27 +22,45 @@ files_to_extract = {
     #     #directories["64_pts"] + 'cycle_7000/element_centers_7000.txt',
     #     directories["64_pts"] + 'cycle_9000/element_centers_9000.txt',
     # ],
-    "128_pts": [
-        #directories["128_pts"] + 'cycle_7000/element_centers_7000.txt',
-        directories["128_pts"] + 'cycle_8800/element_centers_8800.txt',
-    ],
-      "256_pts": [
-        #directories["128_pts"] + 'cycle_7000/element_centers_7000.txt',
-        directories["256_pts"] + 'cycle_8806/element_centers_8806.txt',
-    ],
+    # "128_pts": [
+    #     #directories["128_pts"] + 'cycle_7000/element_centers_7000.txt',
+    #     directories["128_pts"] + 'cycle_8902/element_centers_8902.txt',
+    # ],
+    #   "256_pts": [
+    #     #directories["128_pts"] + 'cycle_7000/element_centers_7000.txt',
+    #     directories["256_pts"] + 'cycle_9006/element_centers_9006.txt',
+    # ],
     # "384_pts": [
     #     #directories["128_pts"] + 'cycle_7000/element_centers_7000.txt',
     #     directories["384_pts"] + 'cycle_9002/element_centers_9002.txt',
     # ]
+      "Re400": [
+        #directories["64_pts"] + 'cycle_7000/element_centers_7000.txt',
+        directories["Re400"] + 'cycle_13000/element_centers_13000.txt',
+    ],
+    "Re1600": [
+        #directories["128_pts"] + 'cycle_7000/element_centers_7000.txt',
+        directories["Re1600"] + 'cycle_12806/element_centers_12806.txt',
+    ],
+      "Re3200": [
+        #directories["128_pts"] + 'cycle_7000/element_centers_7000.txt',
+        directories["Re3200"] + 'cycle_13006/element_centers_13006.txt',
+    ],
 }
 
 styles = {
-    "32_pts": {'marker': 'o', 'linestyle': '-', 'color': 'blue'},
-    "64_pts": {'marker': 's', 'linestyle': '--', 'color': 'magenta'},
-    "128_pts": {'marker': 's', 'linestyle': '--', 'color': 'blue'},
-    "256_pts": {'marker': 's', 'linestyle': '--', 'color': 'red'},
-    "384_pts": {'marker': 's', 'linestyle': '--', 'color': 'cyan'}
+    "Re400": {'marker': 'o', 'linestyle': '-', 'color': 'black'},
+    "Re1600": {'marker': 's', 'linestyle': '--', 'color': 'magenta'},
+    "Re3200": {'marker': 's', 'linestyle': '--', 'color': 'blue'},
 }
+
+# styles = {
+#     "32_pts": {'marker': 'o', 'linestyle': '-', 'color': 'blue'},
+#     "64_pts": {'marker': 's', 'linestyle': '--', 'color': 'magenta'},
+#     "128_pts": {'marker': 's', 'linestyle': '--', 'color': 'blue'},
+#     "256_pts": {'marker': 's', 'linestyle': '--', 'color': 'red'},
+#     "384_pts": {'marker': 's', 'linestyle': '--', 'color': 'cyan'}
+# }
 
 # directories = {
 #     "64_pts_o2": "/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_64/ElementCentersVelocity/",

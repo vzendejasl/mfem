@@ -613,7 +613,7 @@ int main(int argc, char *argv[])
 
    double t = 0.0;
    int step = 0;
-   int initial_step = 0;
+   int global_cycle = 0;
 
    bool restart_files_found = false;
 
@@ -628,7 +628,7 @@ int main(int argc, char *argv[])
             std::cout << "Restart files found. Continuing from checkpoint at time t = " << t << std::endl;
          }
          // Store the initial step number at restart
-         initial_step = step + 1;
+         global_cycle = step;
 
          // Reset step from restart for flow solver
          step = 0;
@@ -646,6 +646,11 @@ int main(int argc, char *argv[])
 
    if (!ctx.restart || !restart_files_found)
    {
+
+     if (Mpi::Root())
+     {
+        std::cout << "Creating the mesh..." << std::endl;
+     }
 
       // Initialize as mesh
       Mesh *init_mesh;
@@ -705,9 +710,9 @@ int main(int argc, char *argv[])
       // mesh->Transform(translate);
       // mesh->Transform(scale);
 
-      if (Mpi::Root() && (ctx.element_subdivisions > 1))
+      if (Mpi::Root() && (ctx.element_subdivisions >= 1))
       {
-         mfem::out << "Refining the mesh... " << std::endl;
+         mfem::out << "Serial refining the mesh... " << std::endl;
       }
 
       // Serial Mesh refinement
@@ -720,6 +725,11 @@ int main(int argc, char *argv[])
       pmesh = new ParMesh(MPI_COMM_WORLD, *mesh);
       pmesh->Finalize(true);
 
+      if (Mpi::Root() && (ctx.element_subdivisions_parallel >= 1))
+      {
+         mfem::out << "Parallel refining the mesh... " << std::endl;
+      }
+
       // Parallel Mesh refinement
       for (int lev = 0; lev < ctx.element_subdivisions_parallel; lev++)
       {
@@ -730,7 +740,7 @@ int main(int argc, char *argv[])
 
       if (Mpi::Root())
       {
-         mfem::out << "Creating the flowsolver. " << std::endl;
+         mfem::out << "Done creating the mesh. Creating the flowsolver. " << std::endl;
       }
 
       // Create the flow solver
@@ -792,11 +802,7 @@ int main(int argc, char *argv[])
       pvdc->SetDataFormat(VTKFormat::BINARY32);
       pvdc->SetHighOrderOutput(true);
       pvdc->SetLevelsOfDetail(ctx.order);
-      if (restart_files_found){
-        pvdc->SetCycle(initial_step - 1);
-      }else{
-        pvdc->SetCycle(initial_step);
-      }
+      pvdc->SetCycle(global_cycle + step);
       pvdc->SetTime(t);
       pvdc->RegisterField("velocity", u_gf);
       pvdc->RegisterField("pressure", p_gf);
@@ -831,11 +837,7 @@ int main(int argc, char *argv[])
       }
       int precision = 16;
       dc->SetPrecision(precision);
-      if (restart_files_found){
-        dc->SetCycle(initial_step - 1);
-      }else{
-        dc->SetCycle(initial_step);
-      }
+      dc->SetCycle(global_cycle + step);
       dc->SetTime(t);
       dc->SetFormat(DataCollection::PARALLEL_FORMAT);
       dc->RegisterField("velocity", u_gf);
@@ -871,11 +873,7 @@ int main(int argc, char *argv[])
            int precision = 16;
            cdc->SetPrecision(precision);
            cdc->SetFormat(DataCollection::PARALLEL_FORMAT);
-           if (restart_files_found){
-             cdc->SetCycle(initial_step - 1);
-           }else{
-             cdc->SetCycle(initial_step);
-           }
+           cdc->SetCycle(global_cycle + step);
            cdc->SetTime(t);
            cdc->RegisterField("velocity", u_gf);
            cdc->RegisterField("pressure", p_gf);
@@ -979,7 +977,7 @@ int main(int argc, char *argv[])
           fprintf(f, "grid = %d x %d x %d\n", nel1d, nel1d, nel1d);
           fprintf(f, "dofs per component = %d\n", ngridpts);
           fprintf(f, "===============================================================================\n");
-          fprintf(f, "        time                   kinetic energy               enstrophy");
+          fprintf(f, "        time                   kinetic energy               enstrophy          \n");
 
           // Write the initial data point
            fprintf(f, "%20.16e     %20.16e     %20.16e\n", t, ke, enstrophy);
@@ -1023,7 +1021,7 @@ int main(int argc, char *argv[])
       flowsolver->Step(t, dt, step);
       cfl = flowsolver->ComputeCFL(*u_gf, ctx.dt);
 
-      if ((step - initial_step) % ctx.data_dump_cycle == 0 || last_step)
+      if ((global_cycle + step) % ctx.data_dump_cycle == 0 || last_step)
       {
          // If restarting, skip the first saved checkpoint
          if (!(ctx.restart && step == 0 && restart_files_found))
@@ -1033,7 +1031,7 @@ int main(int argc, char *argv[])
 
             if (ctx.paraview)
             {
-               pvdc->SetCycle(step + initial_step);
+               pvdc->SetCycle(global_cycle + step);
                pvdc->SetTime(t);
                pvdc->Save();
                if (Mpi::Root())
@@ -1044,13 +1042,13 @@ int main(int argc, char *argv[])
 
             if (ctx.visit)
             {
-               dc->SetCycle(step + initial_step);
+               dc->SetCycle(global_cycle + step);
                dc->SetTime(t);
                dc->Save();
 
                if (Mpi::Root())
                {
-                  std::cout << "\nVisit file saved at cycle " << step + initial_step << "." << std::endl;
+                  std::cout << "\nVisit file saved at cycle " << global_cycle + step << "." << std::endl;
                }
 
                mfem::real_t u_inf_loc = dc->GetField("velocity")->Normlinf();
@@ -1071,13 +1069,13 @@ int main(int argc, char *argv[])
 
             if (ctx.conduit)
             {
-               cdc->SetCycle(step + initial_step);
+               cdc->SetCycle(global_cycle + step);
                cdc->SetTime(t);
                cdc->Save();
 
                if (Mpi::Root())
                {
-                  std::cout << "\nConduit file saved at cycle " << step + initial_step << "." << std::endl;
+                  std::cout << "\nConduit file saved at cycle " << global_cycle + step << "." << std::endl;
                }
 
                mfem::real_t u_inf_loc = cdc->GetField("velocity")->Normlinf();
@@ -1099,19 +1097,19 @@ int main(int argc, char *argv[])
          }
       }
 
-      if ((step - initial_step) % ctx.element_center_cycle == 0 || last_step)
+      if ((global_cycle + step) % ctx.element_center_cycle == 0 || last_step)
       {
          // If restarting, skip the first saved checkpoint
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
             flowsolver->ComputeCurl3D(*u_gf, w_gf);
 
-            ComputeElementCenterValues( u_gf, pmesh, step + initial_step, t, "Velocity");
-            ComputeElementCenterValues(&w_gf, pmesh, step + initial_step, t, "Vorticity");
+            ComputeElementCenterValues( u_gf, pmesh, global_cycle + step, t, "Velocity");
+            ComputeElementCenterValues(&w_gf, pmesh, global_cycle + step, t, "Vorticity");
 
             if (Mpi::Root())
             {
-               std::cout << "\nOutput element center file saved at cycle " << step + initial_step << "." << std::endl;
+               std::cout << "\nOutput element center file saved at cycle " << global_cycle + step << "." << std::endl;
             }
 
          }
@@ -1732,306 +1730,3 @@ bool LoadCheckpoint(ParMesh *&pmesh, ParGridFunction *&u_gf, ParGridFunction *&p
 
     return true;
 }
-
-/*
-void SaveCheckpoint(ParMesh *pmesh, ParGridFunction *u_gf, ParGridFunction *p_gf,
-                    double t, int step, int myid)
-{
-    // Construct the main directory name with suffix
-    std::string main_dir = std::string("CheckPoint_")
-                                             + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
-                                             + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
-                                             + "RefLv" + std::to_string(
-                                                 ctx.element_subdivisions 
-                                               + ctx.element_subdivisions_parallel) 
-                                             + "P" + std::to_string(ctx.order);
-
-    // Create subdirectory for this cycle step
-    std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
-
-    if (myid == 0){
-        // Create main checkpoint directory
-        {
-            std::string command = "mkdir -p " + main_dir;
-            int ret = system(command.c_str());
-            if (ret != 0 && myid == 0)
-            {
-                std::cerr << "Error creating tgv_check_point directory!" << std::endl;
-            }
-        }
-
-        {
-            std::string command = "mkdir -p " + cycle_dir;
-            int ret = system(command.c_str());
-            if (ret != 0 && myid == 0)
-            {
-                std::cerr << "Error creating " << cycle_dir << " directory!" << std::endl;
-            }
-        }
-    }
-
-    MPI_Barrier(MPI_COMM_WORLD);
-
-    // Adjust filenames to be in the cycle directory
-    std::string mesh_fname = cycle_dir + "/tgv-checkpoint.mesh." + std::to_string(myid);
-    std::string u_fname    = cycle_dir + "/tgv-checkpoint.u." + std::to_string(myid);
-    std::string p_fname    = cycle_dir + "/tgv-checkpoint.p." + std::to_string(myid);
-
-    bool error_flag = false;
-
-    // Save the mesh
-    {
-        std::ofstream mesh_ofs(mesh_fname.c_str());
-        mesh_ofs.precision(16);
-
-        if (!mesh_ofs.good())
-        {
-            error_flag = true;
-        }
-        else
-        {
-            pmesh->ParPrint(mesh_ofs);
-            mesh_ofs.close();
-        }
-    }
-
-    // Save the time and step number (only on root processor)
-    if (myid == 0)
-    {
-        std::ofstream t_ofs((cycle_dir + "/tgv-checkpoint.time").c_str());
-        t_ofs.precision(16);
-        if (!t_ofs.good())
-        {
-            error_flag = true;
-        }
-        else
-        {
-            t_ofs << t << std::endl;
-            t_ofs << step << std::endl;
-            t_ofs.close();
-        }
-    }
-
-    // Save the velocity field
-    {
-        std::ofstream u_ofs(u_fname.c_str());
-        u_ofs.precision(16);
-        if (!u_ofs.good())
-        {
-            error_flag = true;
-        }
-        else
-        {
-            u_gf->Save(u_ofs);
-            u_ofs.close();
-        }
-    }
-
-    // Save the pressure field
-    {
-        std::ofstream p_ofs(p_fname.c_str());
-        p_ofs.precision(16);
-        if (!p_ofs.good())
-        {
-            error_flag = true;
-        }
-        else
-        {
-            p_gf->Save(p_ofs);
-            p_ofs.close();
-        }
-    }
-
-    // Use MPI to check if any process has encountered an error
-    int global_error_flag = 0;
-    int local_error_flag = error_flag ? 1 : 0;
-    MPI_Allreduce(&local_error_flag, &global_error_flag, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
-
-    if (global_error_flag)
-    {
-        if (myid == 0)
-        {
-            std::cerr << "Error occurred during checkpoint saving. Aborting." << std::endl;
-        }
-        MPI_Abort(MPI_COMM_WORLD, 1);
-    }
-
-    // Compute norms before reloading (original fields)
-    double u_norm = u_gf->Norml2();
-    double p_norm = p_gf->Norml2();
-
-    if (myid == 0)
-    {
-        std::cout << "Checkpoint saved at step " << step << ", time " << t << std::endl;
-        std::cout << "Original fields: u_gf Norml2 = " << u_norm << ", p_gf Norml2 = " << p_norm << std::endl;
-    }
-
-    // Reload the data and compute norms
-    {
-        std::ifstream u_ifs(u_fname.c_str());
-        std::ifstream p_ifs(p_fname.c_str());
-
-        // Check for errors during file opening
-        bool reload_error = false;
-        if (!u_ifs.good()) { reload_error = true; }
-        if (!p_ifs.good()) { reload_error = true; }
-
-        int reload_error_flag = reload_error ? 1 : 0;
-        int global_reload_error_flag;
-        MPI_Allreduce(&reload_error_flag, &global_reload_error_flag, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
-
-        if (global_reload_error_flag)
-        {
-            if (myid == 0)
-            {
-                std::cerr << "Error opening checkpoint files for reloading. Aborting." << std::endl;
-            }
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
-
-        ParGridFunction temp_u_gf(pmesh, u_ifs);
-        ParGridFunction temp_p_gf(pmesh, p_ifs);
-
-        u_ifs.close();
-        p_ifs.close();
-
-        double temp_u_norm = temp_u_gf.Norml2();
-        double temp_p_norm = temp_p_gf.Norml2();
-
-        if (myid == 0)
-        {
-            std::cout << "After reloading in SaveCheckpoint: u_gf Norml2 = " << temp_u_norm
-                      << ", p_gf Norml2 = " << temp_p_norm << std::endl;
-        }
-    }
-
-    MPI_Barrier(MPI_COMM_WORLD);
-}
-
-bool LoadCheckpoint(ParMesh *&pmesh, ParGridFunction *&u_gf, ParGridFunction *&p_gf,
-                    NavierSolver *&flowsolver, double &t, int &step, int myid, const s_NavierContext &ctx)
-{
-    // If no step given, find last checkpoint step
-    int provided_step = -1; // Assume no step provided
-    if (provided_step < 0)
-    {
-        int last_step = -1;
-        if (myid == 0)
-        {
-          last_step = FindLastCheckpointStep();
-        }
-
-        // now broadcast to every rank
-        MPI_Bcast(&last_step, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-        if (last_step < 0)
-        {
-            // No checkpoints found
-            return false;
-        }
-        provided_step = last_step;
-    }
-
-    // Construct the main directory name with suffix
-    std::string main_dir = std::string("CheckPoint_")
-                                             + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
-                                             + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
-                                             + "P" + std::to_string(ctx.order);
-
-    // Construct directory for given step
-    std::string cycle_dir = main_dir + "/cycle_" + std::to_string(provided_step);
-
-    std::string mesh_fname = cycle_dir + "/tgv-checkpoint.mesh." + std::to_string(myid);
-    std::string u_fname = cycle_dir + "/tgv-checkpoint.u." + std::to_string(myid);
-    std::string p_fname = cycle_dir + "/tgv-checkpoint.p." + std::to_string(myid);
-
-    // Check files
-    {
-        std::ifstream mesh_ifs(mesh_fname); 
-        if (!mesh_ifs.good()) return false; 
-        mesh_ifs.close();
-    }
-
-    if (myid == 0)
-    {
-        std::ifstream t_ifs((cycle_dir + "/tgv-checkpoint.time").c_str());
-        if (!t_ifs.good()) return false;
-        t_ifs.close();
-    }
-
-    {
-        std::ifstream u_ifs(u_fname);
-        if (!u_ifs.good()) return false;
-        u_ifs.close();
-    }
-
-    {
-        std::ifstream p_ifs(p_fname);
-        if (!p_ifs.good()) return false;
-        p_ifs.close();
-    }
-
-    int all_files_exist_int = 1;
-    int global_all_files_exist_int;
-    MPI_Allreduce(&all_files_exist_int, &global_all_files_exist_int, 1, MPI_INT, MPI_LAND, MPI_COMM_WORLD);
-    if (global_all_files_exist_int == 0)
-    {
-        return false;
-    }
-
-    // Load the mesh
-    {
-        std::ifstream mesh_ifs2(mesh_fname);
-        pmesh = new ParMesh(MPI_COMM_WORLD, mesh_ifs2);
-        mesh_ifs2.close();
-    }
-
-    // Read the time and step number (only on root processor)
-    if (myid == 0)
-    {
-        std::ifstream t_ifs2((cycle_dir + "/tgv-checkpoint.time").c_str());
-        t_ifs2 >> t;
-        t_ifs2 >> step;
-        t_ifs2.close();
-        std::cout << "Loaded time t = " << t << ", step = " << step << std::endl;
-    }
-
-    MPI_Bcast(&t, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&step, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-    flowsolver = new NavierSolver(pmesh, ctx.order, ctx.kinvis);
-    flowsolver->EnablePA(ctx.pa);
-    flowsolver->EnableNI(ctx.ni);
-
-    u_gf = flowsolver->GetCurrentVelocity();
-    p_gf = flowsolver->GetCurrentPressure();
-
-    {
-        std::ifstream u_ifs2(u_fname);
-        ParGridFunction temp_u_gf(pmesh, u_ifs2);
-        u_ifs2.close();
-
-        std::ifstream p_ifs2(p_fname);
-        ParGridFunction temp_p_gf(pmesh, p_ifs2);
-        p_ifs2.close();
-
-        *u_gf = temp_u_gf;
-        *p_gf = temp_p_gf;
-    }
-
-    flowsolver->Setup(ctx.dt);
-
-    // Compute norms after loading
-    double u_norm = u_gf->Norml2();
-    double p_norm = p_gf->Norml2();
-
-    if (myid == 0)
-    {
-        std::cout << "After loading from checkpoint in LoadCheckpoint: u_gf Norml2 = "
-                  << u_norm << ", p_gf Norml2 = " << p_norm << std::endl;
-    }
-
-    return true;
-}
-*/
-
