@@ -252,11 +252,11 @@ int main(int argc, char *argv[])
    int ode_solver_type = 4;
    real_t t_final = 10.0;
    real_t dt = 0.01;
-   bool visualization = true;
+   bool visualization = false;
    bool visit = false;
    bool paraview = false;
    bool adios2 = false;
-   bool binary = false;
+   bool binary = true;
    int vis_steps = 100;
    nx = 5;
    ny = 5;

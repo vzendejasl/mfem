@@ -255,7 +255,7 @@ int main(int argc, char *argv[])
    bool visit = false;
    bool paraview = false;
    bool adios2 = false;
-   bool binary = false;
+   bool binary = true;
    int vis_steps = 5;
 #if MFEM_HYPRE_VERSION >= 21800
    PrecType prec_type = PrecType::AIR;

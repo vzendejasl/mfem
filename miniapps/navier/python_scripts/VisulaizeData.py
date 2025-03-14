@@ -3,9 +3,14 @@ import matplotlib.pyplot as plt
 
 # Load data
 # file_to_extract_data = '/p/lustre1/zendejas/mfem_parallel/mfem/miniapps/navier/element_centers_scalar.txt'
-# file_to_extract_data = '/p/lustre1/zendejas/mfem_parallel/mfem/miniapps/navier/element_centers_0.txt'
+#file_to_extract_data = '/p/lustre1/zendejas/mfem_parallel/mfem/miniapps/navier/element_centers_0.txt'
 # file_to_extract_data = '/p/lustre1/zendejas/mfem_parallel/mfem/miniapps/navier//taylor_green_3d_64_cubed/element_centers_56699.txt'
-file_to_extract_data = '/p/lustre1/zendejas/TGV/mfem/tgv_32/ElementCentersVelocity/cycle_0/element_centers_0.txt'
+# file_to_extract_data = '/p/lustre1/zendejas/TGV/mfem/tgv_32/ElementCentersVelocity/cycle_0/element_centers_0.txt'
+
+#file_to_extract_data = '/g/g11/zendejas/Documents/mfem_build/mfem/miniapps/navier/ElementCentersVelocity_Re1600NumPtsPerDir4RefLv0P2/cycle_0/element_centers_0.txt'
+#file_to_extract_data = file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P2/cycle_9001/element_centers_9001.txt'
+file_to_extract_data = '/g/g11/zendejas/Documents/mfem_build/mfem/miniapps/navier/ElementCentersVelocity_Re1600NumPtsPerDir4RefLv0P2/cycle_0/element_centers_0.txt'
+
 data = np.genfromtxt(file_to_extract_data, delimiter=' ', skip_header=6)
 
 # Assign column data
@@ -16,9 +21,9 @@ solution = data[:, 3]
 
 # Round the coordinates to avoid floating-point precision issues
 # Choose a decimal precision that matches your grid spacing resolution.
-xpos_rounded = np.round(xpos, decimals=15)
-ypos_rounded = np.round(ypos, decimals=15)
-zpos_rounded = np.round(zpos, decimals=15)
+xpos_rounded = np.round(xpos, decimals=12)
+ypos_rounded = np.round(ypos, decimals=12)
+zpos_rounded = np.round(zpos, decimals=12)
 
 # Determine unique coordinates after rounding
 x_unique = np.unique(xpos_rounded)

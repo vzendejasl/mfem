@@ -63,6 +63,7 @@ void vel_tgv(const Vector &x, real_t t, Vector &u)
    u(0) = sin(xi) * cos(yi) * cos(zi);
    u(1) = -cos(xi) * sin(yi) * cos(zi);
    u(2) = 0.0;
+
 }
 
 class QuantitiesOfInterest
@@ -149,6 +150,27 @@ public:
           {
               const IntegrationPoint &ip = ir->IntPoint(j);
               T->SetIntPoint(&ip);
+
+            // // Reference position (in the reference element)
+            // int ref_dim = fe->GetDim(); // Dimension of the reference element
+            // Vector ref_pos(ref_dim);
+            // if (ref_dim >= 1) ref_pos(0) = ip.x; // x-coordinate
+            // if (ref_dim >= 2) ref_pos(1) = ip.y; // y-coordinate
+            // if (ref_dim >= 3) ref_pos(2) = ip.z; // z-coordinate
+
+            // // Physical position (mapped to the physical element)
+            // Vector phys_pos(T->GetSpaceDim()); // Physical space dimension
+            // T->Transform(ip, phys_pos); // Maps reference -> physical
+
+            // // Print reference and physical positions
+            // mfem::out << "Integration Point " << j << " in Element " << i << ":\n";
+            // mfem::out << "  Reference Position(0): " << ref_pos(0)<< "\n";
+            // mfem::out << "  Physical Position(0):  " << phys_pos(0) << "\n";
+            // mfem::out << "  Reference Position(1): " << ref_pos(1)<< "\n";
+            // mfem::out << "  Physical Position(1):  " << phys_pos(1) << "\n";
+            // mfem::out << "  Reference Position(2): " << ref_pos(2)<< "\n";
+            // mfem::out << "  Physical Position(2):  " << phys_pos(2) << "\n";
+
   
               real_t w2 = wx(j) * wx(j) + wy(j) * wy(j) + wz(j) * wz(j);
   
@@ -210,9 +232,10 @@ public:
       *kmax_eta = kmax_eta_global;
   }
 
-  void ComputeKolmogorovAndTayloMicroLength(ParGridFunction &d_gf, real_t vol_avg_dissipation, real_t *kolmogorov_length, 
-                                                                   real_t *lambda, real_t *avg_kolmogorov_length, 
-                                                                   real_t *kolmogorov_time_scale, real_t ke)
+  void ComputeKolmogorovAndTaylorMicroLength(ParGridFunction &d_gf, real_t vol_avg_dissipation, real_t *kolmogorov_length, 
+                                                                   real_t *avg_lambda, real_t *avg_kolmogorov_length, 
+                                                                   real_t *kolmogorov_time_scale,
+                                                                   real_t *avg_kolmogorov_time_scale, real_t ke)
   {
       double max_dissipation = 0.0;
   
@@ -234,12 +257,16 @@ public:
       *avg_kolmogorov_length = pow((ctx.kinvis * ctx.kinvis * ctx.kinvis) / vol_avg_dissipation, 0.25);
 
       // Compute the smallest Taylor Micro scale using the maximum dissipation
-      // lambda = sqrt(10*<ke>/<diss>*KE), <> -> volume average
-      *lambda = pow(10.0*ke/vol_avg_dissipation/ctx.reynum, 0.50);
+      // lambda = sqrt(10*<ke>/<diss>), < > means volume average
+      *avg_lambda = pow(10.0*ke/vol_avg_dissipation/ctx.reynum, 0.50);
 
-      // Kolmogorov tiem scale
+      // Kolmogorov time scale
       // Tau_eta = sqrt(\nu/diss_max)
       *kolmogorov_time_scale = pow(ctx.kinvis/global_max_dissipation,0.50);
+
+      // Kolmogorov time scale
+      // Tau_eta = sqrt(\nu/diss_max)
+      *avg_kolmogorov_time_scale = pow(ctx.kinvis/vol_avg_dissipation,0.50);
   }
 
   real_t ComputeAveragedDissipation(ParGridFunction &d)
@@ -751,6 +778,7 @@ int main(int argc, char *argv[])
       // Set the initial condition
       u_gf = flowsolver->GetCurrentVelocity();
       VectorFunctionCoefficient u_excoeff(pmesh->Dimension(), vel_tgv);
+
       u_gf->ProjectCoefficient(u_excoeff);
 
       p_gf = flowsolver->GetCurrentPressure();
@@ -844,7 +872,7 @@ int main(int argc, char *argv[])
       dc->RegisterField("pressure", p_gf);
       dc->RegisterField("vorticity", &w_gf);
       dc->RegisterField("qcriterion", &q_gf);
-      dc->RegisterField("dissipation", &d_gf);
+      // dc->RegisterField("dissipation", &d_gf);
       dc->Save();
    }
 
@@ -879,7 +907,7 @@ int main(int argc, char *argv[])
            cdc->RegisterField("pressure", p_gf);
            cdc->RegisterField("vorticity", &w_gf);
            cdc->RegisterField("qcriterion", &q_gf);
-           cdc->RegisterField("dissipation", &d_gf);
+           // cdc->RegisterField("dissipation", &d_gf);
            cdc->Save();
          }
 #else
@@ -901,12 +929,13 @@ int main(int argc, char *argv[])
    real_t avg_kolmLenScl = 0.0;
    real_t avg_lambda = 0.0;
    real_t kolmTimeScl = 0.0;
+   real_t avg_kolmTimeScl = 0.0;
    real_t hmin_eta = 0.0;
    real_t kmax_eta = 0.0;
    real_t u_rms =  pow(2.0/3.0*ke,0.5);
 
    real_t avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
-   kin_energy.ComputeKolmogorovAndTayloMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, ke);
+   kin_energy.ComputeKolmogorovAndTaylorMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, &avg_kolmTimeScl, ke);
    kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta);
 
    // Taylor Reynolds Number
@@ -990,22 +1019,89 @@ int main(int argc, char *argv[])
           fprintf(f_turb, "dofs per component = %d\n", ngridpts);
           fprintf(f_turb, "===============================================================================");
           fprintf(f_turb, "===============================================================================");
-          fprintf(f_turb, "=========================================================================================\n");
-          fprintf(f_turb, "Average Dissipation     Min Kolmogorov Length Scale    Taylor Length Scale");
-          fprintf(f_turb, "        Average Kolm Len          Kolmogorov Time Scale            Taylor Re");
-          fprintf(f_turb, "                      u_rms                     K_max*eta (>1.5)           hmin/eta (<2.1)  \n");
+          fprintf(f_turb, "===============================================================================");
+          fprintf(f_turb, "=================================================================\n");
+          fprintf(f_turb, "        time             Average Dissipation     Min Kolmogorov Length Scale    Taylor Length Scale");
+          fprintf(f_turb, "        Average Kolm Len          Kolmogorov Time Scale            Average Kolm Time Scale       Taylor Re (Avg)");
+          fprintf(f_turb, "               u_rms                     K_max*eta (>1.5)           hmin/eta (<2.1)  \n");
 
           // Write the initial data point
-           fprintf(f_turb, "%20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e     %20.16e\n",
-                       avg_diss, kolmLenScl, avg_lambda, 
-                       avg_kolmLenScl, kolmTimeScl, Re_taylor, 
-                       u_rms, kmax_eta, hmin_eta);
+           fprintf(f_turb, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e     %20.16e\n",
+                       t, avg_diss, kolmLenScl, 
+                       avg_lambda, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
+                       Re_taylor, u_rms, kmax_eta, hmin_eta);
       } 
 
       fflush(f);
       fflush(f_turb);
       fflush(stdout);
    }
+
+
+// Suppose "fes" is a nodal FiniteElementSpace on ParMesh *pmesh.
+// We assume it's e.g. an H1 space using a Lagrange or Gauss-Lobatto basis.
+//
+// We'll loop over each element 'e', get the reference coordinates
+// of each local DOF, transform them to physical space, and print them.
+
+   FiniteElementSpace *fes = u_gf->FESpace();
+
+   int NE = fes->GetNE(); // local element count
+   int sdim = fes->GetMesh()->SpaceDimension();
+
+   for (int e = 0; e < NE; e++)
+   {
+      // 1) Get the FiniteElement for this element
+      const FiniteElement *fe = fes->GetFE(e);
+
+      // "fe->GetNodes()" returns the reference coords of each dof
+      // if this is a nodal FE type (e.g. H1 Lagrange).
+      // If fe->GetNodes() is nullptr, the space might be non-nodal
+      // (e.g. RT, DG with certain basis, etc.)
+      const IntegrationRule &ir = fe->GetNodes();
+      if (!ir)
+      {
+         std::cout << "Element " << e
+                   << " has no explicit nodal reference coords (not a nodal FE)."
+                   << std::endl;
+         continue;
+      }
+
+      // The local number of dofs = ir->GetNPoints().
+      int ndofs = ir.GetNPoints();
+
+      ElementTransformation *T = fes->GetElementTransformation(e);
+
+      // std::cout << "Element " << e
+      //           << " has " << ndofs << " basis nodes:" << std::endl;
+
+      // 2) For each local dof, get the reference integration point:
+      for (int dof_i = 0; dof_i < ndofs; dof_i++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(dof_i);
+
+         // 3) Transform reference -> physical
+         T->SetIntPoint(&ip);
+         Vector phys(sdim);
+         T->Transform(ip, phys);
+
+         // // Print the physical coords
+         // std::cout << "   Node " << dof_i << " -> ( ";
+         // for (int d = 0; d < sdim; d++)
+         // {
+         //    std::cout << phys[d];
+         //    if (d + 1 < sdim) std::cout << ", ";
+         // }
+         // std::cout << " )" << std::endl;
+      }
+   }
+
+
+
+
+
+
+
 
    real_t dt = ctx.dt;
    real_t t_final = ctx.t_final;
@@ -1105,7 +1201,7 @@ int main(int argc, char *argv[])
             flowsolver->ComputeCurl3D(*u_gf, w_gf);
 
             ComputeElementCenterValues( u_gf, pmesh, global_cycle + step, t, "Velocity");
-            ComputeElementCenterValues(&w_gf, pmesh, global_cycle + step, t, "Vorticity");
+            // ComputeElementCenterValues(&w_gf, pmesh, global_cycle + step, t, "Vorticity");
 
             if (Mpi::Root())
             {
@@ -1127,7 +1223,7 @@ int main(int argc, char *argv[])
 
       ComputeDissipation(*u_gf, d_gf);
       avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
-      kin_energy.ComputeKolmogorovAndTayloMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda,&avg_kolmLenScl,&kolmTimeScl, ke);
+      kin_energy.ComputeKolmogorovAndTaylorMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, &avg_kolmTimeScl, ke);
       kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta);
       Re_taylor = u_rms*avg_lambda/ctx.kinvis;
       u_rms =  pow(2.0/3.0*ke,0.5);
@@ -1139,10 +1235,10 @@ int main(int argc, char *argv[])
          {
            printf("%.5E %.5E %.5E %.5E %.5E %.5E %.5E\n", t, ctx.dt, u_inf, p_inf, ke, enstrophy, cfl);
            fprintf(f, "%20.16e     %20.16e     %20.16e\n", t, ke, enstrophy);
-           fprintf(f_turb, "%20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e     %20.16e\n",
-                       avg_diss, kolmLenScl, avg_lambda, 
-                       avg_kolmLenScl, kolmTimeScl, Re_taylor, 
-                       u_rms, kmax_eta, hmin_eta);
+           fprintf(f_turb, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e     %20.16e\n",
+                       t, avg_diss, kolmLenScl, 
+                       avg_lambda, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
+                       Re_taylor, u_rms, kmax_eta, hmin_eta);
            fflush(f);
            fflush(f_turb);
            fflush(stdout);
@@ -1150,7 +1246,7 @@ int main(int argc, char *argv[])
       }
    }
 
-   flowsolver->PrintTimingData();
+   // flowsolver->PrintTimingData();
 
    // Test if the result for the test run is as expected.
    if (ctx.checkres)
@@ -1211,6 +1307,8 @@ void VerifyPeriodicMesh(mfem::Mesh *mesh)
     std::cout << "Done checking... Periodic in all directions." << std::endl;
 }
 
+
+/*
 void ComputeElementCenterValues(ParGridFunction* sol,
                                 ParMesh* pmesh,
                                 int step,
@@ -1383,7 +1481,195 @@ void ComputeElementCenterValues(ParGridFunction* sol,
         fflush(f);
         fclose(f);
     }
+}*/
+
+
+void ComputeElementCenterValues(ParGridFunction* sol,
+                                ParMesh* pmesh,
+                                int step,
+                                double time,
+                                const std::string &suffix)
+{
+   // MPI setup
+   MPI_Comm comm = pmesh->GetComm();
+   int rank, size;
+   MPI_Comm_rank(comm, &rank);
+   MPI_Comm_size(comm, &size);
+
+   // Construct the main directory name with suffix
+   std::string main_dir = "ElementCenters" + suffix +
+                            "_Re" + std::to_string(static_cast<int>(ctx.reynum)) +
+                            "NumPtsPerDir" + std::to_string(ctx.num_pts) +
+                            "RefLv" + std::to_string(ctx.element_subdivisions + ctx.element_subdivisions_parallel) +
+                            "P" + std::to_string(ctx.order);
+   // Create subdirectory for this cycle step
+   std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
+   // Construct the filename inside the cycle directory
+   std::string fname = cycle_dir + "/element_centers_" + std::to_string(step) + ".txt";
+
+   if (rank == 0)
+   {
+      // Create main and cycle directories
+      if (system(("mkdir -p " + main_dir).c_str()) != 0)
+         std::cerr << "Error creating " << main_dir << " directory!" << std::endl;
+      if (system(("mkdir -p " + cycle_dir).c_str()) != 0)
+         std::cerr << "Error creating " << cycle_dir << " directory!" << std::endl;
+   }
+
+   MPI_Barrier(MPI_COMM_WORLD);
+
+   // Instead of one integration point (the element center), we will sample each element
+   // on an N x N x N grid, where N = ctx.order + 1.
+   // int npts = ctx.order + 1;  // number of sample points per coordinate direction
+   int npts = ctx.order + 2;  // number of sample points per coordinate direction
+
+   // Local arrays to store data from the local elements
+   std::vector<double> local_x, local_y, local_z;
+   std::vector<double> local_velx, local_vely, local_velz;
+
+   FiniteElementSpace *fes = sol->FESpace();
+   int vdim = fes->GetVDim();
+
+   // Loop over local elements
+   for (int e = 0; e < pmesh->GetNE(); e++)
+   {
+      // // Print reference and physical positions
+      // mfem::out << "In Element " << e << ":\n";
+      // Get element transformation for element e
+      ElementTransformation *Trans = pmesh->GetElementTransformation(e);
+      
+      // For each element, loop over a uniform grid of points in the reference element [0,1]^d.
+      for (int iz = 0; iz < npts; iz++)
+      {
+         // double z_ref = (npts == 1) ? 0.5 : static_cast<double>(iz) / (npts - 1);
+         double z_ref = static_cast<double>(iz) / npts;
+         for (int iy = 0; iy < npts; iy++)
+         {
+            // double y_ref = (npts == 1) ? 0.5 : static_cast<double>(iy) / (npts - 1);
+            double y_ref = static_cast<double>(iy) / npts;
+            for (int ix = 0; ix < npts; ix++)
+            {
+               // double x_ref = (npts == 1) ? 0.5 : static_cast<double>(ix) / (npts - 1);
+               double x_ref = static_cast<double>(ix) / npts;
+               IntegrationPoint ip;
+               ip.Set3(x_ref, y_ref, z_ref); // sample point in reference element
+
+               // Get the physical coordinates for this sample point
+               Vector phys_coords(Trans->GetSpaceDim());
+               Trans->Transform(ip, phys_coords);
+               double x_center = phys_coords(0);
+               double y_center = phys_coords(1);
+               double z_center = phys_coords(2);
+
+               // Evaluate the solution at the sample point
+               Vector u_val(vdim);
+               sol->GetVectorValue(*Trans, ip, u_val);
+               double u_x = u_val(0);
+               double u_y = u_val(1);
+               double u_z = u_val(2);
+
+               // Reference position (in the reference element)
+               int ref_dim = fes->GetVDim(); // Dimension of the reference element
+               Vector ref_pos(ref_dim);
+               if (ref_dim >= 1) ref_pos(0) = ip.x; // x-coordinate
+               if (ref_dim >= 2) ref_pos(1) = ip.y; // y-coordinate
+               if (ref_dim >= 3) ref_pos(2) = ip.z; // z-coordinate
+
+               // Physical position (mapped to the physical element)
+               Vector phys_pos(Trans->GetSpaceDim()); // Physical space dimension
+               Trans->Transform(ip, phys_pos); // Maps reference -> physical
+
+               // mfem::out << "  Reference Position(0): " << ref_pos(0)<< "\n";
+               // mfem::out << "  Physical Position(0):  " << phys_pos(0) << "\n";
+               // mfem::out << "  Reference Position(1): " << ref_pos(1)<< "\n";
+               // mfem::out << "  Physical Position(1):  " << phys_pos(1) << "\n";
+               // mfem::out << "  Reference Position(2): " << ref_pos(2)<< "\n";
+               // mfem::out << "  Physical Position(2):  " << phys_pos(2) << "\n";
+
+               // Append sample point data to local arrays
+               local_x.push_back(x_center);
+               local_y.push_back(y_center);
+               local_z.push_back(z_center);
+               local_velx.push_back(u_x);
+               local_vely.push_back(u_y);
+               local_velz.push_back(u_z);
+            } // ix
+         } // iy
+      } // iz
+   } // for each local element
+
+   // Gather local element sample counts
+   int local_num = local_x.size();
+   std::vector<int> all_num_elements(size);
+   std::vector<int> displs(size);
+   MPI_Gather(&local_num, 1, MPI_INT,
+              all_num_elements.data(), 1, MPI_INT, 0, comm);
+
+   std::vector<double> all_x, all_y, all_z;
+   std::vector<double> all_velx, all_vely, all_velz;
+   if (rank == 0)
+   {
+      int total = 0;
+      displs[0] = 0;
+      for (int i = 0; i < size; i++)
+      {
+         total += all_num_elements[i];
+         if (i > 0)
+            displs[i] = displs[i - 1] + all_num_elements[i - 1];
+      }
+      all_x.resize(total);
+      all_y.resize(total);
+      all_z.resize(total);
+      all_velx.resize(total);
+      all_vely.resize(total);
+      all_velz.resize(total);
+   }
+
+   MPI_Gatherv(local_x.data(), local_num, MPI_DOUBLE,
+               all_x.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   MPI_Gatherv(local_y.data(), local_num, MPI_DOUBLE,
+               all_y.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   MPI_Gatherv(local_z.data(), local_num, MPI_DOUBLE,
+               all_z.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   MPI_Gatherv(local_velx.data(), local_num, MPI_DOUBLE,
+               all_velx.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   MPI_Gatherv(local_vely.data(), local_num, MPI_DOUBLE,
+               all_vely.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   MPI_Gatherv(local_velz.data(), local_num, MPI_DOUBLE,
+               all_velz.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+
+   if (rank == 0)
+   {
+      FILE *f = fopen(fname.c_str(), "w");
+      if (!f)
+      {
+         std::cerr << "Error opening file " << fname << std::endl;
+         MPI_Abort(MPI_COMM_WORLD,1);
+      }
+
+      // Write header information
+      fprintf(f, "3D Taylor Green Vortex\n");
+      fprintf(f, "Order = %d\n", ctx.order);
+      fprintf(f, "Step = %d\n", step);
+      fprintf(f, "Time = %e\n", time);
+      fprintf(f, "===================================================================");
+      fprintf(f, "==========================================================================\n");
+      fprintf(f, "            x                      y                      z         ");
+      fprintf(f, "            vecx                   vecy                   vecz\n");
+
+      // Write data for each sample point
+      for (size_t i = 0; i < all_x.size(); i++)
+      {
+         fprintf(f, "%20.16e %20.16e %20.16e %20.16e %20.16e %20.16e\n",
+                 all_x[i], all_y[i], all_z[i],
+                 all_velx[i], all_vely[i], all_velz[i]);
+      }
+      fflush(f);
+      fclose(f);
+      std::cout << "Output element sample file saved: " << fname << std::endl;
+   }
 }
+
 
 
 void ComputeElementCenterValuesScalar(ParGridFunction* sol, ParMesh* pmesh, int step, double time)

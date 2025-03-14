@@ -1,14 +1,29 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import re
+import os 
 
-file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_256/ElementCentersVelocity/'
+import scipy.stats as stats
+
+#file_directory = '/p/lustre2/zendejas/TestCases/mfem/TGV/Order2_Re1600/tgv_512/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv4P2/'
+#file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_384/ElementCentersVelocity_Re1600NumPtsPerDir48RefLv3P2/'
+#file_directory = '/g/g11/zendejas/Documents/mfem_build/mfem/miniapps/navier/ElementCentersVelocity_Re1600NumPtsPerDir4RefLv0P2/'
+# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_128_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P4/'
+#file_directory = '/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P4/'
+# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P2/'
+file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128_test_sampling_higher/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P2/'
+# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P2/'
+# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_256_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv3P2/'
+# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order3_Re1600/tgv_128_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P3/'
+# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_128_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P4/'
+# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P4/'
+# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order3_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P3/'
+# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P2/'
 files_to_extract_data = [
     #file_directory + 'cycle_3000/element_centers_3000.txt',
-    #file_directory + 'cycle_5000/element_centers_5000.txt',
-    #file_directory + 'cycle_7000/element_centers_7000.txt',
-    #file_directory + 'cycle_9000/element_centers_9000.txt',
-    file_directory + 'cycle_11002/element_centers_11002.txt',
+    file_directory + 'cycle_9002/element_centers_9002.txt',
+    #file_directory + 'cycle_11500/element_centers_11500.txt',
+    # file_directory + 'cycle_9000/element_centers_9000.txt',
 ]
 
 plt.figure(figsize=(10, 8))
@@ -47,9 +62,9 @@ for file_to_extract_data in files_to_extract_data:
     velz = data[:, 5]
 
     # Round the coordinates to avoid floating-point precision issues
-    xpos_rounded = np.round(xpos, decimals=12)
-    ypos_rounded = np.round(ypos, decimals=12)
-    zpos_rounded = np.round(zpos, decimals=12)
+    xpos_rounded = np.round(xpos, decimals=10)
+    ypos_rounded = np.round(ypos, decimals=10)
+    zpos_rounded = np.round(zpos, decimals=10)
 
     # Determine unique coordinates after rounding
     x_unique = np.unique(xpos_rounded)
@@ -123,7 +138,7 @@ for file_to_extract_data in files_to_extract_data:
     dx = x_unique[1] - x_unique[0]
     dy = y_unique[1] - y_unique[0]
     dz = z_unique[1] - z_unique[0]
-
+    
     kx = np.fft.fftfreq(nx, d=dx/(2*np.pi))
     ky = np.fft.fftfreq(ny, d=dy/(2*np.pi))
     kz = np.fft.fftfreq(nz, d=dz/(2*np.pi))
@@ -139,13 +154,12 @@ for file_to_extract_data in files_to_extract_data:
     k_flat = k_magnitude.flatten()
     energy_flat = energy_density.flatten()
 
-    k_max = np.max(k_magnitude)
-    k_bins = np.linspace(0, k_max, num=nx//2)
-    k_bin_centers = 0.5 * (k_bins[:-1] + k_bins[1:])
-
-    E_k, _ = np.histogram(k_flat, bins=k_bins, weights=energy_flat)
-    N_k, _ = np.histogram(k_flat, bins=k_bins)
-
+    num_bins = nx
+    k_bin_edges = np.arange(0, num_bins+1) - 0.5
+    
+    k_bin_centers = 0.5 * (k_bin_edges[:-1] + k_bin_edges[1:])
+    E_k, _ = np.histogram(k_flat, bins=k_bin_edges, weights=energy_flat)
+    
     # Use the step/time extracted from the header if available
     if step_number_extracted is not None:
         label_str = f"Step {step_number_extracted}"
@@ -155,19 +169,31 @@ for file_to_extract_data in files_to_extract_data:
     if time_extracted is not None:
         label_str += f", Time {time_extracted:.3e}"
 
-    plt.loglog(k_bin_centers, E_k, 'o-', label=label_str)
+    # Save wavenumbers and energy to a text file
+    output_filename = os.path.join(file_directory, f'energy_spectrum_step_{step_number_extracted}.txt')
+    print(f"[Rank 0] Saving energy spectrum to {output_filename}")
+    np.savetxt(output_filename, np.column_stack((k_bin_centers, E_k)), 
+               header=f'Wavenumber_k Energy_E(k) (Step {step_number_extracted}, Time {time_extracted:.3e})', 
+               fmt='%.6e %.6e', comments='# ')
+
+    plt.loglog(k_bin_centers, E_k, '-', label=label_str)
 
 # Plot -5/3 slope line for reference
-k_ref = k_bin_centers[0]
-E_ref = 1e3
+k_ref = 1
+E_ref = .1e1
 E_line = E_ref * (k_bin_centers / k_ref)**(-5.0/3.0)
 plt.loglog(k_bin_centers, E_line, 'r--', label='k^-5/3 slope')
-#ymax = 1e4  
-#ymin = 1e-6
-#plt.ylim(ymin, ymax)
+#plt.semilogy(k_bin_centers, E_line, 'r--', label='k^-5/3 slope')
+
+# ymax = 1e1  
+# ymin = 1e-6
+# plt.ylim(ymin, ymax)
+# xmax = np.max(kx)
+# xmin = 1
+# plt.xlim(xmin,xmax)
 
 plt.xlabel('Wavenumber k')
-plt.ylabel('k^2 * E(k)')
+plt.ylabel('k E(k)')
 plt.title('Energy Spectra of the 3D Taylor-Green Vortex (Multiple Timesteps)')
 plt.legend()
 plt.grid(True, which="both", ls="--")
