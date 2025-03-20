@@ -11,7 +11,12 @@ import scipy.stats as stats
 # file_directory = '/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_128_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P4/'
 #file_directory = '/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P4/'
 # file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P2/'
-file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128_test_sampling_higher/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P2/'
+#file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128_test_sampling_higher/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P2/'
+# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P2/'
+file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_128_test_sampling/ElementCentersVelocity_Re400NumPtsPerDir32RefLv2P2/'
+file_directory = '/p/lustre1/zendejas/TGV/mfem/Order4_Re400/tgv_128_test_sampling/ElementCentersVelocity_Re400NumPtsPerDir32RefLv2P4/'
+file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir64RefLv0P2/'
+# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128_more_quad_pts/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P2/'
 # file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P2/'
 # file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_256_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv3P2/'
 # file_directory = '/p/lustre1/zendejas/TGV/mfem/Order3_Re1600/tgv_128_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P3/'
@@ -21,9 +26,8 @@ file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128_test_sampli
 # file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P2/'
 files_to_extract_data = [
     #file_directory + 'cycle_3000/element_centers_3000.txt',
-    file_directory + 'cycle_9002/element_centers_9002.txt',
+    file_directory + 'cycle_9001/element_centers_9001.txt',
     #file_directory + 'cycle_11500/element_centers_11500.txt',
-    # file_directory + 'cycle_9000/element_centers_9000.txt',
 ]
 
 plt.figure(figsize=(10, 8))

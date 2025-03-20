@@ -1521,7 +1521,7 @@ void ComputeElementCenterValues(ParGridFunction* sol,
    // Instead of one integration point (the element center), we will sample each element
    // on an N x N x N grid, where N = ctx.order + 1.
    // int npts = ctx.order + 1;  // number of sample points per coordinate direction
-   int npts = ctx.order + 2;  // number of sample points per coordinate direction
+   int npts = ctx.order + 1;  // number of sample points per coordinate direction
 
    // Local arrays to store data from the local elements
    std::vector<double> local_x, local_y, local_z;
@@ -1533,7 +1533,7 @@ void ComputeElementCenterValues(ParGridFunction* sol,
    // Loop over local elements
    for (int e = 0; e < pmesh->GetNE(); e++)
    {
-      // // Print reference and physical positions
+      // Print reference and physical positions
       // mfem::out << "In Element " << e << ":\n";
       // Get element transformation for element e
       ElementTransformation *Trans = pmesh->GetElementTransformation(e);

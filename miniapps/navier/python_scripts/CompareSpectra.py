@@ -121,42 +121,48 @@ def main():
     }
  
     dir_styles = {
-       # "/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P4/": {
-       #     "step": 9001,
-       #     "label": "Order4 64^3",
-       #     "color": "magenta",
+       # "/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_128_test_sampling/sample_npts_order_1": {
+       #     "step": 9002,
+       #     "label": "Re 400 Order 1 more sample points",
+       #     "color": "blue",
        #     "linestyle": "-"
        # },  
-       # "/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P4/": {
-       #     "step": 9000,
-       #     "label": "Order2 64^3",
-       #     "color": "magenta",
-       #     "linestyle": "-"
-       # },  
-       "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P2/": {
+       "/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_128_test_sampling/ElementCentersVelocity_Re400NumPtsPerDir32RefLv2P2/": {
            "step": 9001,
-           "label": "Order 2",
+           "label": "Re 400 Order 2",
+           "color": "magenta",
+           "linestyle": "-"
+       },  
+       "/p/lustre1/zendejas/TGV/mfem/Order4_Re400/tgv_128_test_sampling/ElementCentersVelocity_Re400NumPtsPerDir32RefLv2P4/": {
+           "step": 9001,
+           "label": "Re 400 Order 4",
            "color": "blue",
            "linestyle": "-"
        },  
+       # "/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_128_test_sampling/sample_npts_order_3": {
+       #     "step": 9001,
+       #     "label": "Re 400 Order 3 more sample points",
+       #     "color": "red",
+       #     "linestyle": "-"
+       # },  
+       # "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P2/": {
+       #     "step": 8501,
+       #     "label": "Order 2",
+       #     "color": "blue",
+       #     "linestyle": "-"
+       # },  
        "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128_test_sampling_higher/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P2/": {
            "step": 9002,
            "label": "Order 2",
            "color": "purple",
            "linestyle": "-"
        },  
-       # "/p/lustre1/zendejas/TGV/mfem/Order3_Re1600/tgv_128_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P3/": {
-       #     "step": 9003,
-       #     "label": "Order 3",
-       #     "color": "purple",
-       #     "linestyle": "-"
-       # },  
-       # "/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_128_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P4/": {
-       #     "step": 9001,
-       #     "label": "Order 4",
-       #     "color": "green",
-       #     "linestyle": "-"
-       # },  
+       "/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_128_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P4/": {
+           "step": 9001,
+           "label": "Order 4",
+           "color": "green",
+           "linestyle": "-"
+       },  
        # "/p/lustre2/zendejas/TestCases/mfem/TGV/Order2_Re1600/tgv_512/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv4P2": {
        #     "step": 11500,
        #     "label": "512^3",
@@ -169,6 +175,12 @@ def main():
            "color": "black",
            "linestyle": "-"
        },        
+       # "/p/lustre1/zendejas/TGV/mfem/sample_data/": {
+       #     "step": 1000,
+       #     "label": "Reference (256^3 FD, Order 4)",
+       #     "color": "red",
+       #     "linestyle": "-"
+       # },        
    }    
     
 

@@ -38,8 +38,10 @@ struct s_NavierContext
 {
    int order = 6;
    real_t kinvis = 1.0 / 100000.0;
-   real_t t_final = 10 * 1e-3;
-   real_t dt = 1e-3;
+   real_t t_final = 10 * 1e1;
+   // real_t t_final = 10 * 1e-3;
+   // real_t dt = 1e-3;
+   real_t dt = 5e-4;
 } ctx;
 
 void vel_shear_ic(const Vector &x, real_t t, Vector &u)
@@ -58,8 +60,10 @@ void vel_shear_ic(const Vector &x, real_t t, Vector &u)
    {
       u(0) = tanh(rho * (0.75 - yi));
    }
+   
+   // u(0) = tanh(rho * (yi - 1.0));
 
-   u(1) = delta * sin(2.0 * M_PI * xi);
+   // u(1) = delta * sin(2.0 * M_PI * xi);
 }
 
 int main(int argc, char *argv[])
@@ -67,13 +71,36 @@ int main(int argc, char *argv[])
    Mpi::Init(argc, argv);
    Hypre::Init();
 
-   int serial_refinements = 2;
+   int serial_refinements = 0;
+   // int serial_refinements = 2;
 
-   Mesh *mesh = new Mesh("../../data/periodic-square.mesh");
+   // Mesh *mesh = new Mesh("../../data/periodic-square.mesh");
+
+   // Initialize as mesh
+   Mesh *init_mesh;
+
+   real_t length = 1.0;
+   int num_pts = 24;
+   init_mesh = new Mesh(Mesh::MakeCartesian2D(num_pts,
+                                              num_pts,
+                                              Element::QUADRILATERAL,
+                                              true,
+                                              length,
+                                              length, false));
+
+   Vector x_translation({length, 0.0, 0.0});
+   Vector y_translation({0.0, length, 0.0});
+   Vector z_translation({0.0, 0.0, length});
+
+   std::vector<Vector> translations = {x_translation,y_translation};
+
+   Mesh *mesh = new Mesh(Mesh::MakePeriodic(*init_mesh, init_mesh->CreatePeriodicVertexMapping(translations)));
+
+
    mesh->EnsureNodes();
    GridFunction *nodes = mesh->GetNodes();
-   *nodes -= -1.0;
-   *nodes /= 2.0;
+   // *nodes -= -1.0;
+   // *nodes /= 2.0;
 
    for (int i = 0; i < serial_refinements; ++i)
    {
