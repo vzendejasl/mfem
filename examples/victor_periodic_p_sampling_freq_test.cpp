@@ -12,8 +12,11 @@ using namespace mfem;
 
 // Global mesh parameters
 Vector bb_min, bb_max;
-int nx = 5, ny = 5, nz = 5;
-double freq = 2.0;  // Frequency for the analytic solution
+int num_pts = 5;
+int nx = num_pts, ny = num_pts, nz = num_pts;
+double freq1 = 30.0;  // Frequency for the analytic solution
+// set freq2 to 46 for non-periodic and 50 for periodic solution
+double freq2 = 50.0;  // Frequency for the analytic solution
 
 // -----------------------------------------------------------------------------
 // The analytic vector function used for projection.
@@ -22,7 +25,8 @@ double freq = 2.0;  // Frequency for the analytic solution
 void u_exact_vec(const Vector &x, Vector &u)
 {
    u.SetSize(3);
-   u(0) = cos(2 * M_PI * x(0) * freq);
+   u(0) = 0.5*cos(2 * M_PI * x(0) * freq1) + 0.5*cos(2* M_PI * x(0) * freq2);
+   // u(0) = cos(2 * M_PI * x(0) * freq1);
    u(1) = 0.0;
    u(2) = 0.0;
 }
@@ -33,11 +37,13 @@ void u_exact_vec(const Vector &x, Vector &u)
 // reference coordinate is computed as i/npts. The physical coordinates and
 // analytic vector field values are computed, then gathered and written to a
 // text file ("sample_points_interior.txt") for post-processing.
-void OutputSamplePointsInterior(ParMesh *pmesh, int order, double time)
+void OutputSamplePointsInterior(ParGridFunction *sol, ParMesh *pmesh, int order, double time)
 {
    int npts = order + 1;
    vector<double> local_x, local_y, local_z;
    vector<double> local_u0, local_u1, local_u2;
+
+   FiniteElementSpace *fes = sol->FESpace();
 
    for (int e = 0; e < pmesh->GetNE(); e++)
    {
@@ -60,10 +66,16 @@ void OutputSamplePointsInterior(ParMesh *pmesh, int order, double time)
                double y_phys = phys_coords(1);
                double z_phys = phys_coords(2);
 
-               // Compute the analytic vector field.
-               double u0 = cos(2 * M_PI * x_phys * freq);
-               double u1 = 0.0;
-               double u2 = 0.0;
+               // Get vector dimension (should be 3 for velocity)
+               int vdim = fes->GetVDim();
+               Vector u_val(vdim);
+               
+               // Get vector value at ip
+               sol->GetVectorValue(*Trans, ip, u_val);
+
+               double u0 = u_val(0);
+               double u1 = u_val(1);
+               double u2 = u_val(2);
 
                local_x.push_back(x_phys);
                local_y.push_back(y_phys);
@@ -124,9 +136,9 @@ void OutputSamplePointsInterior(ParMesh *pmesh, int order, double time)
    // Rank 0 writes the gathered data to a text file.
    if (rank == 0)
    {
-      ofstream ofs("sample_points_interior.txt");
+      ofstream ofs("sample_points_with_one_elem_boundaries.txt");
       ofs << "# Sample Points (Interior Sampling)\n";
-      ofs << "# Order = " << order << ", Frequency = " << freq << ", Time = " << time << "\n";
+      ofs << "# Order = " << order << ", Frequency1, 2 = " << freq1 << "," << freq2 << ", Time = " << time << "\n";
       ofs << "# x y z u0 u1 u2\n";
       for (size_t i = 0; i < all_x.size(); i++)
       {
@@ -134,7 +146,7 @@ void OutputSamplePointsInterior(ParMesh *pmesh, int order, double time)
              << all_u0[i] << " " << all_u1[i] << " " << all_u2[i] << "\n";
       }
       ofs.close();
-      cout << "Output sample points (interior) saved: sample_points_interior.txt" << endl;
+      cout << "Output sample points (interior) saved: sample_points_with_one_elem_boundaries.txt" << endl;
    }
 }
 
@@ -144,11 +156,15 @@ void OutputSamplePointsInterior(ParMesh *pmesh, int order, double time)
 // so that the sample points include the boundaries of the reference element.
 // The physical coordinates and analytic vector field values are gathered and written
 // to a text file ("sample_points_boundary.txt").
-void OutputSamplePointsWithBoundary(ParMesh *pmesh, int order, double time)
+void OutputSamplePointsWithBoundary(ParGridFunction *sol, ParMesh *pmesh, int order, double time)
 {
-   int npts = order + 1;
+   // This approach requires an additional degree of freedom compared to
+   // sampling such that one set of the edges are ignored. 
+   int npts = order + 2;
    vector<double> local_x, local_y, local_z;
    vector<double> local_u0, local_u1, local_u2;
+
+   FiniteElementSpace *fes = sol->FESpace();
 
    for (int e = 0; e < pmesh->GetNE(); e++)
    {
@@ -171,9 +187,17 @@ void OutputSamplePointsWithBoundary(ParMesh *pmesh, int order, double time)
                double y_phys = phys_coords(1);
                double z_phys = phys_coords(2);
 
-               double u0 = cos(2 * M_PI * x_phys * freq);
-               double u1 = 0.0;
-               double u2 = 0.0;
+               // Get vector dimension (should be 3 for velocity)
+               int vdim = fes->GetVDim();
+               Vector u_val(vdim);
+               
+               // Get vector value at ip
+               sol->GetVectorValue(*Trans, ip, u_val);
+
+               double u0 = u_val(0);
+               double u1 = u_val(1);
+               double u2 = u_val(2);
+
 
                local_x.push_back(x_phys);
                local_y.push_back(y_phys);
@@ -232,9 +256,9 @@ void OutputSamplePointsWithBoundary(ParMesh *pmesh, int order, double time)
 
    if (rank == 0)
    {
-      ofstream ofs("sample_points_boundary.txt");
+      ofstream ofs("sample_points_with_both_elem_boundaries.txt");
       ofs << "# Sample Points (Boundary-Inclusive Sampling)\n";
-      ofs << "# Order = " << order << ", Frequency = " << freq << ", Time = " << time << "\n";
+      ofs << "# Order = " << order << ", Frequency1, 2 = " << freq1 << "," << freq2 << ", Time = " << time << "\n";
       ofs << "# x y z u0 u1 u2\n";
       for (size_t i = 0; i < all_x.size(); i++)
       {
@@ -242,9 +266,112 @@ void OutputSamplePointsWithBoundary(ParMesh *pmesh, int order, double time)
              << all_u0[i] << " " << all_u1[i] << " " << all_u2[i] << "\n";
       }
       ofs.close();
-      cout << "Output sample points (boundary) saved: sample_points_boundary.txt" << endl;
+      cout << "Output sample points (boundary) saved: sample_points_with_both_elem_boundaries.txt" << endl;
    }
 }
+
+
+void OutputSamplePointsElementCenters(ParGridFunction *sol, ParMesh *pmesh, int order, double time)
+{
+   // This approach requires an additional degree of freedom compared to
+   // sampling such that one set of the edges are ignored. 
+   vector<double> local_x, local_y, local_z;
+   vector<double> local_u0, local_u1, local_u2;
+
+   FiniteElementSpace *fes = sol->FESpace();
+
+   for (int e = 0; e < pmesh->GetNE(); e++)
+   {
+      ElementTransformation *Trans = pmesh->GetElementTransformation(e);
+      
+      IntegrationPoint ip;
+      ip.Set3(0.5,0.5,0.5);
+
+      Vector phys_coords(Trans->GetSpaceDim());
+      Trans->Transform(ip, phys_coords);
+      double x_phys = phys_coords(0);
+      double y_phys = phys_coords(1);
+      double z_phys = phys_coords(2);
+
+      // Get vector dimension (should be 3 for velocity)
+      int vdim = fes->GetVDim();
+      Vector u_val(vdim);
+      
+      // Get vector value at ip
+      sol->GetVectorValue(*Trans, ip, u_val);
+
+      double u0 = u_val(0);
+      double u1 = u_val(1);
+      double u2 = u_val(2);
+
+      local_x.push_back(x_phys);
+      local_y.push_back(y_phys);
+      local_z.push_back(z_phys);
+      local_u0.push_back(u0);
+      local_u1.push_back(u1);
+      local_u2.push_back(u2);
+   }
+
+   MPI_Comm comm = pmesh->GetComm();
+   int rank, size;
+   MPI_Comm_rank(comm, &rank);
+   MPI_Comm_size(comm, &size);
+   int local_num = local_x.size();
+   vector<int> all_num_elements(size);
+   vector<int> displs(size);
+
+   MPI_Gather(&local_num, 1, MPI_INT, all_num_elements.data(), 1, MPI_INT, 0, comm);
+
+   vector<double> all_x, all_y, all_z, all_u0, all_u1, all_u2;
+   if (rank == 0)
+   {
+      int total = 0;
+      displs[0] = 0;
+      for (int i = 0; i < size; i++)
+      {
+         total += all_num_elements[i];
+         if (i > 0)
+         {
+            displs[i] = displs[i - 1] + all_num_elements[i - 1];
+         }
+      }
+      all_x.resize(total);
+      all_y.resize(total);
+      all_z.resize(total);
+      all_u0.resize(total);
+      all_u1.resize(total);
+      all_u2.resize(total);
+   }
+
+   MPI_Gatherv(local_x.data(), local_num, MPI_DOUBLE,
+               all_x.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   MPI_Gatherv(local_y.data(), local_num, MPI_DOUBLE,
+               all_y.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   MPI_Gatherv(local_z.data(), local_num, MPI_DOUBLE,
+               all_z.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   MPI_Gatherv(local_u0.data(), local_num, MPI_DOUBLE,
+               all_u0.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   MPI_Gatherv(local_u1.data(), local_num, MPI_DOUBLE,
+               all_u1.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   MPI_Gatherv(local_u2.data(), local_num, MPI_DOUBLE,
+               all_u2.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+
+   if (rank == 0)
+   {
+      ofstream ofs("sample_points_cell_centers.txt");
+      ofs << "# Sample Points (Cell Centers)\n";
+      ofs << "# Order = " << order << ", Frequency1, 2 = " << freq1 << "," << freq2 << ", Time = " << time << "\n";
+      ofs << "# x y z u0 u1 u2\n";
+      for (size_t i = 0; i < all_x.size(); i++)
+      {
+         ofs << all_x[i] << " " << all_y[i] << " " << all_z[i] << " "
+             << all_u0[i] << " " << all_u1[i] << " " << all_u2[i] << "\n";
+      }
+      ofs.close();
+      cout << "Output sample points (cell centers) saved: sample_points_cell_centers.txt" << endl;
+   }
+}
+
 
 // -----------------------------------------------------------------------------
 // Main: creates one mesh with one order and produces two text files for
@@ -259,7 +386,8 @@ int main(int argc, char *argv[])
    int order = 1;
    OptionsParser args(argc, argv);
    args.AddOption(&order, "-o", "--order", "Finite element order.");
-   args.AddOption(&freq, "-f", "--frequency", "Set the frequency for the analytic solution.");
+   args.AddOption(&freq1, "-f1", "--frequency1", "Set the frequency for the analytic solution.");
+   args.AddOption(&freq2, "-f2", "--frequency2", "Set the frequency for the analytic solution.");
    args.Parse();
    if (!args.Good())
    {
@@ -271,31 +399,45 @@ int main(int argc, char *argv[])
       args.PrintOptions(cout);
 
    // Build a 3D unit-cube mesh with periodic boundaries.
-   double x1 = 0.0, x2 = 1.0;
-   double y1 = 0.0, y2 = 1.0;
-   double z1 = 0.0, z2 = 1.0;
+   double x1 = 0.0, x2 = 0.10;
+   double y1 = 0.0, y2 = 0.10;
+   double z1 = 0.0, z2 = 0.10;
 
    Mesh *init_mesh = new Mesh(Mesh::MakeCartesian3D(nx, ny, nz, Element::HEXAHEDRON, x2 - x1, y2 - y1, z2 - z1));
 
-   // Create a periodic version of the mesh.
-   Vector x_translation({x2 - x1, 0.0, 0.0});
-   Vector y_translation({0.0, y2 - y1, 0.0});
-   Vector z_translation({0.0, 0.0, z2 - z1});
-   vector<Vector> translations = {x_translation, y_translation, z_translation};
-   Mesh *periodic_mesh = new Mesh(Mesh::MakePeriodic(*init_mesh, init_mesh->CreatePeriodicVertexMapping(translations)));
+   int dim = init_mesh->Dimension();
+
+   // // Create a periodic version of the mesh.
+   // Vector x_translation({x2 - x1, 0.0, 0.0});
+   // Vector y_translation({0.0, y2 - y1, 0.0});
+   // Vector z_translation({0.0, 0.0, z2 - z1});
+   // vector<Vector> translations = {x_translation, y_translation, z_translation};
+
+   // Mesh *periodic_mesh = new Mesh(Mesh::MakePeriodic(*init_mesh, init_mesh->CreatePeriodicVertexMapping(translations)));
+   
+   // Create the parallel mesh.
+   ParMesh pmesh(MPI_COMM_WORLD, *init_mesh);
    delete init_mesh;
 
 
-   // Create the parallel mesh.
-   ParMesh pmesh(MPI_COMM_WORLD, *periodic_mesh);
-   delete periodic_mesh;
+   // Finite element space
+   H1_FECollection fec(order, dim);
+   ParFiniteElementSpace fespace(&pmesh, &fec, dim);
+
+   // Project the exact solution onto the finite element space
+   ParGridFunction u(&fespace);
+   VectorFunctionCoefficient u_ex_coeff(dim, u_exact_vec);
+   u.ProjectCoefficient(u_ex_coeff);
+
+   // delete periodic_mesh;
    pmesh.GetBoundingBox(bb_min, bb_max, order);
 
    double time = 0.0; // Set the simulation time if needed.
 
    // Output two sets of sample-point data.
-   OutputSamplePointsInterior(&pmesh, order, time);
-   OutputSamplePointsWithBoundary(&pmesh, order, time);
+   OutputSamplePointsInterior(&u, &pmesh, order, time);
+   OutputSamplePointsWithBoundary(&u, &pmesh, order, time);
+   OutputSamplePointsElementCenters(&u, &pmesh, order, time);
 
    // Finalize MPI.
    Mpi::Finalize();
