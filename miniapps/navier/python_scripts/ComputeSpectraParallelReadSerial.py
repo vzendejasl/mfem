@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """
-This script reads a 3D velocity field from an MFEM "element centers"
+This script reads a 3D velocity field from an MFEM discreteley sample
 data file, reconstructs a grid, uses mpi4py-fft to compute the energy spectrum,
 and saves the wavenumber and energy data to a text file in a memory-efficient manner.
 
 Usage:
-    mpiexec -n 4 python ComputeSpectraParallel.py /path/to/data/file.txt
+    srun -n 4 python ComputeSpectraParallel.py /path/to/data/file.txt
 """
 
 from mpi4py import MPI
@@ -121,9 +121,11 @@ if rank == 0:
 
     # Load data in chunks to handle large files
     print("[Rank 0] Loading data in chunks (skipping header)...")
+
     chunk_size = 10_000_000
     chunks = pd.read_csv(data_filename, delimiter=' ', skiprows=6, chunksize=chunk_size, header=None)
     xpos, ypos, zpos, velx, vely, velz = [], [], [], [], [], []
+
     for chunk in chunks:
         xpos.append(chunk.iloc[:, 0].values)
         ypos.append(chunk.iloc[:, 1].values)
@@ -158,8 +160,10 @@ if rank == 0:
     # Validate data size
     expected_num_points = nx * ny * nz
     actual_num_points = xpos.size
+
     print(f"Expected number of points: {expected_num_points}")
     print(f"Actual number of points: {actual_num_points}")
+
     if actual_num_points != expected_num_points:
         print("Warning: The actual number of data points does not match the expected number based on grid sizes.")
 
@@ -225,26 +229,30 @@ if rank == 0:
     local_velx = np.ascontiguousarray(velx_grid[local_slice])
     local_vely = np.ascontiguousarray(vely_grid[local_slice])
     local_velz = np.ascontiguousarray(velz_grid[local_slice])
+
     for r in range(1, size):
         local_starts = np.zeros(3, dtype=int)
         local_stops = np.zeros(3, dtype=int)
         comm.Recv(local_starts, source=r, tag=10)
         comm.Recv(local_stops, source=r, tag=11)
+
         sl = tuple(slice(start, stop) for start, stop in zip(local_starts, local_stops))
+
         send_velx = np.ascontiguousarray(velx_grid[sl])
         send_vely = np.ascontiguousarray(vely_grid[sl])
         send_velz = np.ascontiguousarray(velz_grid[sl])
         comm.Send(send_velx, dest=r, tag=0)
         comm.Send(send_vely, dest=r, tag=1)
         comm.Send(send_velz, dest=r, tag=2)
+
     log_memory_rank0("After distributing data (before deleting grids)")
 
-    # Compute grid spacings
-    dx = x_unique[1] - x_unique[0] if nx > 1 else 1.0
-    dy = y_unique[1] - y_unique[0] if ny > 1 else 1.0
-    dz = z_unique[1] - z_unique[0] if nz > 1 else 1.0
+    # Optional serial spectrum computation
+    # # Compute grid spacings
+    # dx = x_unique[1] - x_unique[0] if nx > 1 else 1.0
+    # dy = y_unique[1] - y_unique[0] if ny > 1 else 1.0
+    # dz = z_unique[1] - z_unique[0] if nz > 1 else 1.0
 
-    # Optional serial spectrum computation (commented out)
     # k_centers_serial, E_k_serial = compute_serial_spectrum(
     #     velx_grid, vely_grid, velz_grid,
     #     dx, dy, dz,
@@ -256,16 +264,21 @@ if rank == 0:
     # Free memory
     del velx_grid, vely_grid, velz_grid
     log_memory_rank0("After deleting full grids")
+
 else:
+
     local_slice = fft.local_slice(forward_output=False)
     local_starts = np.array([sl.start if isinstance(sl, slice) else 0 for sl in local_slice], dtype=int)
     local_stops = np.array([sl.stop if isinstance(sl, slice) else dim for sl, dim in zip(local_slice, (nx, ny, nz))], dtype=int)
+
     comm.Send(local_starts, dest=0, tag=10)
     comm.Send(local_stops, dest=0, tag=11)
+
     local_shape = tuple(stop - start for start, stop in zip(local_starts, local_stops))
     local_velx = np.empty(local_shape, dtype=np.float64)
     local_vely = np.empty(local_shape, dtype=np.float64)
     local_velz = np.empty(local_shape, dtype=np.float64)
+
     comm.Recv(local_velx, source=0, tag=0)
     comm.Recv(local_vely, source=0, tag=1)
     comm.Recv(local_velz, source=0, tag=2)
@@ -277,14 +290,17 @@ log_memory_global("After distributing and receiving data")
 temp_x = local_velx.astype(np.complex128)
 temp_y = local_vely.astype(np.complex128)
 temp_z = local_velz.astype(np.complex128)
+
 u_dist_x_in[:] = temp_x
 u_dist_y_in[:] = temp_y
 u_dist_z_in[:] = temp_z
+
 comm.Barrier()
 log_memory_global("After assigning to FFT input arrays")
 
 # Clean up temporary arrays
 del local_velx, local_vely, local_velz, temp_x, temp_y, temp_z
+
 comm.Barrier()
 log_memory_global("After deleting local velocity arrays")
 
@@ -292,6 +308,7 @@ log_memory_global("After deleting local velocity arrays")
 fft.forward(u_dist_x_in, u_dist_x_out)
 fft.forward(u_dist_y_in, u_dist_y_out)
 fft.forward(u_dist_z_in, u_dist_z_out)
+
 comm.Barrier()
 log_memory_global("After performing FFT")
 
@@ -305,6 +322,7 @@ if rank == 0:
     dz = z_unique[1] - z_unique[0] if nz > 1 else 1.0
 else:
     dx = dy = dz = None
+
 dx = comm.bcast(dx, root=0)
 dy = comm.bcast(dy, root=0)
 dz = comm.bcast(dz, root=0)
@@ -329,6 +347,7 @@ energy_flat_local = local_energy.flatten()
 
 k_max = np.sqrt(np.max(kx)**2 + np.max(ky)**2 + np.max(kz)**2)
 num_bins = nx
+
 k_bin_edges = np.arange(0, num_bins+1) - 0.5
 k_bin_centers = 0.5 * (k_bin_edges[:-1] + k_bin_edges[1:])
 
@@ -338,6 +357,7 @@ if rank == 0:
     E_k = np.zeros_like(local_E_k)
 else:
     E_k = None
+
 comm.Reduce(local_E_k, E_k, op=MPI.SUM, root=0)
 
 # Compute total kinetic energy in Fourier space
@@ -346,10 +366,12 @@ tke_fourier = comm.allreduce(local_tke_fourier, op=MPI.SUM)
 
 ### Output Handling (Rank 0)
 if rank == 0:
+
     # Determine output filename with flexible type extraction
     input_basename = os.path.basename(data_filename)
     step_suffix_with_underscore = f'_{step_number_extracted}.txt'
     step_suffix_without_underscore = f'{step_number_extracted}.txt'
+
     if input_basename.endswith(step_suffix_with_underscore):
         type_part = input_basename[:-len(step_suffix_with_underscore)]  # Remove '_9002.txt'
     elif input_basename.endswith(step_suffix_without_underscore):
@@ -365,15 +387,18 @@ if rank == 0:
     output_filename = os.path.join(os.path.dirname(data_filename), f'energy_spectrum_{type_part}_step_{step_number_extracted}.txt')
 
     print(f"[Rank 0] Saving parallel energy spectrum to {output_filename}")
+
     np.savetxt(output_filename, np.column_stack((k_bin_centers, E_k)),
                header=f'Wavenumber_k Energy_E(k) (Step {step_number_extracted}, Time {time_extracted:.3e})',
                fmt='%.6e %.6e', comments='# ')
+
     log_memory_rank0("After saving spectrum")
 
     # Energy conservation check
     print("\n--- Total Kinetic Energy Comparison ---")
     print(f"Total Kinetic Energy in Physical Space (TKE_physical): {tke_physical:.6f}")
     print(f"Total Kinetic Energy in Fourier Space (TKE_fourier):  {tke_fourier:.6f}")
+
     if tke_physical != 0:
         rel_error = np.abs(tke_physical - tke_fourier) / tke_physical * 100
     else:
@@ -382,23 +407,27 @@ if rank == 0:
 
     # Plotting
     print("[Rank 0] Plotting energy spectra (parallel vs serial)...")
-    plt.figure(figsize=(10, 8))
-    label_str = f"Step {step_number_extracted}, Time = {time_extracted:.3e}"
-    plt.loglog(k_bin_centers, E_k, 'b-', label='Parallel Spectrum')
-    # Uncomment to include serial spectrum in the plot (if computed)
-    # if 'k_centers_serial' in locals() and 'E_k_serial' in locals():
-    #     plt.loglog(k_centers_serial, E_k_serial, 'g--', label='Serial Spectrum')
-    k_ref = 1
-    E_ref = 0.1e1
-    E_line = E_ref * (k_bin_centers / k_ref)**(-5.0/3.0)
-    plt.loglog(k_bin_centers, E_line, 'r--', label='$k^{-5/3}$ slope')
-    plt.xlabel('Wavenumber k')
-    plt.ylabel('E(k)')
-    plt.title('Energy Spectrum: Parallel FFT')
-    plt.legend()
-    plt.grid(True, which="both", ls="--")
-    plt.tight_layout()
-    plt.show()
+
+    # # Uncomment to include plot
+    # plt.figure(figsize=(10, 8))
+    # label_str = f"Step {step_number_extracted}, Time = {time_extracted:.3e}"
+    # plt.loglog(k_bin_centers, E_k, 'b-', label='Parallel Spectrum')
+
+    # # Uncomment to include serial spectrum in the plot (if computed)
+    # # if 'k_centers_serial' in locals() and 'E_k_serial' in locals():
+    # #     plt.loglog(k_centers_serial, E_k_serial, 'g--', label='Serial Spectrum')
+
+    # k_ref = 1
+    # E_ref = 0.1e1
+    # E_line = E_ref * (k_bin_centers / k_ref)**(-5.0/3.0)
+    # plt.loglog(k_bin_centers, E_line, 'r--', label='$k^{-5/3}$ slope')
+    # plt.xlabel('Wavenumber k')
+    # plt.ylabel('E(k)')
+    # plt.title('Energy Spectrum: Parallel FFT')
+    # plt.legend()
+    # plt.grid(True, which="both", ls="--")
+    # plt.tight_layout()
+    # plt.show()
 
 ### Finalize MPI
 comm.Barrier()

@@ -41,85 +41,151 @@ def parse_spectrum_file(filepath):
     return step_num, time_val, None, None
 
 def main():
+    # dir_styles = [
+    #     {
+    #         "directory": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128/SampledDataVelocityP2/",
+    #         "step": 9000,
+    #         "label": "Sampled Cell Center N = 128, P = 2",
+    #         "color": "blue",
+    #         "linestyle": "-",
+    #         "file_prefix": "energy_spectrum_step_cell_center"
+    #     },
+    #     {
+    #         "directory": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128/SampledDataVelocityP2/",
+    #         "step": 9000,
+    #         "label": "Sampled One boundary N = 128, P = 2",
+    #         "color": "magenta",
+    #         "linestyle": "-",
+    #         "file_prefix": "energy_spectrum_step_one_boundary"
+    #     },
+    #     {
+    #         "directory": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128/SampledDataVelocityP2/",
+    #         "step": 9000,
+    #         "label": "Sampled Both boundary N = 128, P = 2",
+    #         "color": "red",
+    #         "linestyle": "-",
+    #         "file_prefix": "energy_spectrum_step_both_boundaries"
+    #     },
+    #     {
+    #         "directory":
+    #         "/p/lustre1/zendejas/TGV/mfem/Order3_Re1600/tgv_128/SampledDataVelocityP3/cycle_9002",
+    #         "step": 9002,
+    #         "label": "Sampled Both boundary N = 128, P = 3",
+    #         "color": "magenta",
+    #         "linestyle": "-",
+    #         "file_prefix": "energy_spectrum_include_both_boundaries_step"
+    #     },
+    #     {
+    #         "directory":
+    #         "/p/lustre1/zendejas/TGV/mfem/Order3_Re1600/tgv_128/SampledDataVelocityP3/cycle_9002",
+    #         "step": 9002,
+    #         "label": "Sampled One boundary N = 128, P = 3",
+    #         "color": "purple",
+    #         "linestyle": "-",
+    #         "file_prefix": "energy_spectrum_include_one_boundary_step"
+    #     },
+    #     {
+    #         "directory":
+    #         "/p/lustre1/zendejas/TGV/mfem/Order3_Re1600/tgv_128/SampledDataVelocityP3/cycle_9002",
+    #         "step": 9002,
+    #         "label": "Sampled Element Center N = 128, P = 3",
+    #         "color": "blue",
+    #         "linestyle": "--",
+    #         "file_prefix": "energy_spectrum_element_centers_step"
+    #     },
+    #     {
+    #         "directory":
+    #         "/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_128/SampledDataVelocityP4/cycle_9000",
+    #         "step": 9000,
+    #         "label": "Sampled Both boundary N = 128, P = 4",
+    #         "color": "magenta",
+    #         "linestyle": "-",
+    #         "file_prefix": "energy_spectrum_include_both_boundaries_step"
+    #     },
+    #     {
+    #         "directory":
+    #         "/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_128/SampledDataVelocityP4/cycle_9000",
+    #         "step": 9000,
+    #         "label": "Sampled One boundary N = 128, P = 4",
+    #         "color": "purple",
+    #         "linestyle": "-",
+    #         "file_prefix": "energy_spectrum_include_one_boundary_step"
+    #     },
+    #     {
+    #         "directory":
+    #         "/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_128/SampledDataVelocityP4/cycle_9000",
+    #         "step": 9000,
+    #         "label": "Sampled Element Center N = 128, P = 4",
+    #         "color": "blue",
+    #         "linestyle": "--",
+    #         "file_prefix": "energy_spectrum_element_centers_step"
+    #     },
+    #     {
+    #         "directory": "/p/lustre1/zendejas/TGV/mfem/sample_data_2/",
+    #         "step": 9000,
+    #         "label": "Reference (Spectral)",
+    #         "color": "black",
+    #         "linestyle": "-"
+    #     },
+    # ]
+
     dir_styles = [
         {
-            "directory": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128/SampledDataVelocityP2/",
+            "directory": "/p/lustre1/zendejas/TGV/mfem/effective_resolution_768/SampledDataVelocityP3/cycle_9000",
             "step": 9000,
-            "label": "Sampled Cell Center N = 128, P = 2",
+            "label": "Effective Res 768^3, N = 192, P = 3 (P+2 sampling -- include both boundaries)",
             "color": "blue",
             "linestyle": "-",
-            "file_prefix": "energy_spectrum_step_cell_center"
+            "file_prefix": "energy_spectrum_include_both_boundaries_step"
         },
         {
-            "directory": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128/SampledDataVelocityP2/",
+            "directory": "/p/lustre1/zendejas/TGV/mfem/effective_resolution_768/SampledDataVelocityP3/cycle_9000",
             "step": 9000,
-            "label": "Sampled One boundary N = 128, P = 2",
-            "color": "magenta",
-            "linestyle": "-",
-            "file_prefix": "energy_spectrum_step_one_boundary"
+            "label": "Effective Res 768^3, N = 192, P = 3 (Element center sampling)",
+            "color": "Blue",
+            "linestyle": "--",
+            "file_prefix": "energy_spectrum_element_centers_step"
         },
         {
-            "directory": "/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128/SampledDataVelocityP2/",
+            "directory": "/p/lustre1/zendejas/TGV/mfem/effective_resolution_768/SampledDataVelocityP1/cycle_9000",
             "step": 9000,
-            "label": "Sampled Both boundary N = 128, P = 2",
+            "label": "Effective Res 768^3, N = 384, P = 1 (P+2 sampling -- include both boundaries)",
             "color": "red",
             "linestyle": "-",
-            "file_prefix": "energy_spectrum_step_both_boundaries"
+            "file_prefix": "energy_spectrum_include_both_boundaries_step"
         },
         {
-            "directory":
-            "/p/lustre1/zendejas/TGV/mfem/Order3_Re1600/tgv_128/SampledDataVelocityP3/cycle_9002",
-            "step": 9002,
-            "label": "Sampled Both boundary N = 128, P = 3",
+            "directory": "/p/lustre1/zendejas/TGV/mfem/effective_resolution_768/SampledDataVelocityP1/cycle_9000",
+            "step": 9000,
+            "label": "Effective Res 768^3, N = 384, P = 3 (Element center sampling)",
+            "color": "red",
+            "linestyle": "--",
+            "file_prefix": "energy_spectrum_element_centers_step"
+        },
+        {
+            "directory": "/p/lustre1/zendejas/TGV/mfem/effective_resolution_256/SampledDataVelocityP3/cycle_9000",
+            "step": 9000,
+            "label": "Effective Res 256^3, N = 64, P = 3 (P+2 sampling -- include both boundaries)",
             "color": "magenta",
             "linestyle": "-",
             "file_prefix": "energy_spectrum_include_both_boundaries_step"
         },
         {
-            "directory":
-            "/p/lustre1/zendejas/TGV/mfem/Order3_Re1600/tgv_128/SampledDataVelocityP3/cycle_9002",
-            "step": 9002,
-            "label": "Sampled One boundary N = 128, P = 3",
-            "color": "purple",
-            "linestyle": "-",
-            "file_prefix": "energy_spectrum_include_one_boundary_step"
-        },
-        {
-            "directory":
-            "/p/lustre1/zendejas/TGV/mfem/Order3_Re1600/tgv_128/SampledDataVelocityP3/cycle_9002",
-            "step": 9002,
-            "label": "Sampled Element Center N = 128, P = 3",
-            "color": "blue",
-            "linestyle": "--",
-            "file_prefix": "energy_spectrum_element_centers_step"
-        },
-        {
-            "directory":
-            "/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_128/SampledDataVelocityP4/cycle_9000",
+            "directory": "/p/lustre1/zendejas/TGV/mfem/effective_resolution_256/SampledDataVelocityP3/cycle_9000",
             "step": 9000,
-            "label": "Sampled Both boundary N = 128, P = 4",
+            "label": "Effective Res 256^3, N = 64, P = 3 (Element center sampling)",
             "color": "magenta",
-            "linestyle": "-",
-            "file_prefix": "energy_spectrum_include_both_boundaries_step"
-        },
-        {
-            "directory":
-            "/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_128/SampledDataVelocityP4/cycle_9000",
-            "step": 9000,
-            "label": "Sampled One boundary N = 128, P = 4",
-            "color": "purple",
-            "linestyle": "-",
-            "file_prefix": "energy_spectrum_include_one_boundary_step"
-        },
-        {
-            "directory":
-            "/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_128/SampledDataVelocityP4/cycle_9000",
-            "step": 9000,
-            "label": "Sampled Element Center N = 128, P = 4",
-            "color": "blue",
             "linestyle": "--",
             "file_prefix": "energy_spectrum_element_centers_step"
         },
+        # {
+        #     "directory": "/p/lustre1/zendejas/TGV/mfem/effective_resolution_768/SampledDataVelocityP1/cycle_9000",
+        #     "step": 9000,
+        #     "label": "Sampled Cell Center N = 128, P = 2",
+        #     "color": "magenta",
+        #     "linestyle": "-",
+        #     "file_prefix": "sampled_data_element_centers"
+        # },
         {
             "directory": "/p/lustre1/zendejas/TGV/mfem/sample_data_2/",
             "step": 9000,
@@ -127,7 +193,7 @@ def main():
             "color": "black",
             "linestyle": "-"
         },
-    ]
+        ]
 
     plt.figure(figsize=(10, 8))
     all_k = []
