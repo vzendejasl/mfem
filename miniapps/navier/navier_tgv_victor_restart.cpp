@@ -599,7 +599,7 @@ bool IndicesAreConnected(const Table &t, int i, int j)
 
 void VerifyPeriodicMesh(Mesh *mesh);
 
-void ComputeElementCenterValues(ParGridFunction *sol, ParMesh *pmesh, int step, double time, const std::string &suffix);
+void SamplePoints(ParGridFunction *sol, ParMesh *pmesh, int step, double time, const std::string &suffix);
 
 void ComputeElementCenterValuesScalar(ParGridFunction *sol, ParMesh *pmesh,int step, double time);
 
@@ -1216,7 +1216,7 @@ int main(int argc, char *argv[])
          // If restarting, skip the first saved checkpoint
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
-            ComputeElementCenterValues( u_gf, pmesh, global_cycle + step, t, "Velocity");
+            SamplePoints( u_gf, pmesh, global_cycle + step, t, "Velocity");
             // ComputeElementCenterValues(&w_gf, pmesh, global_cycle + step, t, "Vorticity");
 
             if (Mpi::Root())
@@ -1518,7 +1518,7 @@ void ComputeElementCenterValues(ParGridFunction* sol,
 }
 */
 
-void ComputeElementCenterValues(mfem::ParGridFunction* sol,
+void SamplePoints(mfem::ParGridFunction* sol,
                                 mfem::ParMesh* pmesh,
                                 int step,
                                 double time,
@@ -1531,7 +1531,7 @@ void ComputeElementCenterValues(mfem::ParGridFunction* sol,
    MPI_Comm_size(comm, &size);
 
    // Construct the main directory name with suffix
-   std::string main_dir = "ElementCenters" + suffix +
+   std::string main_dir = "SamplePoints" + suffix +
                           "_Re" + std::to_string(static_cast<int>(ctx.reynum)) +
                           "NumPtsPerDir" + std::to_string(ctx.num_pts) +
                           "RefLv" + std::to_string(ctx.element_subdivisions + ctx.element_subdivisions_parallel) +
@@ -1540,7 +1540,7 @@ void ComputeElementCenterValues(mfem::ParGridFunction* sol,
    // Create subdirectory for this cycle step
    std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
    // Construct the filename inside the cycle directory
-   std::string fname = cycle_dir + "/element_centers_" + std::to_string(step) + ".txt";
+   std::string fname = cycle_dir + "/include_both_boundaries_" + std::to_string(step) + ".txt";
 
    // Create directories on rank 0
    if (rank == 0)
@@ -1661,7 +1661,7 @@ void ComputeElementCenterValues(mfem::ParGridFunction* sol,
 
    // Output confirmation on rank 0
    if (rank == 0)
-      std::cout << "Output element sample file saved: " << fname << std::endl;
+      std::cout << "Sampled data file saved: " << fname << std::endl;
 
    // Final synchronization
    MPI_Barrier(MPI_COMM_WORLD);
