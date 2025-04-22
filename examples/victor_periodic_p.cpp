@@ -51,7 +51,6 @@ void ComputeAverageSolution(ParGridFunction* sol,ParFiniteElementSpace* fes, Par
 // Compute the total average value of the solution
 void ComputeTotalIntegral(ParGridFunction* sol, ParFiniteElementSpace* fes, ParMesh* pmesh);
 
-
 void ComputeElementCenterValues(ParGridFunction* sol, ParFiniteElementSpace* fes, ParMesh* pmesh);
 // void ComputeElementFaceAverageValues(ParGridFunction* sol, ParFiniteElementSpace* fes, ParMesh* pmesh);
 // void ComputeElementSurfaceAverageValues(ParGridFunction* sol, ParFiniteElementSpace* fes, ParMesh* pmesh);
@@ -253,10 +252,10 @@ int main(int argc, char *argv[])
    real_t t_final = 10.0;
    real_t dt = 0.01;
    bool visualization = false;
-   bool visit = false;
+   bool visit = true;
    bool paraview = false;
    bool adios2 = false;
-   bool binary = true;
+   bool binary = false;
    int vis_steps = 100;
    nx = 5;
    ny = 5;
@@ -264,11 +263,12 @@ int main(int argc, char *argv[])
    bool structured_mesh = false;
    integral_width = 0.2;
 
-   double x2 = M_PI;
+   // double x2 = M_PI;
+   double x2 = 1.0;
    double x1 = 0.0;
-   double y2 = M_PI;
+   double y2 = 1.0;
    double y1 = 0.0;
-   double z2 = M_PI;
+   double z2 = 1.0;
    double z1 = 0.0;
 
 
@@ -594,7 +594,7 @@ int main(int argc, char *argv[])
    // ComputeAverageSolution(u, fes, pmesh);
    // ComputeTotalIntegral(u, fes, pmesh);
    
-   ComputeElementCenterValues(u, fes, pmesh);
+   // ComputeElementCenterValues(u, fes, pmesh);
    // ComputeElementCenterAndLeftFaceValues(u,fes,pmesh);
 
    // ComputeElementFaceAverageValues(u,fes,pmesh);
@@ -884,8 +884,15 @@ void velocity_function(const Vector &x, Vector &v)
   int dim = x.Size();
   
   if (dim == 3){
-    v(0) = 1.0;
-    v(1) = 1.0;
+    real_t xi = x(0);
+    real_t yi = x(1);
+    real_t zi = x(2);
+
+    // v(0) = 1.0;
+    // v(1) = 1.0;
+    // v(2) = 0.0;
+    v(0) = sin(xi*M_PI) * cos(yi*M_PI) * cos(zi*M_PI);
+    v(1) = -cos(xi*M_PI) * sin(yi*M_PI) * cos(zi*M_PI);
     v(2) = 0.0;
   }
   else if(dim==2){

@@ -1,12 +1,10 @@
 // sample_checkpoint_debug.cpp
 //
 // A simplified program that loads a checkpoint state using VisItDataCollection,
-// makes a deep copy of the "velocity" field, and then uniformly samples the
+// makes a copy of the "velocity" field, and then uniformly samples the
 // velocity field using the provided SampledDataUniform function.
-// Major debug print statements are printed only on the root process.
 // 
 // srun -n 560 -ppdebug --exclusive ~/Documents/mfem_build/mfem/examples/victor_sample_data -o 3 -vd VisitData_Re1600NumPtsPerDir32RefLv2P4/tgv_output_visit -cyc 9000
-// Compile with your MFEM build settings.
 
 #include "mfem.hpp"
 #include <iostream>
@@ -74,7 +72,6 @@ void SampledDataUniformBothBoundaries(ParGridFunction* sol,
    if (rank == 0)
    {
       mfem::out << " Using " << npts << " sample points per coordinate." << endl;
-      mfem::out << "Number of elements: " << pmesh->GetNE() << endl;
    }
 
    // Local arrays to store sample data.
@@ -123,78 +120,60 @@ void SampledDataUniformBothBoundaries(ParGridFunction* sol,
       }
    }
 
+   // Prepare the data string, including the header on rank 0
+   std::string data_str;
    if (rank == 0)
    {
-      mfem::out << " Finished sampling local elements." << endl;
+      std::ostringstream header_stream;
+      header_stream << "3D Taylor Green Vortex\n"
+                    << "Order = " << ctx.order << "\n"
+                    << "Step = " << step << "\n"
+                    << "Time = " << std::scientific << std::setprecision(16) << time << "\n"
+                    << "==================================================================="
+                    << "==========================================================================\n"
+                    << "            x                      y                      z                   vecx                   vecy                   vecz\n";
+      data_str = header_stream.str();
    }
 
-   // Gather counts from all processes.
-   int local_num = local_x.size();
-   vector<int> all_num_elements(size);
-   vector<int> displs(size);
-   MPI_Gather(&local_num, 1, MPI_INT, all_num_elements.data(), 1, MPI_INT, 0, comm);
-
-   vector<double> all_x, all_y, all_z;
-   vector<double> all_velx, all_vely, all_velz;
-   if (rank == 0)
+   // Append local data to data_str
+   std::ostringstream local_data_stream;
+   for (size_t i = 0; i < local_x.size(); i++)
    {
-      int total = 0;
-      displs[0] = 0;
-      for (int i = 0; i < size; i++)
-      {
-         total += all_num_elements[i];
-         if (i > 0)
-            displs[i] = displs[i - 1] + all_num_elements[i - 1];
-      }
-      all_x.resize(total);
-      all_y.resize(total);
-      all_z.resize(total);
-      all_velx.resize(total);
-      all_vely.resize(total);
-      all_velz.resize(total);
-      mfem::out << " Gathering sample data from " << size << " processes." << endl;
+      local_data_stream << std::scientific << std::setprecision(16)
+                        << std::setw(20) << local_x[i] << " "
+                        << std::setw(20) << local_y[i] << " "
+                        << std::setw(20) << local_z[i] << " "
+                        << std::setw(20) << local_velx[i] << " "
+                        << std::setw(20) << local_vely[i] << " "
+                        << std::setw(20) << local_velz[i] << "\n";
+   }
+   data_str += local_data_stream.str();
+
+   // Open the file collectively with MPI I/O
+   MPI_File fh;
+   int err = MPI_File_open(comm, fname.c_str(), MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
+   if (err != MPI_SUCCESS)
+   {
+      if (rank == 0) std::cerr << "Error opening file " << fname << " with MPI I/O" << std::endl;
+      MPI_Abort(comm, 1);
    }
 
-   MPI_Gatherv(local_x.data(), local_num, MPI_DOUBLE,
-               all_x.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_y.data(), local_num, MPI_DOUBLE,
-               all_y.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_z.data(), local_num, MPI_DOUBLE,
-               all_z.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_velx.data(), local_num, MPI_DOUBLE,
-               all_velx.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_vely.data(), local_num, MPI_DOUBLE,
-               all_vely.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_velz.data(), local_num, MPI_DOUBLE,
-               all_velz.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   // All ranks write their data (including header on rank 0) in order using the shared file pointer
+   MPI_File_write_ordered(fh, data_str.c_str(), data_str.size(), MPI_CHAR, MPI_STATUS_IGNORE);
 
+   // Clear memory
+   local_x.clear(); local_y.clear(); local_z.clear();
+   local_velx.clear(); local_vely.clear(); local_velz.clear();
+   data_str.clear();
+
+   // Close the file
+   MPI_File_close(&fh);
+
+   // Output confirmation on rank 0
    if (rank == 0)
-   {
-      mfem::out << " Writing gathered sample data to file: " << fname << endl;
-      FILE *f = fopen(fname.c_str(), "w");
-      if (!f)
-      {
-         cerr << " Error opening file " << fname << endl;
-         MPI_Abort(comm, 1);
-      }
-      fprintf(f, "3D Taylor Green Vortex\n");
-      fprintf(f, "Order = %d\n", ctx.order);
-      fprintf(f, "Step = %d\n", step);
-      fprintf(f, "Time = %e\n", time);
-      fprintf(f, "===================================================================");
-      fprintf(f, "==========================================================================\n");
-      fprintf(f, "            x                      y                      z         ");
-      fprintf(f, "            vecx                   vecy                   vecz\n");
-      for (size_t i = 0; i < all_x.size(); i++)
-      {
-         fprintf(f, "%20.16e %20.16e %20.16e %20.16e %20.16e %20.16e\n",
-                 all_x[i], all_y[i], all_z[i],
-                 all_velx[i], all_vely[i], all_velz[i]);
-      }
-      fclose(f);
       mfem::out << " Finished writing sampled including both boundaries data." << endl;
-   }
 }
+
 
 void SampledDataUniformOneBoundary(ParGridFunction* sol,
                                 ParMesh* pmesh,
@@ -237,7 +216,6 @@ void SampledDataUniformOneBoundary(ParGridFunction* sol,
    if (rank == 0)
    {
       mfem::out << " Using " << npts << " sample points per coordinate." << endl;
-      mfem::out << "Number of elements: " << pmesh->GetNE() << endl;
    }
 
    // Local arrays to store sample data.
@@ -286,77 +264,60 @@ void SampledDataUniformOneBoundary(ParGridFunction* sol,
       }
    }
 
+   // Prepare the data string, including the header on rank 0
+   std::string data_str;
    if (rank == 0)
    {
-      mfem::out << " Finished sampling local elements." << endl;
+      std::ostringstream header_stream;
+      header_stream << "3D Taylor Green Vortex\n"
+                    << "Order = " << ctx.order << "\n"
+                    << "Step = " << step << "\n"
+                    << "Time = " << std::scientific << std::setprecision(16) << time << "\n"
+                    << "==================================================================="
+                    << "==========================================================================\n"
+                    << "            x                      y                      z                   vecx                   vecy                   vecz\n";
+      data_str = header_stream.str();
    }
 
-   // Gather counts from all processes.
-   int local_num = local_x.size();
-   vector<int> all_num_elements(size);
-   vector<int> displs(size);
-   MPI_Gather(&local_num, 1, MPI_INT, all_num_elements.data(), 1, MPI_INT, 0, comm);
-
-   vector<double> all_x, all_y, all_z;
-   vector<double> all_velx, all_vely, all_velz;
-   if (rank == 0)
+   // Append local data to data_str
+   std::ostringstream local_data_stream;
+   for (size_t i = 0; i < local_x.size(); i++)
    {
-      int total = 0;
-      displs[0] = 0;
-      for (int i = 0; i < size; i++)
-      {
-         total += all_num_elements[i];
-         if (i > 0)
-            displs[i] = displs[i - 1] + all_num_elements[i - 1];
-      }
-      all_x.resize(total);
-      all_y.resize(total);
-      all_z.resize(total);
-      all_velx.resize(total);
-      all_vely.resize(total);
-      all_velz.resize(total);
-      mfem::out << " Gathering sample data from " << size << " processes." << endl;
+      local_data_stream << std::scientific << std::setprecision(16)
+                        << std::setw(20) << local_x[i] << " "
+                        << std::setw(20) << local_y[i] << " "
+                        << std::setw(20) << local_z[i] << " "
+                        << std::setw(20) << local_velx[i] << " "
+                        << std::setw(20) << local_vely[i] << " "
+                        << std::setw(20) << local_velz[i] << "\n";
+   }
+   data_str += local_data_stream.str();
+
+   // Open the file collectively with MPI I/O
+   MPI_File fh;
+   int err = MPI_File_open(comm, fname.c_str(), MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
+   if (err != MPI_SUCCESS)
+   {
+      if (rank == 0) std::cerr << "Error opening file " << fname << " with MPI I/O" << std::endl;
+      MPI_Abort(comm, 1);
    }
 
-   MPI_Gatherv(local_x.data(), local_num, MPI_DOUBLE,
-               all_x.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_y.data(), local_num, MPI_DOUBLE,
-               all_y.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_z.data(), local_num, MPI_DOUBLE,
-               all_z.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_velx.data(), local_num, MPI_DOUBLE,
-               all_velx.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_vely.data(), local_num, MPI_DOUBLE,
-               all_vely.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_velz.data(), local_num, MPI_DOUBLE,
-               all_velz.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   // All ranks write their data (including header on rank 0) in order using the shared file pointer
+   MPI_File_write_ordered(fh, data_str.c_str(), data_str.size(), MPI_CHAR, MPI_STATUS_IGNORE);
 
+   // Clear memory
+   local_x.clear(); local_y.clear(); local_z.clear();
+   local_velx.clear(); local_vely.clear(); local_velz.clear();
+   data_str.clear();
+
+   // Close the file
+   MPI_File_close(&fh);
+
+   // Output confirmation on rank 0
    if (rank == 0)
-   {
-      mfem::out << " Writing gathered sample data to file: " << fname << endl;
-      FILE *f = fopen(fname.c_str(), "w");
-      if (!f)
-      {
-         cerr << " Error opening file " << fname << endl;
-         MPI_Abort(comm, 1);
-      }
-      fprintf(f, "3D Taylor Green Vortex\n");
-      fprintf(f, "Order = %d\n", ctx.order);
-      fprintf(f, "Step = %d\n", step);
-      fprintf(f, "Time = %e\n", time);
-      fprintf(f, "===================================================================");
-      fprintf(f, "==========================================================================\n");
-      fprintf(f, "            x                      y                      z         ");
-      fprintf(f, "            vecx                   vecy                   vecz\n");
-      for (size_t i = 0; i < all_x.size(); i++)
-      {
-         fprintf(f, "%20.16e %20.16e %20.16e %20.16e %20.16e %20.16e\n",
-                 all_x[i], all_y[i], all_z[i],
-                 all_velx[i], all_vely[i], all_velz[i]);
-      }
-      fclose(f);
       mfem::out << " Finished writing sampled including one boundary data." << endl;
-   }
+
+   MPI_Barrier(comm);
 }
 
 //------------------------------------------------------------------------------
@@ -395,13 +356,6 @@ void SampledDataElementOneCenter(ParGridFunction* sol,
          cerr << " Error creating " << cycle_dir << " directory!" << endl;
    }
 
-   MPI_Barrier(comm);
-
-   if (rank == 0)
-   {
-      mfem::out << "Number of elements: " << pmesh->GetNE() << endl;
-   }
-
    // Local arrays to store sample data.
    vector<double> local_x, local_y, local_z;
    vector<double> local_velx, local_vely, local_velz;
@@ -436,77 +390,60 @@ void SampledDataElementOneCenter(ParGridFunction* sol,
       local_velz.push_back(u_z);
    }
 
+   // Prepare the data string, including the header on rank 0
+   std::string data_str;
    if (rank == 0)
    {
-      mfem::out << " Finished sampling local elements." << endl;
+      std::ostringstream header_stream;
+      header_stream << "3D Taylor Green Vortex\n"
+                    << "Order = " << ctx.order << "\n"
+                    << "Step = " << step << "\n"
+                    << "Time = " << std::scientific << std::setprecision(16) << time << "\n"
+                    << "==================================================================="
+                    << "==========================================================================\n"
+                    << "            x                      y                      z                   vecx                   vecy                   vecz\n";
+      data_str = header_stream.str();
    }
 
-   // Gather counts from all processes.
-   int local_num = local_x.size();
-   vector<int> all_num_elements(size);
-   vector<int> displs(size);
-   MPI_Gather(&local_num, 1, MPI_INT, all_num_elements.data(), 1, MPI_INT, 0, comm);
-
-   vector<double> all_x, all_y, all_z;
-   vector<double> all_velx, all_vely, all_velz;
-   if (rank == 0)
+   // Append local data to data_str
+   std::ostringstream local_data_stream;
+   for (size_t i = 0; i < local_x.size(); i++)
    {
-      int total = 0;
-      displs[0] = 0;
-      for (int i = 0; i < size; i++)
-      {
-         total += all_num_elements[i];
-         if (i > 0)
-            displs[i] = displs[i - 1] + all_num_elements[i - 1];
-      }
-      all_x.resize(total);
-      all_y.resize(total);
-      all_z.resize(total);
-      all_velx.resize(total);
-      all_vely.resize(total);
-      all_velz.resize(total);
-      mfem::out << " Gathering sample data from " << size << " processes." << endl;
+      local_data_stream << std::scientific << std::setprecision(16)
+                        << std::setw(20) << local_x[i] << " "
+                        << std::setw(20) << local_y[i] << " "
+                        << std::setw(20) << local_z[i] << " "
+                        << std::setw(20) << local_velx[i] << " "
+                        << std::setw(20) << local_vely[i] << " "
+                        << std::setw(20) << local_velz[i] << "\n";
+   }
+   data_str += local_data_stream.str();
+
+   // Open the file collectively with MPI I/O
+   MPI_File fh;
+   int err = MPI_File_open(comm, fname.c_str(), MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
+   if (err != MPI_SUCCESS)
+   {
+      if (rank == 0) std::cerr << "Error opening file " << fname << " with MPI I/O" << std::endl;
+      MPI_Abort(comm, 1);
    }
 
-   MPI_Gatherv(local_x.data(), local_num, MPI_DOUBLE,
-               all_x.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_y.data(), local_num, MPI_DOUBLE,
-               all_y.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_z.data(), local_num, MPI_DOUBLE,
-               all_z.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_velx.data(), local_num, MPI_DOUBLE,
-               all_velx.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_vely.data(), local_num, MPI_DOUBLE,
-               all_vely.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_velz.data(), local_num, MPI_DOUBLE,
-               all_velz.data(), all_num_elements.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   // All ranks write their data (including header on rank 0) in order using the shared file pointer
+   MPI_File_write_ordered(fh, data_str.c_str(), data_str.size(), MPI_CHAR, MPI_STATUS_IGNORE);
 
+   // Clear memory
+   local_x.clear(); local_y.clear(); local_z.clear();
+   local_velx.clear(); local_vely.clear(); local_velz.clear();
+   data_str.clear();
+
+   // Close the file
+   MPI_File_close(&fh);
+
+   // Output confirmation on rank 0
    if (rank == 0)
-   {
-      mfem::out << " Writing gathered sample data to file: " << fname << endl;
-      FILE *f = fopen(fname.c_str(), "w");
-      if (!f)
-      {
-         cerr << " Error opening file " << fname << endl;
-         MPI_Abort(comm, 1);
-      }
-      fprintf(f, "3D Taylor Green Vortex\n");
-      fprintf(f, "Order = %d\n", ctx.order);
-      fprintf(f, "Step = %d\n", step);
-      fprintf(f, "Time = %e\n", time);
-      fprintf(f, "===================================================================");
-      fprintf(f, "==========================================================================\n");
-      fprintf(f, "            x                      y                      z         ");
-      fprintf(f, "            vecx                   vecy                   vecz\n");
-      for (size_t i = 0; i < all_x.size(); i++)
-      {
-         fprintf(f, "%20.16e %20.16e %20.16e %20.16e %20.16e %20.16e\n",
-                 all_x[i], all_y[i], all_z[i],
-                 all_velx[i], all_vely[i], all_velz[i]);
-      }
-      fclose(f);
       mfem::out << " Finished writing cell centered data." << endl;
-   }
+
+   MPI_Barrier(comm);
 }
 
 //------------------------------------------------------------------------------
@@ -534,26 +471,26 @@ bool LoadCheckpointVisit(const std::string &visit_dir,
    {
       if (Mpi::WorldRank() == 0)
          cerr << " Error: Mesh load failed." << endl;
-      delete dc;
       return false;
    }
 
    GridFunction *temp_gf = dc->GetField("velocity");
+
    if (!temp_gf)
    {
       if (Mpi::WorldRank() == 0)
          cerr << " Error: velocity field not found." << endl;
-      delete dc;
       return false;
    }
+
    ParFiniteElementSpace *vfes = dynamic_cast<ParFiniteElementSpace*>(temp_gf->FESpace());
    if (!vfes)
    {
       if (Mpi::WorldRank() == 0)
          cerr << " Error: FESpace is not a ParFiniteElementSpace." << endl;
-      delete dc;
       return false;
    }
+
    u_gf = new ParGridFunction(vfes);
    *u_gf = *temp_gf;  // deep copy
 
@@ -564,12 +501,14 @@ bool LoadCheckpointVisit(const std::string &visit_dir,
                                                   u_inf_loc, 
                                                   MPI_COMM_WORLD);
    t = dc->GetTime();
+
    if (Mpi::WorldRank() == 0){
       mfem::out << " Checkpoint loaded: Cycle " << cycle << ", Time " << t << endl;
       mfem::out << "After loading from checkpoint in LoadCheckpoint: u_gf Norml2 = "
                   << u_inf <<  std::endl;
       mfem::out << "Number of elements: " << pmesh->GetNE() << endl;
    }
+
    return true;
 }
 
@@ -636,13 +575,16 @@ int main(int argc, char *argv[])
    }
 
    SampledDataUniformBothBoundaries(velocity, pmesh, cycle, t, "Velocity");
+
+   MPI_Barrier(MPI_COMM_WORLD);
    SampledDataUniformOneBoundary(velocity, pmesh, cycle, t, "Velocity");
+
+   MPI_Barrier(MPI_COMM_WORLD);
    SampledDataElementOneCenter(velocity, pmesh, cycle, t, "Velocity");
 
    if (myid == 0)
       mfem::out << " Data sampling complete." << endl;
 
-   // Clean up: Uncomment these lines if you wish to free the objects.
    delete pmesh;
    delete velocity;
 

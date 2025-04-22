@@ -33,6 +33,11 @@ if (MFEM_USE_MPI)
     MAIN plor-transfer.cpp LIBRARIES mfem)
 endif()
 
+if (MFEM_USE_MPI)
+  add_mfem_miniapp(plor-transfer_victor
+    MAIN plor-transfer_victor.cpp LIBRARIES mfem)
+endif()
+
 add_mfem_miniapp(tmop-check-metric
   MAIN tmop-check-metric.cpp LIBRARIES mfem)
 

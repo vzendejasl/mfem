@@ -592,6 +592,11 @@ void NavierSolver::Step(real_t &time, real_t dt, int current_step,
       time += dt;
    }
 
+   if (filter_alpha !=0.0 && verbose && pmesh->GetMyRank() == 0)
+   {
+     mfem::out << "Applying filter value of: " << filter_alpha << "\n";
+   }
+
    if (filter_alpha != 0.0)
    {
       un_NM1_gf.ProjectGridFunction(un_gf);

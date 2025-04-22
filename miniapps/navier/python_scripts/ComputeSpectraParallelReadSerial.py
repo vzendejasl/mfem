@@ -408,26 +408,26 @@ if rank == 0:
     # Plotting
     print("[Rank 0] Plotting energy spectra (parallel vs serial)...")
 
-    # # Uncomment to include plot
-    # plt.figure(figsize=(10, 8))
-    # label_str = f"Step {step_number_extracted}, Time = {time_extracted:.3e}"
-    # plt.loglog(k_bin_centers, E_k, 'b-', label='Parallel Spectrum')
+    # Uncomment to include plot
+    plt.figure(figsize=(10, 8))
+    label_str = f"Step {step_number_extracted}, Time = {time_extracted:.3e}"
+    plt.loglog(k_bin_centers, E_k, 'b-', label='Parallel Spectrum')
 
     # # Uncomment to include serial spectrum in the plot (if computed)
     # # if 'k_centers_serial' in locals() and 'E_k_serial' in locals():
     # #     plt.loglog(k_centers_serial, E_k_serial, 'g--', label='Serial Spectrum')
 
-    # k_ref = 1
-    # E_ref = 0.1e1
-    # E_line = E_ref * (k_bin_centers / k_ref)**(-5.0/3.0)
-    # plt.loglog(k_bin_centers, E_line, 'r--', label='$k^{-5/3}$ slope')
-    # plt.xlabel('Wavenumber k')
-    # plt.ylabel('E(k)')
-    # plt.title('Energy Spectrum: Parallel FFT')
-    # plt.legend()
-    # plt.grid(True, which="both", ls="--")
-    # plt.tight_layout()
-    # plt.show()
+    k_ref = 1
+    E_ref = 0.1e1
+    E_line = E_ref * (k_bin_centers / k_ref)**(-5.0/3.0)
+    plt.loglog(k_bin_centers, E_line, 'r--', label='$k^{-5/3}$ slope')
+    plt.xlabel('Wavenumber k')
+    plt.ylabel('E(k)')
+    plt.title('Energy Spectrum: Parallel FFT')
+    plt.legend()
+    plt.grid(True, which="both", ls="--")
+    plt.tight_layout()
+    plt.show()
 
 ### Finalize MPI
 comm.Barrier()

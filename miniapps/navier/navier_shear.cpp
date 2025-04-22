@@ -36,8 +36,9 @@ using namespace navier;
 
 struct s_NavierContext
 {
-   int order = 6;
-   real_t kinvis = 1.0 / 100000.0;
+   int order = 7;
+   // real_t kinvis = 1.0 / 100000.0;
+   real_t kinvis = 1.0 / 500.0;
    real_t t_final = 10 * 1e1;
    // real_t t_final = 10 * 1e-3;
    // real_t dt = 1e-3;
@@ -48,22 +49,24 @@ void vel_shear_ic(const Vector &x, real_t t, Vector &u)
 {
    real_t xi = x(0);
    real_t yi = x(1);
+   real_t zi = x(2);
 
    real_t rho = 30.0;
    real_t delta = 0.05;
 
-   if (yi <= 0.5)
-   {
-      u(0) = tanh(rho * (yi - 0.25));
-   }
-   else
-   {
-      u(0) = tanh(rho * (0.75 - yi));
-   }
+   // if (yi <= 0.5)
+   // {
+   //    u(0) = tanh(rho * (yi - 0.25));
+   // }
+   // else
+   // {
+   //    u(0) = tanh(rho * (0.75 - yi));
+   // }
    
-   // u(0) = tanh(rho * (yi - 1.0));
+   u(0) = tanh(rho * (yi - 1.0));
 
-   // u(1) = delta * sin(2.0 * M_PI * xi);
+   u(1) = delta * sin(4.0 * M_PI * x(0)) * sin(M_PI * x(1))*cos(M_PI*x(2));
+   u(2) = 0.0; 
 }
 
 int main(int argc, char *argv[])
@@ -79,20 +82,31 @@ int main(int argc, char *argv[])
    // Initialize as mesh
    Mesh *init_mesh;
 
-   real_t length = 1.0;
-   int num_pts = 24;
-   init_mesh = new Mesh(Mesh::MakeCartesian2D(num_pts,
+   real_t length = 2.0;
+   real_t lengthz = 1.0;
+   int num_pts = 12;
+   int num_ptsz = 6;
+   // init_mesh = new Mesh(Mesh::MakeCartesian2D(num_pts,
+   //                                            num_pts,
+   //                                            Element::QUADRILATERAL,
+   //                                            true,
+   //                                            length,
+   //                                            length, false));
+
+   init_mesh = new Mesh(Mesh::MakeCartesian3D(num_pts,
                                               num_pts,
-                                              Element::QUADRILATERAL,
-                                              true,
+                                              num_ptsz,
+                                              Element::HEXAHEDRON,
                                               length,
-                                              length, false));
+                                              length,
+                                              lengthz, false));
 
    Vector x_translation({length, 0.0, 0.0});
    Vector y_translation({0.0, length, 0.0});
    Vector z_translation({0.0, 0.0, length});
 
-   std::vector<Vector> translations = {x_translation,y_translation};
+   // std::vector<Vector> translations = {x_translation, y_translation, z_translation};
+   std::vector<Vector> translations = {x_translation, z_translation};
 
    Mesh *mesh = new Mesh(Mesh::MakePeriodic(*init_mesh, init_mesh->CreatePeriodicVertexMapping(translations)));
 
@@ -124,6 +138,7 @@ int main(int argc, char *argv[])
    VectorFunctionCoefficient u_excoeff(pmesh->Dimension(), vel_shear_ic);
    u_ic->ProjectCoefficient(u_excoeff);
 
+
    real_t t = 0.0;
    real_t dt = ctx.dt;
    real_t t_final = ctx.t_final;
@@ -135,7 +150,8 @@ int main(int argc, char *argv[])
    ParGridFunction *p_gf = flowsolver.GetCurrentPressure();
 
    ParGridFunction w_gf(*u_gf);
-   flowsolver.ComputeCurl2D(*u_gf, w_gf);
+   // flowsolver.ComputeCurl2D(*u_gf, w_gf);
+   flowsolver.ComputeCurl3D(*u_gf, w_gf);
 
    // ParaViewDataCollection pvdc("shear_output", pmesh);
    // pvdc.SetDataFormat(VTKFormat::BINARY32);
@@ -167,9 +183,10 @@ int main(int argc, char *argv[])
 
       flowsolver.Step(t, dt, step);
 
-      if (step % 10 == 0)
+      if (step % 500 == 0)
       {
-         flowsolver.ComputeCurl2D(*u_gf, w_gf);
+         // flowsolver.ComputeCurl2D(*u_gf, w_gf);
+         flowsolver.ComputeCurl3D(*u_gf, w_gf);
          pvdc.SetCycle(step);
          pvdc.SetTime(t);
          pvdc.Save();
@@ -189,3 +206,4 @@ int main(int argc, char *argv[])
 
    return 0;
 }
+

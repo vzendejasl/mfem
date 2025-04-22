@@ -825,9 +825,14 @@ void VectorConvectionNLFIntegrator::AddMultPA(const Vector &x, Vector &y) const
       }
       if (dim == 3)
       {
-         constexpr int T_MAX_D1D = 8;
-         constexpr int T_MAX_Q1D = 8;
+         // constexpr int T_MAX_D1D = 8;
+         // constexpr int T_MAX_Q1D = 8;
+         // For p7 polynomial
+         constexpr int T_MAX_D1D = 12;
+         constexpr int T_MAX_Q1D = 12;
          MFEM_VERIFY(D1D <= T_MAX_D1D && Q1D <= T_MAX_Q1D, "Not yet implemented!");
+         // mfem::out << "T_Max_D1D: " << T_MAX_D1D << std::endl;
+         // mfem::out << "T_Max_Q1D: " << T_MAX_Q1D << std::endl;
          return SmemPAConvectionNLApply3D<0, 0, T_MAX_D1D, T_MAX_Q1D>
                 (NE, B, G, QV, x, y, D1D, Q1D);
       }

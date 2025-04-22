@@ -62,6 +62,16 @@ if (MFEM_USE_MPI)
     ${NAVIER_COMMON_FILES}
     LIBRARIES mfem)
 
+  add_mfem_miniapp(navier_shear_spatial
+    MAIN navier_shear_spatial.cpp
+    ${NAVIER_COMMON_FILES}
+    LIBRARIES mfem)
+
+  add_mfem_miniapp(navier_shear_spatial3d
+    MAIN navier_shear_spatial3d.cpp
+    ${NAVIER_COMMON_FILES}
+    LIBRARIES mfem)
+
   add_mfem_miniapp(navier_3dfoc
     MAIN navier_3dfoc.cpp
     ${NAVIER_COMMON_FILES}

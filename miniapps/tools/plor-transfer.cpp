@@ -112,14 +112,50 @@ int main(int argc, char *argv[])
    Device device(device_config);
    if (Mpi::Root()) { device.Print(); }
 
-   // Read the mesh from the given mesh file.
-   Mesh serial_mesh(mesh_file, 1, 1);
-   ParMesh mesh(MPI_COMM_WORLD, serial_mesh);
-   serial_mesh.Clear();
+   // // Read the mesh from the given mesh file.
+   // Mesh serial_mesh(mesh_file, 1, 1);
+   // ParMesh mesh(MPI_COMM_WORLD, serial_mesh);
+   // serial_mesh.Clear();
+
+   Mesh periodic_mesh;
+   Mesh *init_mesh;
+
+   int nx, ny, nz;
+   nx = 5;
+   ny = nx;
+   nz = nx;
+
+   // Mesh boundaries (unit cube)
+   double x1 = 0.0, x2 = 1.0;
+   double y1 = 0.0, y2 = 1.0;
+   double z1 = 0.0, z2 = 1.0;
+
+
+   init_mesh = new Mesh(Mesh::MakeCartesian3D(nx,
+                                              ny,
+                                              nz,
+                                              Element::HEXAHEDRON,
+                                              x2 - x1,
+                                              y2 - y1,
+                                              z2 - z1));
+
+   Vector x_translation({x2 - x1, 0.0, 0.0});
+   Vector y_translation({0.0, y2 - y1, 0.0});
+   Vector z_translation({0.0, 0.0, z2 - z1});
+
+   std::vector<Vector> translations = {x_translation, y_translation, z_translation};
+
+   periodic_mesh = Mesh(Mesh::MakePeriodic(*init_mesh,
+                                      init_mesh->CreatePeriodicVertexMapping(translations)));
+
+   delete init_mesh;
+
+   ParMesh mesh(MPI_COMM_WORLD, periodic_mesh);
+
    int dim = mesh.Dimension();
 
    // Make initial refinement on serial mesh.
-   for (int l = 0; l < 4; l++)
+   for (int l = 0; l < 1; l++)
    {
       mesh.UniformRefinement();
    }
