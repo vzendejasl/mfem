@@ -122,7 +122,6 @@ void NavierSolver::Setup(real_t dt)
    // GLL integration rule (Numerical Integration)
    const IntegrationRule &ir_ni = gll_rules.Get(vfes->GetFE(0)->GetGeomType(),
                                                 2 * order - 1);
-
    nlcoeff.constant = -1.0;
    N = new ParNonlinearForm(vfes);
    auto *nlc_nlfi = new VectorConvectionNLFIntegrator(nlcoeff);
