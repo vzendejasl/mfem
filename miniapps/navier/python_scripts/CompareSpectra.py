@@ -289,6 +289,24 @@ def main():
         # },
 
         {
+            "directory": "/p/lustre1/zendejas/TGV/mfem/effective_resolution_256/SamplePointsVelocity_Re1600NumPtsPerDir32RefLv0P7/cycle_9000/",
+            "step": 9000,
+            "label": "Effective Res 256^3, N = 64, P = 3 (P+2 sampling -- include both boundaries)",
+            "color": "red",
+            "linestyle": "-",
+            "file_prefix": "energy_spectrum_unknown_step"
+        },
+
+        {
+            "directory": "/p/lustre1/zendejas/TGV/mfem/effective_resolution_256/SamplePointsVelocity_Re1600NumPtsPerDir32RefLv2P1/cycle_9000/",
+            "step": 9000,
+            "label": "Effective Res 256^3, N = 64, P = 3 (P+2 sampling -- include both boundaries)",
+            "color": "green",
+            "linestyle": "-",
+            "file_prefix": "energy_spectrum_unknown_step"
+        },
+
+        {
             "directory": "/p/lustre1/zendejas/TGV/mfem/effective_resolution_512/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P7/cycle_9000/",
             "step": 9000,
             "label": "Effective Res 512^3, N = 64, P = 7",

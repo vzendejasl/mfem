@@ -126,6 +126,79 @@ public:
       return 0.5 * global_integral / volume;
    };
 
+   // This is the version we want to work because 
+   // it satisfies H1 continuity. But right now 
+   // the dofs and quad points are not the same.
+   // D = 1/V \int_V u \cdot (-nabla \cross \w) dv
+   // Gives indiciation of inertial range
+   real_t ComputeInertialRangeEnergy(ParGridFunction &u)
+   {
+
+     FiniteElementSpace *fes = u.FESpace();
+
+     Array<int> v_dofs;
+     Vector loc_data;
+
+     DenseMatrix grad_hat;
+     DenseMatrix dshape;
+     DenseMatrix grad;
+
+     int elndofs;
+     real_t integ = 0.0;
+     int vdim = fes->GetVDim();
+
+     for (int e = 0; e < fes->GetNE(); ++e)
+     {
+        fes->GetElementVDofs(e, v_dofs);
+        const FiniteElement *el = fes->GetFE(e);
+        ElementTransformation *tr = fes->GetElementTransformation(e);
+
+        int dim = el->GetDim();
+        elndofs = el->GetDof();
+        dshape.SetSize(elndofs, dim);
+        u.GetSubVector(v_dofs, loc_data);
+           
+        int intorder = 2 * el->GetOrder();
+        const IntegrationRule *ir = &IntRules.Get(el->GetGeomType(), intorder);
+
+        for (int j = 0; j < ir->GetNPoints(); j++){
+          const IntegrationPoint &ip = ir->IntPoint(j);
+          tr->SetIntPoint(&ip);
+        
+          el->CalcDShape(ip, dshape);
+          grad_hat.SetSize(vdim, dim);
+          DenseMatrix loc_data_mat(loc_data.GetData(), elndofs, vdim);
+          MultAtB(loc_data_mat, dshape, grad_hat);
+
+          const DenseMatrix &Jinv = tr->InverseJacobian();
+          grad.SetSize(grad_hat.Height(), Jinv.Width());
+          Mult(grad_hat, Jinv, grad);
+
+          real_t grad_vel_norm = 0.0;
+          for (int i=0; i < dim; i++){
+            for (int j=0; j < dim; j++){
+              grad_vel_norm += grad(i,j)*grad(i,j);
+            }
+          }
+
+          integ += ip.weight * tr->Weight() * grad_vel_norm;
+
+        }
+     }
+
+   real_t global_integral = 0.0;
+   MPI_Allreduce(&integ,
+                 &global_integral,
+                 1,
+                 MPITypeMap<real_t>::mpi_type,
+                 MPI_SUM,
+                 MPI_COMM_WORLD);
+  
+   return global_integral/volume;
+
+   };
+
+   /*
    // D = 1/V \int_V u \cdot (-nabla \cross \w) dv
    // Gives indiciation of inertial range
    real_t ComputeInertialRangeEnergy(ParGridFunction &v, ParGridFunction &curlw)
@@ -178,6 +251,7 @@ public:
       // add the minus sign.
       return -global_integral / volume;
    };
+   */
 
   real_t ComputeEnstrophy(ParGridFunction &w)
   {
@@ -848,12 +922,10 @@ int main(int argc, char *argv[])
    
    // Initialize w_gf and q_gf using the finite element spaces
    ParGridFunction w_gf(velocity_fespace);
-   ParGridFunction curlw_gf(velocity_fespace);
    ParGridFunction q_gf(pressure_fespace);
    ParGridFunction d_gf(pressure_fespace);
 
    flowsolver->ComputeCurl3D(*u_gf, w_gf);
-   flowsolver->ComputeCurl3D(w_gf, curlw_gf);
    ComputeQCriterion(*u_gf, q_gf);
    ComputeDissipation(*u_gf, d_gf);
    QuantitiesOfInterest kin_energy(pmesh);
@@ -967,7 +1039,7 @@ int main(int argc, char *argv[])
    real_t p_inf = GlobalLpNorm(infinity(), p_inf_loc, MPI_COMM_WORLD);
 
    real_t ke = kin_energy.ComputeKineticEnergy(*u_gf);
-   real_t vel_curl_ke = kin_energy.ComputeInertialRangeEnergy(*u_gf,curlw_gf);
+   real_t vel_curl_ke = kin_energy.ComputeInertialRangeEnergy(*u_gf);
    real_t enstrophy = kin_energy.ComputeEnstrophy(w_gf);
 
    real_t kolmLenScl = 0.0;
@@ -986,8 +1058,8 @@ int main(int argc, char *argv[])
 
    // This computes how resolved our grid is.
    // See Aspen 2008 Implicit LES Anaylsis
-   real_t PI_nu = pow(avg_diss,0.5)/(avg_kolmLenScl*vel_curl_ke);
-   real_t PI_nu_min = pow(max_diss,0.5)/(kolmLenScl*vel_curl_ke);
+   real_t PI_nu = pow(avg_diss,0.5)/(avg_kolmLenScl*pow(vel_curl_ke,0.75));
+   real_t PI_nu_min = pow(max_diss,0.5)/(kolmLenScl*pow(vel_curl_ke,0.75));
 
    // Taylor Reynolds Number
    // Re_lambda = u' lambda/nu
@@ -1141,7 +1213,6 @@ int main(int argc, char *argv[])
          {
             ComputeQCriterion(*u_gf, q_gf);
             flowsolver->ComputeCurl3D(*u_gf, w_gf);
-            flowsolver->ComputeCurl3D(w_gf, curlw_gf);
 
             if (ctx.paraview)
             {
@@ -1234,10 +1305,9 @@ int main(int argc, char *argv[])
       p_inf = GlobalLpNorm(infinity(), p_inf_loc, MPI_COMM_WORLD);
 
       flowsolver->ComputeCurl3D(*u_gf, w_gf);
-      flowsolver->ComputeCurl3D(w_gf, curlw_gf);
 
       ke = kin_energy.ComputeKineticEnergy(*u_gf);
-      vel_curl_ke = kin_energy.ComputeInertialRangeEnergy(*u_gf,curlw_gf);
+      vel_curl_ke = kin_energy.ComputeInertialRangeEnergy(*u_gf);
       enstrophy = kin_energy.ComputeEnstrophy(w_gf);
 
       ComputeDissipation(*u_gf, d_gf);
@@ -1247,8 +1317,8 @@ int main(int argc, char *argv[])
       Re_taylor = u_rms*avg_lambda/ctx.kinvis;
       u_rms =  pow(2.0/3.0*ke,0.5);
 
-      PI_nu = pow(avg_diss,0.5)/(avg_kolmLenScl*vel_curl_ke);
-      PI_nu_min = pow(max_diss,0.5)/(kolmLenScl*vel_curl_ke);
+      PI_nu = pow(avg_diss,0.5)/(avg_kolmLenScl*pow(vel_curl_ke,0.75));
+      PI_nu_min = pow(max_diss,0.5)/(kolmLenScl*pow(vel_curl_ke,0.75));
 
       if (Mpi::Root())
       {
