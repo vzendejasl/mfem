@@ -22,6 +22,7 @@
 // 3. Compute fft of data directly?
 
 #include "navier_solver.hpp"
+#include "navier_utils.hpp"
 #include <fstream>
 #include <algorithm>
 #include <iostream>
@@ -51,8 +52,24 @@ struct s_NavierContext
    bool restart = true;
    int element_center_cycle = 100;
    int data_dump_cycle = 100;
+   bool filter = false;
+   bool oversample = true;
 
 } ctx;
+
+
+bool GetVisit(const s_NavierContext* ctx) { return ctx->visit; }
+bool GetConduit(const s_NavierContext* ctx) { return ctx->conduit; }
+real_t GetReynum(const s_NavierContext* ctx) { return ctx->reynum; }
+int GetNumPts(const s_NavierContext* ctx) { return ctx->num_pts; }
+int GetElementSubdivisions(const s_NavierContext* ctx) { return ctx->element_subdivisions; }
+int GetElementSubdivisionsParallel(const s_NavierContext* ctx) { return ctx->element_subdivisions_parallel; }
+int GetOrder(const s_NavierContext* ctx) { return ctx->order; }
+real_t GetKinvis(const s_NavierContext* ctx) { return ctx->kinvis; }
+bool GetPA(const s_NavierContext* ctx) { return ctx->pa; }
+bool GetNI(const s_NavierContext* ctx) { return ctx->ni; }
+real_t GetDt(const s_NavierContext* ctx) { return ctx->dt; }
+bool GetOverSample(const s_NavierContext* ctx) { return ctx->oversample; }
 
 void vel_tgv(const Vector &x, real_t t, Vector &u)
 {
@@ -86,6 +103,7 @@ public:
 
    real_t ComputeKineticEnergy(ParGridFunction &v)
    {
+      /*
       Vector velx, vely, velz;
       real_t integ = 0.0;
       const FiniteElement *fe;
@@ -124,6 +142,22 @@ public:
                     MPI_COMM_WORLD);
 
       return 0.5 * global_integral / volume;
+      */
+
+    auto *fes = dynamic_cast<ParFiniteElementSpace*>(v.FESpace());
+    ParBilinearForm mass(fes);
+    mass.AddDomainIntegrator(new VectorMassIntegrator());
+
+    // Doesn't work?
+    // if (ctx.pa){
+    //     mass.SetAssemblyLevel(AssemblyLevel::PARTIAL);
+    // }
+  
+    mass.Assemble();
+    mass.Finalize();
+
+    const double ke = 0.5*mass.ParInnerProduct(v,v);
+    return ke / volume;
    };
 
    // This is the version we want to work because 
@@ -677,9 +711,6 @@ void SamplePoints(ParGridFunction *sol, ParMesh *pmesh, int step, double time, c
 
 void ComputeElementCenterValuesScalar(ParGridFunction *sol, ParMesh *pmesh,int step, double time);
 
-bool LoadCheckpoint(ParMesh *& pmesh, ParGridFunction *&u_gf, ParGridFunction *&p_gf,
-                    NavierSolver *&flowsolver, double &t, int &step, int myid, const s_NavierContext &ctx);
-
 int main(int argc, char *argv[])
 {
    Mpi::Init(argc, argv);
@@ -744,6 +775,20 @@ int main(int argc, char *argv[])
    args.AddOption(&ctx.reynum, "-Re", "--Renolds-number", "Reynolds Number.");
    args.AddOption(&ctx.element_center_cycle, "-ecc", "--Element-Center-Cycle", "Element Center Cycle.");
    args.AddOption(&ctx.data_dump_cycle, "-ddc", "--Data-Dump-Cycle", "Data Dump Cycle.");
+   args.AddOption(
+       &ctx.filter, 
+       "-flt", 
+       "--Filter-Alias-Error",
+       "-no-flt",
+       "--no-Filter-Alias-Error",
+       "Enable or disiable filter to controal alias error.");
+   args.AddOption(
+       &ctx.oversample, 
+       "-ovs", 
+       "--Over-Sample",
+       "-no-ovs",
+       "--no-Over-Sample",
+       "Enable or disable oversampling of solution.");
    args.Parse();
    if (!args.Good())
    {
@@ -775,7 +820,7 @@ int main(int argc, char *argv[])
    if (ctx.restart)
    {
       // Try to load the checkpoint files
-      restart_files_found = LoadCheckpoint(pmesh, u_gf, p_gf, flowsolver, t, step, myid, ctx);
+      restart_files_found = LoadCheckpoint(pmesh, u_gf, p_gf, flowsolver, t, step, myid, &ctx);
       if (restart_files_found)
       {
          if (Mpi::Root())
@@ -1148,7 +1193,7 @@ int main(int argc, char *argv[])
           fprintf(f, "        time                      cycle                 kinetic energy               enstrophy\n");
 
           // Write the initial data point
-           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e\n", t, static_cast<real_t>(step), ke, enstrophy);
+           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e\n", t, static_cast<real_t>(global_cycle + step), ke, enstrophy);
 
           // Write header only if not restarting
           fprintf(f_turb, "3D Taylor Green Vortex (turbulence metrics)\n");
@@ -1196,6 +1241,12 @@ int main(int argc, char *argv[])
    real_t t_final = ctx.t_final;
    bool last_step = false;
 
+   if(ctx.filter){
+     // NOT WORKING!!
+     flowsolver->SetFilterAlpha(0.03); // Enable sharp cutoff
+     flowsolver->SetCutoffModes(3);   // Cut off highest mode
+   }
+
    for (; !last_step; ++step)
    {
       if (t + dt >= t_final - dt / 2)
@@ -1204,6 +1255,7 @@ int main(int argc, char *argv[])
       }
 
       flowsolver->Step(t, dt, step);
+
       cfl = flowsolver->ComputeCFL(*u_gf, ctx.dt);
 
       if ((global_cycle + step) % ctx.data_dump_cycle == 0 || last_step)
@@ -1287,7 +1339,7 @@ int main(int argc, char *argv[])
          // If restarting, skip the first saved checkpoint
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
-            SamplePoints( u_gf, pmesh, global_cycle + step, t, "Velocity");
+            SamplePoints( u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
             // ComputeElementCenterValues(&w_gf, pmesh, global_cycle + step, t, "Vorticity");
 
             if (Mpi::Root())
@@ -1588,154 +1640,6 @@ void ComputeElementCenterValues(ParGridFunction* sol,
 }
 */
 
-void SamplePoints(mfem::ParGridFunction* sol,
-                                mfem::ParMesh* pmesh,
-                                int step,
-                                double time,
-                                const std::string &suffix)
-{
-   // MPI setup
-   MPI_Comm comm = pmesh->GetComm();
-   int rank, size;
-   MPI_Comm_rank(comm, &rank);
-   MPI_Comm_size(comm, &size);
-
-   // Construct the main directory name with suffix
-   std::string main_dir = "SamplePoints" + suffix +
-                          "_Re" + std::to_string(static_cast<int>(ctx.reynum)) +
-                          "NumPtsPerDir" + std::to_string(ctx.num_pts) +
-                          "RefLv" + std::to_string(ctx.element_subdivisions + ctx.element_subdivisions_parallel) +
-                          "P" + std::to_string(ctx.order);
-
-   // Create subdirectory for this cycle step
-   std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
-   // Construct the filename inside the cycle directory
-   std::string fname = cycle_dir + "/include_both_boundaries_" + std::to_string(step) + ".txt";
-
-   // Create directories on rank 0
-   if (rank == 0)
-   {
-      if (system(("mkdir -p " + main_dir).c_str()) != 0)
-         std::cerr << "Error creating " << main_dir << " directory!" << std::endl;
-      if (system(("mkdir -p " + cycle_dir).c_str()) != 0)
-         std::cerr << "Error creating " << cycle_dir << " directory!" << std::endl;
-   }
-
-   // Synchronize all ranks before proceeding
-   MPI_Barrier(MPI_COMM_WORLD);
-
-   // Sampling setup
-   int npts = ctx.order + 2;  // Number of sample points per coordinate direction
-
-   // Local arrays to store data from the local elements
-   std::vector<double> local_x, local_y, local_z;
-   std::vector<double> local_velx, local_vely, local_velz;
-
-   mfem::FiniteElementSpace *fes = sol->FESpace();
-   int vdim = fes->GetVDim();
-
-   // Loop over local elements
-   for (int e = 0; e < pmesh->GetNE(); e++)
-   {
-      // Get element transformation for element e
-      mfem::ElementTransformation *Trans = pmesh->GetElementTransformation(e);
-      
-      // For each element, loop over a uniform grid of points in the reference element [0,1]^d
-      for (int iz = 0; iz < npts; iz++)
-      {
-         double z_ref = (npts == 1) ? 0.5 : static_cast<double>(iz) / (npts - 1);
-         for (int iy = 0; iy < npts; iy++)
-         {
-            double y_ref = (npts == 1) ? 0.5 : static_cast<double>(iy) / (npts - 1);
-            for (int ix = 0; ix < npts; ix++)
-            {
-               double x_ref = (npts == 1) ? 0.5 : static_cast<double>(ix) / (npts - 1);
-               mfem::IntegrationPoint ip;
-               ip.Set3(x_ref, y_ref, z_ref); // Sample point in reference element
-
-               // Get the physical coordinates for this sample point
-               mfem::Vector phys_coords(Trans->GetSpaceDim());
-               Trans->Transform(ip, phys_coords);
-
-               double x_physical = phys_coords(0);
-               double y_physical = phys_coords(1);
-               double z_physical = phys_coords(2);
-
-               // Evaluate the solution at the sample point
-               mfem::Vector u_val(vdim);
-               sol->GetVectorValue(*Trans, ip, u_val);
-               double u_x = u_val(0);
-               double u_y = u_val(1);
-               double u_z = u_val(2);
-
-               // Append sample point data to local arrays
-               local_x.push_back(x_physical);
-               local_y.push_back(y_physical);
-               local_z.push_back(z_physical);
-               local_velx.push_back(u_x);
-               local_vely.push_back(u_y);
-               local_velz.push_back(u_z);
-            } // ix
-         } // iy
-      } // iz
-   } // for each local element
-
-   // Prepare the data string, including the header on rank 0
-   std::string data_str;
-   if (rank == 0)
-   {
-      std::ostringstream header_stream;
-      header_stream << "3D Taylor Green Vortex\n"
-                    << "Order = " << ctx.order << "\n"
-                    << "Step = " << step << "\n"
-                    << "Time = " << std::scientific << std::setprecision(16) << time << "\n"
-                    << "==================================================================="
-                    << "==========================================================================\n"
-                    << "            x                      y                      z                   vecx                   vecy                   vecz\n";
-      data_str = header_stream.str();
-   }
-
-   // Append local data to data_str
-   std::ostringstream local_data_stream;
-   for (size_t i = 0; i < local_x.size(); i++)
-   {
-      local_data_stream << std::scientific << std::setprecision(16)
-                        << std::setw(20) << local_x[i] << " "
-                        << std::setw(20) << local_y[i] << " "
-                        << std::setw(20) << local_z[i] << " "
-                        << std::setw(20) << local_velx[i] << " "
-                        << std::setw(20) << local_vely[i] << " "
-                        << std::setw(20) << local_velz[i] << "\n";
-   }
-   data_str += local_data_stream.str();
-
-   // Open the file collectively with MPI I/O
-   MPI_File fh;
-   int err = MPI_File_open(comm, fname.c_str(), MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
-   if (err != MPI_SUCCESS)
-   {
-      if (rank == 0) std::cerr << "Error opening file " << fname << " with MPI I/O" << std::endl;
-      MPI_Abort(comm, 1);
-   }
-
-   // All ranks write their data (including header on rank 0) in order using the shared file pointer
-   MPI_File_write_ordered(fh, data_str.c_str(), data_str.size(), MPI_CHAR, MPI_STATUS_IGNORE);
-
-   // Clear memory
-   local_x.clear(); local_y.clear(); local_z.clear();
-   local_velx.clear(); local_vely.clear(); local_velz.clear();
-   data_str.clear();
-
-   // Close the file
-   MPI_File_close(&fh);
-
-   // Output confirmation on rank 0
-   if (rank == 0)
-      std::cout << "Sampled data file saved: " << fname << std::endl;
-
-   // Final synchronization
-   MPI_Barrier(MPI_COMM_WORLD);
-}
 
 void ComputeElementCenterValuesScalar(ParGridFunction* sol, ParMesh* pmesh, int step, double time)
 {
@@ -1855,229 +1759,3 @@ void ComputeElementCenterValuesScalar(ParGridFunction* sol, ParMesh* pmesh, int 
 }
 
 
-// Helper function to find the last checkpoint step if none is provided
-int FindLastCheckpointStep()
-{
-    // We'll rely on a shell command to list directories; adapt as needed.
-    // "ls tgv_check_point | grep cycle_" will list cycle directories.
-    // We'll parse the largest number from "cycle_<step>".
-
-    std::string main_dir;
-    std::string command;
-    if(ctx.visit){
-      main_dir = std::string("VisitData_") 
-                                   + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
-                                   + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
-                                   + "RefLv" + std::to_string(
-                                       ctx.element_subdivisions 
-                                     + ctx.element_subdivisions_parallel) 
-                                   + "P" + std::to_string(ctx.order);
-      // Using popen to run shell command and read output
-      command = "ls " + main_dir + " | grep mfem.root |"  
-                                  + " sed 's/tgv_output_visit_//' | sort -n | tail -1 | sed 's/.mfem_root//'";
-    }
-    else if(ctx.conduit){
-      main_dir = std::string("ConduitData_") 
-                                   + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
-                                   + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
-                                   + "RefLv" + std::to_string(
-                                       ctx.element_subdivisions 
-                                     + ctx.element_subdivisions_parallel) 
-                                   + "P" + std::to_string(ctx.order);
-      // Using popen to run shell command and read output
-      command = "ls " + main_dir + " | grep .root |"  
-                                  + " sed 's/tgv_output_conduit_//' | sort -n | tail -1 | sed 's/.root//'";
-    }
-    else{
-      MFEM_ABORT("Can only search for visit or conduit data for restarting.");
-    }
-
-    FILE *pipe = popen(command.c_str(),"r");
-    if (!pipe) return -1;
-    char buffer[128];
-    std::string result = "";
-    while (fgets(buffer, 128, pipe) != NULL)
-    {
-        result += buffer;
-    }
-    pclose(pipe);
-
-    // Trim whitespace
-    result.erase(std::remove_if(result.begin(), result.end(), ::isspace), result.end());
-    if (result.empty())
-    {
-        return -1; // no checkpoints
-    }
-
-    return std::stoi(result);
-}
-
-
-bool LoadCheckpoint(ParMesh *&pmesh, ParGridFunction *&u_gf, ParGridFunction *&p_gf,
-                    NavierSolver *&flowsolver, double &t, int &step, int myid, const s_NavierContext &ctx)
-{
-    // If no step given, find last checkpoint step
-    int provided_step = -1; // Assume no step provided
-    if (provided_step < 0)
-    {
-        int last_step = -1;
-        if (myid == 0)
-        {
-          last_step = FindLastCheckpointStep();
-        }
-
-        // now broadcast to every rank
-        MPI_Bcast(&last_step, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-        if (last_step < 0)
-        {
-            // No checkpoints found
-            return false;
-        }
-        provided_step = last_step;
-    }
-
-   GridFunction *loaded_u_gf = nullptr;
-   GridFunction *loaded_p_gf = nullptr;
-
-   int precision = 16;
-   if (ctx.visit)
-   {
-      std::string visit_dir = std::string("VisitData_") 
-                                               + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
-                                               + "NumPtsPerDir" + std::to_string(ctx.num_pts) 
-                                               + "RefLv" + std::to_string(
-                                                   ctx.element_subdivisions 
-                                                 + ctx.element_subdivisions_parallel) 
-                                               + "P" + std::to_string(ctx.order)
-                                               + "/tgv_output_visit";
-
-      // Construct directory for given step
-      std::string cycle_dir = visit_dir + std::to_string(provided_step);
-
-      // Create a parallel ConduitDataCollection
-      mfem::DataCollection *dc_load = new mfem::VisItDataCollection(MPI_COMM_WORLD,visit_dir, nullptr);
-
-      // Set precision
-      dc_load->SetPrecision(precision);
-
-      // Load the mesh and associated fields (if any)
-      dc_load->Load(provided_step);
-
-      // Retrieve the loaded mesh
-      auto *pmesh_loaded= dynamic_cast<mfem::ParMesh*>(dc_load->GetMesh());
-
-      pmesh = pmesh_loaded;
-
-      if(mfem::Mpi::Root()){
-        if (!pmesh_loaded)
-        {
-          mfem::out << "[ERROR] Failed to create MFEM mesh." << std::endl;
-        }
-        std::cout << "Mesh data loaded from VisitDataCollection." << std::endl;
-      }
-
-      loaded_u_gf = dc_load->GetField("velocity");
-      loaded_p_gf = dc_load->GetField("pressure");
-
-      step = dc_load->GetCycle();
-      t = dc_load->GetTime();
-   }
-      else if(ctx.conduit)
-      {
-#ifdef MFEM_USE_CONDUIT
-      std::string conduit_dir = std::string("ConduitData_") 
-                                               + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
-                                               + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
-                                               + "RefLv" + std::to_string(
-                                                   ctx.element_subdivisions 
-                                                 + ctx.element_subdivisions_parallel) 
-                                               + "P" + std::to_string(ctx.order)
-                                               + "/tgv_output_conduit";
-
-      // Construct directory for given step
-      std::string cycle_dir = conduit_dir + std::to_string(provided_step);
-
-      // Create a parallel ConduitDataCollection
-      ConduitDataCollection *cdc_load = new ConduitDataCollection(MPI_COMM_WORLD,conduit_dir, nullptr);
-
-      // Set precision
-      cdc_load->SetPrecision(precision);
-
-      // Set the Conduit relay protocol (options include "hdf5", "json", "conduit_json", "conduit_bin")
-      cdc_load->SetProtocol("hdf5"); // Using "json" for human-readable output
-
-      // Load the mesh and associated fields (if any)
-      cdc_load->Load(provided_step);
-
-      // Retrieve the loaded mesh
-      auto *pmesh_loaded = dynamic_cast<mfem::ParMesh*>(cdc_load->GetMesh());
-
-      pmesh = pmesh_loaded;
-
-      if(mfem::Mpi::Root()){
-        if (!pmesh)
-        {
-          mfem::out << "[ERROR] Failed to create MFEM mesh." << std::endl;
-        }
-
-        std::cout << "Mesh data loaded from ConduitDataCollection." << std::endl;
-      }
-
-      loaded_u_gf = cdc_load->GetField("velocity");
-      loaded_p_gf = cdc_load->GetField("pressure");
-
-      step = cdc_load->GetCycle();
-      t = cdc_load->GetTime();
-#else
-      MFEM_ABORT("Must build with MFEM_USE_CONDUIT=YES for binary output.");
-#endif
-
-   }
-   else{
-     MFEM_ABORT("Can only restart with visit or conduit");
-   }
-
-    // Read the time and step number (only on root processor)
-    if (myid == 0)
-    {
-        std::cout << "Loaded time t = " << t << ", step = " << step << std::endl;
-    }
-
-    MPI_Bcast(&t, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&step, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-    flowsolver = new NavierSolver(pmesh, ctx.order, ctx.kinvis);
-
-    flowsolver->EnablePA(ctx.pa);
-    flowsolver->EnableNI(ctx.ni);
-
-    u_gf = flowsolver->GetCurrentVelocity();
-    p_gf = flowsolver->GetCurrentPressure();
-
-    ParGridFunction temp_u_gf(u_gf->ParFESpace(),loaded_u_gf);
-    ParGridFunction temp_p_gf(p_gf->ParFESpace(),loaded_p_gf);
-
-    *u_gf = temp_u_gf;
-    *p_gf = temp_p_gf;
-
-    flowsolver->Setup(ctx.dt);
-
-    mfem::real_t u_inf_loc = u_gf->Normlinf();
-    mfem::real_t p_inf_loc = p_gf->Normlinf();
-
-    mfem::real_t u_inf = mfem::GlobalLpNorm(mfem::infinity(), 
-                                                  u_inf_loc, 
-                                                  MPI_COMM_WORLD);
-    mfem::real_t p_inf = mfem::GlobalLpNorm(mfem::infinity(), 
-                                                  p_inf_loc, 
-                                                  MPI_COMM_WORLD);
-       
-    if (Mpi::Root())
-    {
-        std::cout << "After loading from checkpoint in LoadCheckpoint: u_gf Norml2 = "
-                  << u_inf << ", p_gf Norml2 = " << p_inf << std::endl;
-    }
-
-    return true;
-}

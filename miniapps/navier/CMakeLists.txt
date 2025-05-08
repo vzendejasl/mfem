@@ -42,6 +42,11 @@ if (MFEM_USE_MPI)
     ${NAVIER_COMMON_FILES}
     LIBRARIES mfem)
 
+  add_mfem_miniapp(navier_utils
+    MAIN navier_utils.cpp
+    ${NAVIER_COMMON_FILES}
+    LIBRARIES mfem)
+
   add_mfem_miniapp(navier_tgv_victor
     MAIN navier_tgv_victor.cpp
     ${NAVIER_COMMON_FILES}

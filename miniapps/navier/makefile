@@ -20,7 +20,7 @@ CONFIG_MK = $(or $(wildcard $(MFEM_BUILD_DIR)/config/config.mk),\
 MFEM_LIB_FILE = mfem_is_not_built
 -include $(CONFIG_MK)
 
-NAVIER_COMMON_SRC = navier_solver.cpp
+NAVIER_COMMON_SRC = navier_solver.cpp navier_utils.cpp
 NAVIER_COMMON_OBJ = $(NAVIER_COMMON_SRC:.cpp=.o)
 
 PAR_MINIAPPS = navier_mms navier_kovasznay navier_kovasznay_vs navier_tgv\
