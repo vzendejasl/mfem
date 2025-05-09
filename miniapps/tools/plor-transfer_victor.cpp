@@ -170,6 +170,11 @@ int main(int argc, char *argv[])
    int basis_lor = BasisType::GaussLobatto; // BasisType::ClosedUniform;
    ParMesh mesh_lor = ParMesh::MakeRefined(mesh, lref, basis_lor);
 
+         
+   if (Mpi::Root()){
+     mfem::out << "\n";
+     mfem::out << "Peforming high to low order refined operation." << "\n";
+   }
    // Create spaces
    FiniteElementCollection *fec, *fec_lor;
    if (useH1)
@@ -214,7 +219,7 @@ int main(int argc, char *argv[])
    u.SetTrueVector();
    u.SetFromTrueVector();
 
-   real_t ho_ke = compute_ke(&u, "HO         ");
+   real_t ho_ke = compute_ke(&u, "HO        ");
 
    if (vis) { visualize(HO_dc,"velocity", "HO", Wx, Wy, visport); Wx += offx; }
 
@@ -279,11 +284,16 @@ int main(int argc, char *argv[])
    LOR_dc.Save();
 
 
-   ComputeElementCenterValues(&u_lor,
-                              &mesh_lor,
-                              0,
-                              0.0,
-                              "LOR");
+   // ComputeElementCenterValues(&u_lor,
+   //                            &mesh_lor,
+   //                            0,
+   //                            0.0,
+   //                            "LOR");
+
+   if (Mpi::Root()){
+     mfem::out << "\n";
+     mfem::out << "Peforming low order refined to higher order operation." << "\n";
+   }
 
    // LOR projections
    direction = "LOR -> HO @ LOR";
@@ -320,15 +330,17 @@ int main(int argc, char *argv[])
    }
 
    
-   // Scalar
-   // --- 1. scalar spaces -------------------------------------------------
+   if (Mpi::Root()){
+     mfem::out << "\n";
+     mfem::out << "Same experiment as before, but with a scalar field." << "\n";
+   }
+
    ParFiniteElementSpace scal_fes     (&mesh,     fec, 1);
    ParFiniteElementSpace scal_fes_lor (&mesh_lor, fec_lor, 1);
    
-   // --- 2. scalar fields -------------------------------------------------
-   ParGridFunction ke     (&scal_fes);        // kinetic energy
-   ParGridFunction rho    (&scal_fes);        // density on HO mesh
-   ParGridFunction rho_lor(&scal_fes_lor);    // density on LOR mesh
+   ParGridFunction ke     (&scal_fes);        
+   ParGridFunction rho    (&scal_fes);        
+   ParGridFunction rho_lor(&scal_fes_lor);    
 
    ComputeKeGridFunction(u, ke);
    
@@ -349,6 +361,11 @@ int main(int argc, char *argv[])
    M_lor.Assemble();
    M_lor.Finalize();
    HypreParMatrix* M_lor_tdof = M_lor.ParallelAssemble();
+
+   if (Mpi::Root()){
+     mfem::out << "\n";
+     mfem::out << "Peforming high to low order refined operation." << "\n";
+   }
 
    // HO projections
    direction = "HO -> LOR @ HO";
@@ -374,6 +391,7 @@ int main(int argc, char *argv[])
    gt->UseEA(use_ea);
 
    const Operator &Rscl = gt->ForwardOperator();
+
 
    // HO->LOR restriction
    direction = "HO -> LOR @ LOR";
@@ -426,6 +444,10 @@ int main(int argc, char *argv[])
       }
    }
 
+   if (Mpi::Root()){
+     mfem::out << "\n";
+     mfem::out << "Peforming low order refined to higher order operation." << "\n";
+   }
    // LOR projections
    direction = "LOR -> HO @ LOR";
    rho_lor.ProjectCoefficient(RHO);
