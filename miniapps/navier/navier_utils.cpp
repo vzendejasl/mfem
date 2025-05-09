@@ -209,7 +209,7 @@ void SamplePoints(mfem::ParGridFunction* sol,
    // Create subdirectory for this cycle step
    std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
    // Construct the filename inside the cycle directory
-   std::string fname = cycle_dir + "/include_both_boundaries_" + std::to_string(step) + ".txt";
+   std::string fname = cycle_dir + "/SampledData" + std::to_string(step) + ".txt";
 
    // Create directories on rank 0
    if (rank == 0)
@@ -224,7 +224,10 @@ void SamplePoints(mfem::ParGridFunction* sol,
    MPI_Barrier(MPI_COMM_WORLD);
 
    // Sampling setup
-   int npts = GetOrder(ctx) + 2;  // Number of sample points per coordinate direction
+   int npts = GetOrder(ctx);  // Number of sample points per coordinate direction
+   if(GetOverSample(ctx)){
+     npts = GetOrder(ctx) + 1;
+   }
 
    // Local arrays to store data from the local elements
    std::vector<double> local_x, local_y, local_z;
@@ -240,15 +243,15 @@ void SamplePoints(mfem::ParGridFunction* sol,
       mfem::ElementTransformation *Trans = pmesh->GetElementTransformation(e);
       
       // For each element, loop over a uniform grid of points in the reference element [0,1]^d
-      for (int iz = 0; iz < npts; iz++)
+      for (int iz = 0; iz <= npts; iz++)
       {
-         double z_ref = (npts == 1) ? 0.5 : static_cast<double>(iz) / (npts - 1);
-         for (int iy = 0; iy < npts; iy++)
+         double z_ref = static_cast<double>(iz) / npts;
+         for (int iy = 0; iy <= npts; iy++)
          {
-            double y_ref = (npts == 1) ? 0.5 : static_cast<double>(iy) / (npts - 1);
-            for (int ix = 0; ix < npts; ix++)
+            double y_ref = static_cast<double>(iy) / npts;
+            for (int ix = 0; ix <= npts; ix++)
             {
-               double x_ref = (npts == 1) ? 0.5 : static_cast<double>(ix) / (npts - 1);
+               double x_ref = static_cast<double>(ix) / npts;
                mfem::IntegrationPoint ip;
                ip.Set3(x_ref, y_ref, z_ref); // Sample point in reference element
 
@@ -285,7 +288,7 @@ void SamplePoints(mfem::ParGridFunction* sol,
    {
       std::ostringstream header_stream;
       header_stream << "3D Taylor Green Vortex\n"
-                    << "Order = " << GetOrder(ctx) << "\n"
+                    << "Order = " << GetOrder(ctx) << ", " << "Over sample = " << GetOverSample(ctx) << "\n"
                     << "Step = " << step << "\n"
                     << "Time = " << std::scientific << std::setprecision(16) << time << "\n"
                     << "==================================================================="

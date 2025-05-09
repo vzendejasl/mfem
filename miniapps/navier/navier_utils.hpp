@@ -18,6 +18,7 @@ mfem::real_t GetKinvis(const s_NavierContext* ctx);
 bool GetPA(const s_NavierContext* ctx);
 bool GetNI(const s_NavierContext* ctx);
 mfem::real_t GetDt(const s_NavierContext* ctx);
+bool GetOverSample(const s_NavierContext* ctx);
 
 bool LoadCheckpoint(mfem::ParMesh *&pmesh,
                     mfem::ParGridFunction *&u_gf,
