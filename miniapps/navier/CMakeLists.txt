@@ -11,9 +11,9 @@
 
 if (MFEM_USE_MPI)
   list(APPEND NAVIER_COMMON_SOURCES
-      navier_solver.cpp)
+      navier_solver.cpp navier_utils.cpp)
   list(APPEND NAVIER_COMMON_HEADERS
-      navier_solver.hpp)
+      navier_solver.hpp navier_utils.hpp)
 
   convert_filenames_to_full_paths(NAVIER_COMMON_SOURCES)
   convert_filenames_to_full_paths(NAVIER_COMMON_HEADERS)
@@ -42,11 +42,6 @@ if (MFEM_USE_MPI)
     ${NAVIER_COMMON_FILES}
     LIBRARIES mfem)
 
-  add_mfem_miniapp(navier_utils
-    MAIN navier_utils.cpp
-    ${NAVIER_COMMON_FILES}
-    LIBRARIES mfem)
-
   add_mfem_miniapp(navier_tgv_victor
     MAIN navier_tgv_victor.cpp
     ${NAVIER_COMMON_FILES}
@@ -57,23 +52,8 @@ if (MFEM_USE_MPI)
     ${NAVIER_COMMON_FILES}
     LIBRARIES mfem)
 
-  add_mfem_miniapp(periodic_mesh_test
-    MAIN periodic_mesh_test.cpp
-    ${NAVIER_COMMON_FILES}
-    LIBRARIES mfem)
-
   add_mfem_miniapp(navier_shear
     MAIN navier_shear.cpp
-    ${NAVIER_COMMON_FILES}
-    LIBRARIES mfem)
-
-  add_mfem_miniapp(navier_shear_spatial
-    MAIN navier_shear_spatial.cpp
-    ${NAVIER_COMMON_FILES}
-    LIBRARIES mfem)
-
-  add_mfem_miniapp(navier_shear_spatial3d
-    MAIN navier_shear_spatial3d.cpp
     ${NAVIER_COMMON_FILES}
     LIBRARIES mfem)
 

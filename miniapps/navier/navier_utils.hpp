@@ -4,6 +4,7 @@
 
 #include "mfem.hpp"
 #include "navier_solver.hpp"
+// #include <adios2.h>
 
 struct s_NavierContext;
 
@@ -36,5 +37,15 @@ void SamplePoints(mfem::ParGridFunction* sol,
                                 const std::string &suffix,
                                 const s_NavierContext* ctx);
 
+/*
+void SamplePointsAdios(mfem::ParGridFunction* sol,
+                       mfem::ParMesh* pmesh,
+                       int step,
+                       double time,
+                       const std::string &suffix,
+                       bool oversample,
+                       const s_NavierContext* ctx);
+
+                       */
 #endif // NAVIER_UTILS_HPP
 

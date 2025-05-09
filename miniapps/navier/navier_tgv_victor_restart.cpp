@@ -1340,6 +1340,7 @@ int main(int argc, char *argv[])
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
             SamplePoints( u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
+            // SamplePointsAdios( u_gf, pmesh, global_cycle + step, t, "Velocity",ctx.oversample, &ctx);
             // ComputeElementCenterValues(&w_gf, pmesh, global_cycle + step, t, "Vorticity");
 
             if (Mpi::Root())

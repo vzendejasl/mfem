@@ -3,6 +3,7 @@
 #include <algorithm> // for std::remove_if
 #include <string>
 #include <cstdio> // for popen, pclose
+// #include <adios2.h>
 
 using namespace mfem;
 using namespace navier;
@@ -12,8 +13,7 @@ int FindLastCheckpointStep(const s_NavierContext* ctx)
 {
     std::string main_dir;
     std::string command;
-    if (GetVisit(ctx))
-    {
+    if (GetVisit(ctx)) {
         main_dir = std::string("VisitData_")
                    + "Re" + std::to_string(static_cast<int>(GetReynum(ctx)))
                    + "NumPtsPerDir" + std::to_string(GetNumPts(ctx))
@@ -339,4 +339,132 @@ void SamplePoints(mfem::ParGridFunction* sol,
    MPI_Barrier(MPI_COMM_WORLD);
 }
 
+
+/*
+// -------------------------------------------------------------
+// Writes (x,y,z,u_x,u_y,u_z) for each sample in parallel via ADIOS2
+// -------------------------------------------------------------
+void SamplePointsAdios(mfem::ParGridFunction* sol,
+                       mfem::ParMesh* pmesh,
+                       int step,
+                       double time,
+                       const std::string &suffix,
+                       bool oversample,
+                       const s_NavierContext* ctx)
+{
+    MPI_Comm comm = pmesh->GetComm();
+    int rank, size;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+
+    // Build output directories
+    std::string main_dir = "SamplePoints" + suffix
+        + "_Re"  + std::to_string(static_cast<int>(GetReynum(ctx)))
+        + "NumPtsPerDir" + std::to_string(GetNumPts(ctx))
+        + "RefLv" + std::to_string(GetElementSubdivisions(ctx)
+                                 + GetElementSubdivisionsParallel(ctx))
+        + "P"    + std::to_string(GetOrder(ctx));
+    std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
+    std::string mode = oversample ? "WithOverSample" : "WithoutOverSample";
+    std::string fname = cycle_dir + "/SampledData" + mode
+                      + std::to_string(step) + ".bp";
+
+    if (rank == 0)
+    {
+        system(("mkdir -p " + main_dir).c_str());
+        system(("mkdir -p " + cycle_dir).c_str());
+    }
+    MPI_Barrier(comm);
+
+    // Number of samples per direction
+    int npts = GetOrder(ctx) + (oversample ? 1 : 0);
+    if (rank == 0)
+    {
+        std::cout << "Sampling " << npts << "^3 per element\n";
+    }
+
+    // Gather sampled data
+    std::vector<double> local_x, local_y, local_z;
+    std::vector<double> local_velx, local_vely, local_velz;
+    auto fes  = sol->FESpace();
+    int  vdim = fes->GetVDim();
+    int  localNE = pmesh->GetNE();
+
+    for (int e = 0; e < localNE; ++e)
+    {
+        auto Trans = pmesh->GetElementTransformation(e);
+        for (int iz = 0; iz <= npts; ++iz)
+        for (int iy = 0; iy <= npts; ++iy)
+        for (int ix = 0; ix <= npts; ++ix)
+        {
+            IntegrationPoint ip;
+            ip.Set3(double(ix)/npts,
+                    double(iy)/npts,
+                    double(iz)/npts);
+
+            Vector phys(Trans->GetSpaceDim());
+            Trans->Transform(ip, phys);
+
+            Vector u_val(vdim);
+            sol->GetVectorValue(*Trans, ip, u_val);
+
+            local_x .push_back(phys(0));
+            local_y .push_back(phys(1));
+            local_z .push_back(phys(2));
+            local_velx.push_back(u_val(0));
+            local_vely.push_back(u_val(1));
+            local_velz.push_back(u_val(2));
+        }
+    }
+
+    // Compute global count & per-rank offset
+    size_t localCount = local_x.size();
+    size_t globalCount = 0;
+    MPI_Allreduce(&localCount, &globalCount, 1,
+                  MPI_UNSIGNED_LONG, MPI_SUM, comm);
+
+    size_t offset = 0;
+    if (rank > 0)
+    {
+        MPI_Exscan(&localCount, &offset, 1,
+                   MPI_UNSIGNED_LONG, MPI_SUM, comm);
+    }
+
+    // Pack into [N_local × 6] buffer: (x,y,z, u_x,u_y,u_z)
+    std::vector<double> buf(6*localCount);
+    for (size_t i = 0; i < localCount; ++i)
+    {
+        buf[6*i + 0] = local_x [i];
+        buf[6*i + 1] = local_y [i];
+        buf[6*i + 2] = local_z [i];
+        buf[6*i + 3] = local_velx[i];
+        buf[6*i + 4] = local_vely[i];
+        buf[6*i + 5] = local_velz[i];
+    }
+
+    // ADIOS2
+    adios2::ADIOS   adios(comm);
+    auto io = adios.DeclareIO("SampleIO");
+    io.SetEngine("BP4");
+    io.SetParameters({{"NumAggregator","1"}});
+
+    auto var = io.DefineVariable<double>(
+        "samples",
+        { globalCount, 6ULL },
+        { offset,      0ULL },
+        { localCount,  6ULL },
+        adios2::DataType::double
+    );
+
+    auto eng = io.Open(fname, adios2::Mode::Write);
+    eng.Put(var, buf.data());
+    eng.Close();
+
+    if (rank == 0)
+    {
+        std::cout << "ADIOS2 wrote " << globalCount
+                  << " samples to " << fname << "\n";
+    }
+    MPI_Barrier(comm);
+}*/
 
