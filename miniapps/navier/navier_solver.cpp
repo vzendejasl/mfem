@@ -702,6 +702,95 @@ void NavierSolver::Orthogonalize(Vector &v)
    v -= global_sum / static_cast<real_t>(global_size);
 }
 
+
+
+/*
+// Not sure if this does what it's supposed to. The field
+// looks distorted late time.
+void NavierSolver::ComputeCurl3D(ParGridFunction &u, ParGridFunction &cu)
+{
+
+    mfem::CurlGridFunctionCoefficient curl_u(&u);
+    cu.ProjectCoefficient(curl_u);
+}
+*/
+
+void NavierSolver::ComputeCurl3D(ParGridFunction &u, ParGridFunction &cu)
+{
+   FiniteElementSpace *fes = u.FESpace();
+
+   // AccumulateAndCountZones.
+   Array<int> zones_per_vdof;
+   zones_per_vdof.SetSize(fes->GetVSize());
+   zones_per_vdof = 0;
+
+   cu = 0.0;
+
+   // Local interpolation.
+   int elndofs;
+   Array<int> vdofs;
+   Vector vals;
+   Vector loc_data;
+   int vdim = fes->GetVDim();
+   Vector curl;
+
+   for (int e = 0; e < fes->GetNE(); ++e)
+   {
+      fes->GetElementVDofs(e, vdofs);
+      u.GetSubVector(vdofs, loc_data);
+      vals.SetSize(vdofs.Size());
+      ElementTransformation *tr = fes->GetElementTransformation(e);
+      const FiniteElement *el = fes->GetFE(e);
+      elndofs = el->GetDof();
+      int dim = el->GetDim();
+
+      for (int dof = 0; dof < elndofs; ++dof)
+      {
+         // Project.
+         const IntegrationPoint &ip = el->GetNodes().IntPoint(dof);
+         tr->SetIntPoint(&ip);
+
+         u.GetCurl(*tr, curl);
+
+         for (int j = 0; j < vdim; ++j)
+         {
+            vals(elndofs * j + dof) = curl(j);
+         }
+      }
+
+      // Accumulate values in all dofs, count the zones.
+      for (int j = 0; j < vdofs.Size(); j++)
+      {
+         int ldof = vdofs[j];
+         cu(ldof) += vals[j];
+         zones_per_vdof[ldof]++;
+      }
+   }
+
+   // Communication
+
+   // Count the zones globally.
+   GroupCommunicator &gcomm = u.ParFESpace()->GroupComm();
+   gcomm.Reduce<int>(zones_per_vdof, GroupCommunicator::Sum);
+   gcomm.Bcast(zones_per_vdof);
+
+   // Accumulate for all vdofs.
+   gcomm.Reduce<real_t>(cu.GetData(), GroupCommunicator::Sum);
+   gcomm.Bcast<real_t>(cu.GetData());
+
+   // Compute means.
+   for (int i = 0; i < cu.Size(); i++)
+   {
+      const int nz = zones_per_vdof[i];
+      if (nz)
+      {
+         cu(i) /= nz;
+      }
+   }
+}
+
+
+/*
 void NavierSolver::ComputeCurl3D(ParGridFunction &u, ParGridFunction &cu)
 {
    FiniteElementSpace *fes = u.FESpace();
@@ -791,7 +880,7 @@ void NavierSolver::ComputeCurl3D(ParGridFunction &u, ParGridFunction &cu)
          cu(i) /= nz;
       }
    }
-}
+}*/
 
 void NavierSolver::ComputeCurl2D(ParGridFunction &u,
                                  ParGridFunction &cu,

@@ -239,7 +239,8 @@ void SampledDataUniformOneBoundary(ParGridFunction* sol,
 
    MPI_Barrier(comm);
 
-   int npts = ctx.order + 1;  // sample points per coordinate direction.
+   // int npts = ctx.order + 1;  // sample points per coordinate direction.
+   int npts = ctx.order;  // sample points per coordinate direction.
    if (rank == 0)
    {
       mfem::out << " Using " << npts << " sample points per coordinate." << endl;
@@ -256,13 +257,13 @@ void SampledDataUniformOneBoundary(ParGridFunction* sol,
    for (int e = 0; e < pmesh->GetNE(); e++)
    {
       ElementTransformation *Trans = pmesh->GetElementTransformation(e);
-      for (int iz = 0; iz < npts; iz++)
+      for (int iz = 0; iz <= npts; iz++)
       {
          double z_ref = static_cast<double>(iz) / npts;
-         for (int iy = 0; iy < npts; iy++)
+         for (int iy = 0; iy <= npts; iy++)
          {
             double y_ref = static_cast<double>(iy) / npts;
-            for (int ix = 0; ix < npts; ix++)
+            for (int ix = 0; ix <= npts; ix++)
             {
                double x_ref = static_cast<double>(ix) / npts;
                IntegrationPoint ip;

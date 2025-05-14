@@ -121,24 +121,62 @@ if rank == 0:
 
     # Load data in chunks to handle large files
     print("[Rank 0] Loading data in chunks (skipping header)...")
+    # chunk_size = 10_000_000
+    chunk_size = 5_000_000
+    reader = pd.read_csv(
+        data_filename,
+        delimiter=' ',
+        skiprows=6,
+        header=None,
+        chunksize=chunk_size
+    )
 
-    chunk_size = 10_000_000
-    chunks = pd.read_csv(data_filename, delimiter=' ', skiprows=6, chunksize=chunk_size, header=None)
-    xpos, ypos, zpos, velx, vely, velz = [], [], [], [], [], []
+    # 1) Read into per-chunk lists
+    xpos_list, ypos_list, zpos_list = [], [], []
+    velx_list, vely_list, velz_list = [], [], []
 
-    for chunk in chunks:
-        xpos.append(chunk.iloc[:, 0].values)
-        ypos.append(chunk.iloc[:, 1].values)
-        zpos.append(chunk.iloc[:, 2].values)
-        velx.append(chunk.iloc[:, 3].values)
-        vely.append(chunk.iloc[:, 4].values)
-        velz.append(chunk.iloc[:, 5].values)
-    xpos = np.concatenate(xpos)
-    ypos = np.concatenate(ypos)
-    zpos = np.concatenate(zpos)
-    velx = np.concatenate(velx)
-    vely = np.concatenate(vely)
-    velz = np.concatenate(velz)
+    for chunk in reader:
+        xp = np.round(chunk.iloc[:, 0].values, 10)
+        yp = np.round(chunk.iloc[:, 1].values, 10)
+        zp = np.round(chunk.iloc[:, 2].values, 10)
+        vx = chunk.iloc[:, 3].values
+        vy = chunk.iloc[:, 4].values
+        vz = chunk.iloc[:, 5].values
+
+        xpos_list.append(xp)
+        ypos_list.append(yp)
+        zpos_list.append(zp)
+        velx_list.append(vx)
+        vely_list.append(vy)
+        velz_list.append(vz)
+
+    # 2) Preallocate the final flat arrays
+    total_pts = sum(arr.size for arr in xpos_list)
+    xpos = np.empty(total_pts, dtype=xpos_list[0].dtype)
+    ypos = np.empty(total_pts, dtype=ypos_list[0].dtype)
+    zpos = np.empty(total_pts, dtype=zpos_list[0].dtype)
+    velx = np.empty(total_pts, dtype=velx_list[0].dtype)
+    vely = np.empty(total_pts, dtype=vely_list[0].dtype)
+    velz = np.empty(total_pts, dtype=velz_list[0].dtype)
+
+    # 3) Copy each chunk into its slice of the flat arrays
+    offset = 0
+    for xp, yp, zp, vx, vy, vz in zip(
+            xpos_list, ypos_list, zpos_list,
+            velx_list, vely_list, velz_list):
+
+        n = xp.size
+        xpos[offset:offset+n] = xp
+        ypos[offset:offset+n] = yp
+        zpos[offset:offset+n] = zp
+        velx[offset:offset+n] = vx
+        vely[offset:offset+n] = vy
+        velz[offset:offset+n] = vz
+        offset += n
+
+    # 4) Release the chunk lists to free memory
+    del xpos_list, ypos_list, zpos_list
+    del velx_list, vely_list, velz_list
     log_memory_rank0("After reading data file in chunks")
 
     # Round positions to handle floating-point precision
@@ -160,10 +198,8 @@ if rank == 0:
     # Validate data size
     expected_num_points = nx * ny * nz
     actual_num_points = xpos.size
-
     print(f"Expected number of points: {expected_num_points}")
     print(f"Actual number of points: {actual_num_points}")
-
     if actual_num_points != expected_num_points:
         print("Warning: The actual number of data points does not match the expected number based on grid sizes.")
 
@@ -174,6 +210,7 @@ if rank == 0:
     x_idx = {val: i for i, val in enumerate(x_unique)}
     y_idx = {val: i for i, val in enumerate(y_unique)}
     z_idx = {val: i for i, val in enumerate(z_unique)}
+
     for i in range(actual_num_points):
         xi = x_idx[xpos_rounded[i]]
         yi = y_idx[ypos_rounded[i]]
@@ -181,6 +218,7 @@ if rank == 0:
         velx_grid[xi, yi, zi] = velx[i]
         vely_grid[xi, yi, zi] = vely[i]
         velz_grid[xi, yi, zi] = velz[i]
+
     velx_grid = np.nan_to_num(velx_grid)
     vely_grid = np.nan_to_num(vely_grid)
     velz_grid = np.nan_to_num(velz_grid)
@@ -189,13 +227,116 @@ if rank == 0:
     # Compute total kinetic energy in physical space
     tke_physical = 0.5 * np.mean(velx_grid**2 + vely_grid**2 + velz_grid**2)
     print(f"[Rank 0] Total Kinetic Energy in Physical Space (TKE_physical): {tke_physical:.6f}")
+
 else:
-    nx = None
-    ny = None
-    nz = None
+    nx = ny = nz = None
     step_number_extracted = None
     time_extracted = None
     tke_physical = None
+
+
+
+
+# ### File Reading and Grid Reconstruction (Rank 0)
+# if rank == 0:
+#     print(f"[Rank 0] Reading header and data from file:\n  {data_filename}")
+#     # Read header to extract step number and time
+#     with open(data_filename, 'r') as f:
+#         header_lines = [next(f) for _ in range(6)]
+#     step_number_extracted = None
+#     time_extracted = None
+#     for line in header_lines:
+#         if 'Step' in line:
+#             m = re.search(r'Step\s*=\s*(\d+)', line)
+#             if m:
+#                 step_number_extracted = m.group(1)
+#         if 'Time' in line:
+#             m = re.search(r'Time\s*=\s*([0-9.eE+-]+)', line)
+#             if m:
+#                 time_extracted = float(m.group(1))
+#     if step_number_extracted is None:
+#         step_number_extracted = "Unknown"
+#     if time_extracted is None:
+#         time_extracted = 0.0
+#     print(f"[Rank 0] Header: Step = {step_number_extracted}, Time = {time_extracted:.3e}")
+# 
+#     # Load data in chunks to handle large files
+#     print("[Rank 0] Loading data in chunks (skipping header)...")
+# 
+#     chunk_size = 10_000_000
+#     chunks = pd.read_csv(data_filename, delimiter=' ', skiprows=6, chunksize=chunk_size, header=None)
+#     xpos, ypos, zpos, velx, vely, velz = [], [], [], [], [], []
+# 
+#     for chunk in chunks:
+#         xpos.append(chunk.iloc[:, 0].values)
+#         ypos.append(chunk.iloc[:, 1].values)
+#         zpos.append(chunk.iloc[:, 2].values)
+#         velx.append(chunk.iloc[:, 3].values)
+#         vely.append(chunk.iloc[:, 4].values)
+#         velz.append(chunk.iloc[:, 5].values)
+#     xpos = np.concatenate(xpos)
+#     ypos = np.concatenate(ypos)
+#     zpos = np.concatenate(zpos)
+#     velx = np.concatenate(velx)
+#     vely = np.concatenate(vely)
+#     velz = np.concatenate(velz)
+#     log_memory_rank0("After reading data file in chunks")
+# 
+#     # Round positions to handle floating-point precision
+#     xpos_rounded = np.round(xpos, decimals=10)
+#     ypos_rounded = np.round(ypos, decimals=10)
+#     zpos_rounded = np.round(zpos, decimals=10)
+# 
+#     # Determine grid size
+#     x_unique = np.unique(xpos_rounded)
+#     y_unique = np.unique(ypos_rounded)
+#     z_unique = np.unique(zpos_rounded)
+#     nx = len(x_unique)
+#     ny = len(y_unique)
+#     nz = len(z_unique)
+#     print(f"Number of unique x values: {nx}")
+#     print(f"Number of unique y values: {ny}")
+#     print(f"Number of unique z values: {nz}")
+# 
+#     # Validate data size
+#     expected_num_points = nx * ny * nz
+#     actual_num_points = xpos.size
+# 
+#     print(f"Expected number of points: {expected_num_points}")
+#     print(f"Actual number of points: {actual_num_points}")
+# 
+#     if actual_num_points != expected_num_points:
+#         print("Warning: The actual number of data points does not match the expected number based on grid sizes.")
+# 
+#     # Reconstruct velocity grids
+#     velx_grid = np.full((nx, ny, nz), np.nan)
+#     vely_grid = np.full((nx, ny, nz), np.nan)
+#     velz_grid = np.full((nx, ny, nz), np.nan)
+#     x_idx = {val: i for i, val in enumerate(x_unique)}
+#     y_idx = {val: i for i, val in enumerate(y_unique)}
+#     z_idx = {val: i for i, val in enumerate(z_unique)}
+#     for i in range(actual_num_points):
+#         xi = x_idx[xpos_rounded[i]]
+#         yi = y_idx[ypos_rounded[i]]
+#         zi = z_idx[zpos_rounded[i]]
+#         velx_grid[xi, yi, zi] = velx[i]
+#         vely_grid[xi, yi, zi] = vely[i]
+#         velz_grid[xi, yi, zi] = velz[i]
+#     velx_grid = np.nan_to_num(velx_grid)
+#     vely_grid = np.nan_to_num(vely_grid)
+#     velz_grid = np.nan_to_num(velz_grid)
+#     log_memory_rank0("After reconstructing grids")
+# 
+#     # Compute total kinetic energy in physical space
+#     tke_physical = 0.5 * np.mean(velx_grid**2 + vely_grid**2 + velz_grid**2)
+#     print(f"[Rank 0] Total Kinetic Energy in Physical Space (TKE_physical): {tke_physical:.6f}")
+# else:
+#     nx = None
+#     ny = None
+#     nz = None
+#     step_number_extracted = None
+#     time_extracted = None
+#     tke_physical = None
 
 ### Broadcast Grid Dimensions and Header Info
 nx = comm.bcast(nx, root=0)
