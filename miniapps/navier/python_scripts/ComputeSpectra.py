@@ -2,42 +2,19 @@ import numpy as np
 import matplotlib.pyplot as plt
 import re
 import os 
+import argparse
 
 import scipy.stats as stats
 
-#file_directory = '/p/lustre2/zendejas/TestCases/mfem/TGV/Order2_Re1600/tgv_512/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv4P2/'
-#file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_384/ElementCentersVelocity_Re1600NumPtsPerDir48RefLv3P2/'
-#file_directory = '/g/g11/zendejas/Documents/mfem_build/mfem/miniapps/navier/ElementCentersVelocity_Re1600NumPtsPerDir4RefLv0P2/'
-# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_128_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P4/'
-#file_directory = '/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P4/'
-# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P2/'
-#file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128_test_sampling_higher/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P2/'
-# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P2/'
-file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re400/tgv_128_test_sampling/ElementCentersVelocity_Re400NumPtsPerDir32RefLv2P2/'
-file_directory = '/p/lustre1/zendejas/TGV/mfem/Order4_Re400/tgv_128_test_sampling/ElementCentersVelocity_Re400NumPtsPerDir32RefLv2P4/'
-file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re3200/tgv_256/SampledDataVelocityP2/'
-file_directory = '/p/lustre1/zendejas/TGV/mfem/Order3_Re1600/tgv_256/SampledDataVelocityP3/'
-# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order3_Re1600/tgv_64/SampledDataVelocityP3/'
-# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order3_Re1600/tgv_128/SampledDataVelocityP3/'
-# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_128_more_quad_pts/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P2/'
-# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P2/'
-# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_256_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv3P2/'
-# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order3_Re1600/tgv_128_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P3/'
-# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_128_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv2P4/'
-# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order4_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P4/'
-# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order3_Re1600/tgv_64_test_sampling/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P3/'
-# file_directory = '/p/lustre1/zendejas/TGV/mfem/Order2_Re1600/tgv_64/ElementCentersVelocity_Re1600NumPtsPerDir32RefLv1P2/'
-files_to_extract_data = [
-    #file_directory + 'cycle_3000/element_centers_3000.txt',
-    # file_directory + 'cycle_9001/element_centers_9001.txt',
-    #file_directory + 'cycle_11500/element_centers_11500.txt',
-    # file_directory + 'cycle_9000/sampled_data_9000.txt'
-    file_directory + 'cycle_9002/sampled_data_9002.txt'
-]
+### Parse Command-Line Arguments
+parser = argparse.ArgumentParser(description='Compute energy spectrum from velocity data.')
+parser.add_argument('data_file', type=str, help='Path to the data file')
+args = parser.parse_args()
+data_filename = [args.data_file]
 
 plt.figure(figsize=(10, 8))
 
-for file_to_extract_data in files_to_extract_data:
+for file_to_extract_data in data_filename:
     # Read header lines to extract step and time
     with open(file_to_extract_data, 'r') as header_file:
         header_lines = [next(header_file) for _ in range(6)]
@@ -124,6 +101,9 @@ for file_to_extract_data in files_to_extract_data:
     # Compute TKE grid
     tke_grid = 0.5 * (velx_grid**2 + vely_grid**2 + velz_grid**2)
 
+    tke_physical = 0.5 * np.sum(velx_grid**2 + vely_grid**2 + velz_grid**2)
+    print(f"[Rank 0] Total Kinetic Energy in Physical Space (TKE_physical): {tke_physical:.6f}")
+    
     # Perform 3D FFTs
     fft_velx = np.fft.fftn(velx_grid)
     fft_vely = np.fft.fftn(vely_grid)
@@ -179,7 +159,7 @@ for file_to_extract_data in files_to_extract_data:
         label_str += f", Time {time_extracted:.3e}"
 
     # Save wavenumbers and energy to a text file
-    output_filename = os.path.join(file_directory, f'energy_spectrum_step_{step_number_extracted}.txt')
+    output_filename = os.path.join(os.path.dirname(file_to_extract_data), f'energy_spectrum_step_{step_number_extracted}.txt')
     print(f"[Rank 0] Saving energy spectrum to {output_filename}")
     np.savetxt(output_filename, np.column_stack((k_bin_centers, E_k)), 
                header=f'Wavenumber_k Energy_E(k) (Step {step_number_extracted}, Time {time_extracted:.3e})', 

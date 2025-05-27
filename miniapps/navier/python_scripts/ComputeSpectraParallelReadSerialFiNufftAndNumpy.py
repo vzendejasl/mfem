@@ -5,20 +5,19 @@ import re, finufft
 import argparse
 import pandas as pd
 import sys
-import os
 
 # -------------------------------------------------------------------------------
-parser = argparse.ArgumentParser(description='Compute 3D energy spectrum using FINUFFT from velocity data.')
+parser = argparse.ArgumentParser(description='Compute TKE and velocity magnitude from velocity data.')
 parser.add_argument('data_file', type=str, help='Path to the data file')
 args = parser.parse_args()
 data_filename = args.data_file
 
-eps = 1e-12  # Requested accuracy for FINUFFT
+eps = 1e-12           # requested accuracy for FINUFFT
 
 plt.figure(figsize=(8, 6))
 
 # ---- HEADER ----
-print(f"Reading header and data from file:\n  {data_filename}")
+print(f"[Rank 0] Reading header and data from file:\n  {data_filename}")
 with open(data_filename, 'r') as f:
     header_lines = [next(f) for _ in range(6)]
 step_number_extracted = None
@@ -36,10 +35,10 @@ if step_number_extracted is None:
     step_number_extracted = "Unknown"
 if time_extracted is None:
     time_extracted = 0.0
-print(f"Header: Step = {step_number_extracted}, Time = {time_extracted:.3e}")
+print(f"[Rank 0] Header: Step = {step_number_extracted}, Time = {time_extracted:.3e}")
 
-# ---- DATA LOADING ----
-print("Loading data in chunks (skipping header)...")
+# ---- DATA LOADING (your chunked method, unchanged) ----
+print("[Rank 0] Loading data in chunks (skipping header)...")
 chunk_size = 5_000_000
 reader = pd.read_csv(
     data_filename,
@@ -89,24 +88,15 @@ for xp, yp, zp, vx, vy, vz in zip(
     velz[offset:offset+n] = vz
     offset += n
 
-# Free memory from chunk lists
 del xpos_list, ypos_list, zpos_list
 del velx_list, vely_list, velz_list
 
-# ---- Deduplication ----
+# ---- ROUNDING (for floating point safety) ----
 xpos_rounded = np.round(xpos, decimals=10)
 ypos_rounded = np.round(ypos, decimals=10)
 zpos_rounded = np.round(zpos, decimals=10)
-positions = np.stack([xpos_rounded, ypos_rounded, zpos_rounded], axis=1)
-unique_pos, unique_indices = np.unique(positions, axis=0, return_index=True)
-xpos_rounded = xpos_rounded[unique_indices]
-ypos_rounded = ypos_rounded[unique_indices]
-zpos_rounded = zpos_rounded[unique_indices]
-velx = velx[unique_indices]
-vely = vely[unique_indices]
-velz = velz[unique_indices]
 
-# ---- Grid info ----
+# ---- STRUCTURED GRID SETUP ----
 x_unique = np.unique(xpos_rounded)
 y_unique = np.unique(ypos_rounded)
 z_unique = np.unique(zpos_rounded)
@@ -118,14 +108,27 @@ print(f"Number of unique y values: {ny}")
 print(f"Number of unique z values: {nz}")
 
 expected_num_points = nx * ny * nz
-actual_num_points = xpos_rounded.size
+actual_num_points = xpos.size
 print(f"Expected number of points: {expected_num_points}")
 print(f"Actual number of points:   {actual_num_points}")
-if actual_num_points != expected_num_points:
+
+# ---- DEDUPLICATION: ensure one value per (x, y, z) ----
+positions = np.stack([xpos_rounded, ypos_rounded, zpos_rounded], axis=1)
+unique_pos, unique_indices = np.unique(positions, axis=0, return_index=True)
+xpos_rounded = xpos_rounded[unique_indices]
+ypos_rounded = ypos_rounded[unique_indices]
+zpos_rounded = zpos_rounded[unique_indices]
+velx = velx[unique_indices]
+vely = vely[unique_indices]
+velz = velz[unique_indices]
+
+if xpos_rounded.size != nx * ny * nz:
     print("ERROR: After deduplication, number of unique points does not match grid shape!")
+    print(f"Points after deduplication: {xpos_rounded.size}")
+    print(f"Expected grid shape: {nx} × {ny} × {nz} = {nx*ny*nz}")
     sys.exit(1)
 
-# ---- (Optional) Sort lexicographically ----
+# ---- SORT LEXICOGRAPHICALLY SO FLAT ARRAYS MATCH 3D GRID ORDER ----
 x_idx = np.searchsorted(x_unique, xpos_rounded)
 y_idx = np.searchsorted(y_unique, ypos_rounded)
 z_idx = np.searchsorted(z_unique, zpos_rounded)
@@ -137,10 +140,22 @@ velx = velx[sort_indices]
 vely = vely[sort_indices]
 velz = velz[sort_indices]
 
-tke_physical = 0.5 * np.sum(velx**2 + vely**2 + velz**2)
+# ---- FFT: RESHAPE TO 3D GRIDS ----
+velx_grid = velx.reshape((nx, ny, nz))
+vely_grid = vely.reshape((nx, ny, nz))
+velz_grid = velz.reshape((nx, ny, nz))
+
+# ---- PHYSICAL TKE ----
+tke_physical = 0.5 * np.sum(velx_grid**2 + vely_grid**2 + velz_grid**2)
 print(f"[Rank 0] Total Kinetic Energy in Physical Space (TKE_physical): {tke_physical:.6f}")
 
-# ---- Map to [-pi, pi] domain for FINUFFT ----
+# ---- NUMPY FFT ----
+Ntot = nx * ny * nz
+Fvx_ft = np.fft.fftn(velx_grid) / Ntot
+Fvy_ft = np.fft.fftn(vely_grid) / Ntot
+Fvz_ft = np.fft.fftn(velz_grid) / Ntot
+
+# ---- FINUFFT ----
 dx = x_unique[1] - x_unique[0] if nx > 1 else 1.0
 dy = y_unique[1] - y_unique[0] if ny > 1 else 1.0
 dz = z_unique[1] - z_unique[0] if nz > 1 else 1.0
@@ -155,9 +170,6 @@ x_s = map_to_pi(xpos_rounded, x_unique[0], Lx)
 y_s = map_to_pi(ypos_rounded, y_unique[0], Ly)
 z_s = map_to_pi(zpos_rounded, z_unique[0], Lz)
 
-# ---- FINUFFT forward transforms ----
-Ntot = nx * ny * nz
-
 def finufft_forward_scattered(x_, y_, z_, v_):
     F_flat = finufft.nufft3d1(
         x_, y_, z_,
@@ -170,43 +182,52 @@ Fvx_nu = finufft_forward_scattered(x_s, y_s, z_s, velx)
 Fvy_nu = finufft_forward_scattered(x_s, y_s, z_s, vely)
 Fvz_nu = finufft_forward_scattered(x_s, y_s, z_s, velz)
 
-# ---- fftshift for turbulence binning convention ----
+# ---- ENERGY SPECTRA ----
+E3d_nu = 0.5 * (np.abs(Fvx_nu)**2 + np.abs(Fvy_nu)**2 + np.abs(Fvz_nu)**2)
+E3d_ft = 0.5 * (np.abs(Fvx_ft)**2 + np.abs(Fvy_ft)**2 + np.abs(Fvz_ft)**2)
+print(f"FINUFFT KE: {E3d_nu.sum()*Ntot:.6e}  |  FFT KE: {E3d_ft.sum()*Ntot:.6e}")
+
+# ---- fftshift for standard spectral binning! ----
+Fvx_ft = np.fft.fftshift(Fvx_ft)
+Fvy_ft = np.fft.fftshift(Fvy_ft)
+Fvz_ft = np.fft.fftshift(Fvz_ft)
+
+# ---- FINUFFT ----
+# (leave this as before, since FINUFFT does not need shifting if you output modes in the same order as FFT)
+# But for apples-to-apples, if you want, you can also apply fftshift to the FINUFFT arrays:
 Fvx_nu = np.fft.fftshift(Fvx_nu)
 Fvy_nu = np.fft.fftshift(Fvy_nu)
 Fvz_nu = np.fft.fftshift(Fvz_nu)
 
-# ---- Spectral energy ----
+# ---- ENERGY SPECTRA ----
 E3d_nu = 0.5 * (np.abs(Fvx_nu)**2 + np.abs(Fvy_nu)**2 + np.abs(Fvz_nu)**2)
-print(f"FINUFFT KE: {E3d_nu.sum()*Ntot:.6e}")
+E3d_ft = 0.5 * (np.abs(Fvx_ft)**2 + np.abs(Fvy_ft)**2 + np.abs(Fvz_ft)**2)
+print(f"FINUFFT KE: {E3d_nu.sum()*Ntot:.6e}  |  FFT KE: {E3d_ft.sum()*Ntot:.6e}")
 
-# ---- Wavenumbers and binning ----
+# ---- SPECTRAL BINS AND PLOT ----
 kx = np.fft.fftfreq(nx, d=dx/(2*np.pi))
 ky = np.fft.fftfreq(ny, d=dy/(2*np.pi))
 kz = np.fft.fftfreq(nz, d=dz/(2*np.pi))
+
 kx = np.fft.fftshift(kx)
 ky = np.fft.fftshift(ky)
 kz = np.fft.fftshift(kz)
+
 KX, KY, KZ = np.meshgrid(kx, ky, kz, indexing='ij')
 k_magnitude = np.sqrt(KX**2 + KY**2 + KZ**2)
+
+# Flatten arrays for binning
 k_flat = k_magnitude.flatten()
 
 num_bins = nx
 k_bin_edges = np.arange(0, num_bins+1) - 0.5
 k_bin_centers = 0.5 * (k_bin_edges[:-1] + k_bin_edges[1:])
 E_k_nu, _ = np.histogram(k_flat, bins=k_bin_edges, weights=E3d_nu.ravel())
+E_k_ft, _ = np.histogram(k_flat, bins=k_bin_edges, weights=E3d_ft.ravel())
 
-# ---- Plot ----
-plt.loglog(k_bin_centers, E_k_nu, 'b-', label=f'FINUFFT step {step_number_extracted}')
-plt.loglog(
-    k_bin_centers, 
-    0.1 * (k_bin_centers / k_bin_centers[1])**(-5/3), 
-    'r:', label=r'$k^{-5/3}$'
-)
-plt.xlabel(r'$|k|$')
-plt.ylabel(r'$E(k)$')
-plt.title('3-D energy spectrum (FINUFFT)')
-plt.legend()
-plt.grid(True, ls=':')
-plt.tight_layout()
-plt.show()
+plt.loglog(k_bin_centers, E_k_nu, 'b-',  label=f'FINUFFT step {step_number_extracted}')
+plt.loglog(k_bin_centers, E_k_ft, 'k--', label='FFT')
+plt.loglog(k_bin_centers, 0.1*(k_bin_centers/k_bin_centers[1])**(-5/3), 'r:', label=r'$k^{-5/3}$')
+plt.xlabel(r'$|k|$'); plt.ylabel(r'$E(k)$'); plt.title('3-D energy spectrum')
+plt.legend(); plt.grid(True, ls=':'); plt.tight_layout(); plt.show()
 

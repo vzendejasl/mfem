@@ -339,6 +339,127 @@ void SamplePoints(mfem::ParGridFunction* sol,
    MPI_Barrier(MPI_COMM_WORLD);
 }
 
+void SamplePointsAtDoFs(mfem::ParGridFunction* sol,
+                        mfem::ParMesh* pmesh,
+                        int step,
+                        double time,
+                        const std::string &suffix,
+                        const s_NavierContext* ctx)
+{
+   MPI_Comm comm = pmesh->GetComm();
+   int rank, size;
+   MPI_Comm_rank(comm, &rank);
+   MPI_Comm_size(comm, &size);
+
+   // Build output directory and filename
+   std::string main_dir = "SamplePoints" + suffix +
+      "_Re" + std::to_string(static_cast<int>(GetReynum(ctx))) +
+      "RefLv" + std::to_string(GetElementSubdivisions(ctx) + GetElementSubdivisionsParallel(ctx)) +
+      "P" + std::to_string(GetOrder(ctx));
+
+   std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
+   std::string fname = cycle_dir + "/SampledData" + std::to_string(step) + ".txt";
+
+   if (rank == 0)
+   {
+      if (system(("mkdir -p " + main_dir).c_str()) != 0)
+         std::cerr << "Error creating " << main_dir << " directory!" << std::endl;
+      if (system(("mkdir -p " + cycle_dir).c_str()) != 0)
+         std::cerr << "Error creating " << cycle_dir << " directory!" << std::endl;
+   }
+   MPI_Barrier(comm);
+
+   mfem::FiniteElementSpace *fes = sol->FESpace();
+   const int vdim = fes->GetVDim();
+   const int ndofs = fes->GetVSize(); // total dofs (including all vector components)
+
+   // Prepare arrays to store DoF coordinates and values
+   std::vector<double> local_x, local_y, local_z;
+   std::vector<double> local_valx, local_valy, local_valz;
+
+   mfem::Array<int> vdofs;
+   mfem::Vector dof_val(vdim);
+
+   for (int e = 0; e < fes->GetNE(); e++)
+   {
+      mfem::ElementTransformation *Trans = fes->GetMesh()->GetElementTransformation(e);
+      const mfem::FiniteElement *fe = fes->GetFE(e);
+      mfem::Array<int> vdofs;
+      fes->GetElementVDofs(e, vdofs);
+
+      const mfem::IntegrationRule &nodes = fe->GetNodes();
+      MFEM_VERIFY(nodes != nullptr, "FiniteElement does not have nodes (not a nodal basis)!");
+
+      for (int i = 0; i < fe->GetDof(); i++)
+      {
+         const mfem::IntegrationPoint &ip = nodes.IntPoint(i);
+         mfem::Vector phys_coord(3); phys_coord = 0.0;
+         Trans->Transform(ip, phys_coord);
+
+         for (int d = 0; d < vdim; d++)
+         {
+            int vdof = vdofs[i + d * fe->GetDof()];
+            double value = (*sol)[vdof];
+            local_x.push_back(phys_coord(0));
+            local_y.push_back(phys_coord.Size() > 1 ? phys_coord(1) : 0.0);
+            local_z.push_back(phys_coord.Size() > 2 ? phys_coord(2) : 0.0);
+            local_valx.push_back(d == 0 ? value : 0.0);
+            local_valy.push_back(d == 1 ? value : 0.0);
+            local_valz.push_back(d == 2 ? value : 0.0);
+         }
+      }
+   }
+
+
+
+
+   // Prepare the data string, including the header on rank 0
+   std::string data_str;
+   if (rank == 0)
+   {
+      std::ostringstream header_stream;
+      header_stream << "3D Taylor Green Vortex\n"
+                    << "Order = " << GetOrder(ctx) << " (sampling at DoFs)\n"
+                    << "Step = " << step << "\n"
+                    << "Time = " << std::scientific << std::setprecision(16) << time << "\n"
+                    << "====================================================================================\n"
+                    << "            x                      y                      z                   valx                   valy                   valz\n";
+      data_str = header_stream.str();
+   }
+
+   // Append local data
+   std::ostringstream local_data_stream;
+   for (size_t i = 0; i < local_x.size(); i++)
+   {
+      local_data_stream << std::scientific << std::setprecision(16)
+                        << std::setw(20) << local_x[i] << " "
+                        << std::setw(20) << local_y[i] << " "
+                        << std::setw(20) << local_z[i] << " "
+                        << std::setw(20) << local_valx[i] << " "
+                        << std::setw(20) << local_valy[i] << " "
+                        << std::setw(20) << local_valz[i] << "\n";
+   }
+   data_str += local_data_stream.str();
+
+   // Write out using MPI I/O
+   MPI_File fh;
+   int err = MPI_File_open(comm, fname.c_str(), MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
+   if (err != MPI_SUCCESS)
+   {
+      if (rank == 0) std::cerr << "Error opening file " << fname << " with MPI I/O" << std::endl;
+      MPI_Abort(comm, 1);
+   }
+
+   MPI_File_write_ordered(fh, data_str.c_str(), data_str.size(), MPI_CHAR, MPI_STATUS_IGNORE);
+
+   MPI_File_close(&fh);
+
+   if (rank == 0)
+      std::cout << "Sampled data file saved: " << fname << std::endl;
+
+   MPI_Barrier(comm);
+}
+
 
 /*
 // -------------------------------------------------------------

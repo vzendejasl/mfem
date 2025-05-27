@@ -37,6 +37,12 @@ void SamplePoints(mfem::ParGridFunction* sol,
                                 const std::string &suffix,
                                 const s_NavierContext* ctx);
 
+void SamplePointsAtDoFs(mfem::ParGridFunction* sol,
+                        mfem::ParMesh* pmesh,
+                        int step,
+                        double time,
+                        const std::string &suffix,
+                        const s_NavierContext* ctx);
 /*
 void SamplePointsAdios(mfem::ParGridFunction* sol,
                        mfem::ParMesh* pmesh,

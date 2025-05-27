@@ -564,6 +564,7 @@ double u_exact(const Vector &x, Vector &u)
 
 real_t ComputeKineticEnergy(ParGridFunction &v)
 {
+   /*
    Vector velx, vely, velz;
    real_t integ = 0.0;
    const FiniteElement *fe;
@@ -616,6 +617,23 @@ real_t ComputeKineticEnergy(ParGridFunction &v)
                  MPI_COMM_WORLD);
 
    return 0.5 * global_integral/globalVolume;
+   */
+    auto *fes = dynamic_cast<ParFiniteElementSpace*>(v.FESpace());
+    ParBilinearForm mass(fes);
+    mass.AddDomainIntegrator(new VectorMassIntegrator());
+
+    // Doesn't work?
+    // if (ctx.pa){
+    //     mass.SetAssemblyLevel(AssemblyLevel::PARTIAL);
+    // }
+  
+    mass.Assemble();
+    mass.Finalize();
+
+    // Assuming volume = 1
+    const double ke = 0.5*mass.ParInnerProduct(v,v);
+    return ke;
+
 };
 
 /*
@@ -1135,6 +1153,7 @@ real_t compute_mass(ParFiniteElementSpace *L2, real_t massL2,
 }
 
 // Computes KE = 1/2 * (u1**2 + u2**2 + u3**3) 
+// Will not work for L2 in the current form
 void ComputeKeGridFunction(ParGridFunction &u, ParGridFunction &ke)
 {
    FiniteElementSpace *v_fes = u.FESpace();
@@ -1173,12 +1192,10 @@ void ComputeKeGridFunction(ParGridFunction &u, ParGridFunction &ke)
          // Evaluate the solution at the sample point
          Vector u_val(vdim);
          u.GetVectorValue(*tr, ip, u_val);
-         double u_x = u_val(0);
-         double u_y = u_val(1);
-         double u_z = u_val(2);
 
          real_t ke_val = u_val(0)*u_val(0) + u_val(1)*u_val(1) + u_val(2)*u_val(2); 
          vals(dof) = 0.5*ke_val;
+
       }
 
       // Accumulate values in all dofs, count the zones.

@@ -14,6 +14,9 @@ list(APPEND ALL_EXE_SRCS
   victor_periodic_p_convergence.cpp
   victor_periodic_p_sampling_freq_test.cpp
   victor_sample_data.cpp
+  victor_compute_error.cpp
+  exVectorDecompConvergence.cpp
+  exVectorDecomp.cpp
   ex0.cpp
   ex1.cpp
   ex2.cpp

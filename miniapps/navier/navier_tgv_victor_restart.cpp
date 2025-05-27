@@ -101,7 +101,7 @@ public:
       volume = mass_lf->operator()(one_gf);
    };
 
-   real_t ComputeKineticEnergy(ParGridFunction &v)
+   real_t ComputeKineticEnergy(ParGridFunction &v, ParGridFunction &ke_gf)
    {
       /*
       Vector velx, vely, velz;
@@ -144,17 +144,26 @@ public:
       return 0.5 * global_integral / volume;
       */
 
-    auto *fes = dynamic_cast<ParFiniteElementSpace*>(v.FESpace());
-    ParBilinearForm mass(fes);
-    mass.AddDomainIntegrator(new VectorMassIntegrator());
-
-    // Doesn't work?
-    // if (ctx.pa){
-    //     mass.SetAssemblyLevel(AssemblyLevel::PARTIAL);
-    // }
+    ParFiniteElementSpace *vfes = v.ParFESpace();
+    ParBilinearForm mass(vfes);
+    ConstantCoefficient ones(1.0);
+    mass.AddDomainIntegrator(new VectorMassIntegrator(ones));
   
     mass.Assemble();
     mass.Finalize();
+
+
+    // Create KE grid function
+    VectorGridFunctionCoefficient U(&v);     
+
+    InnerProductCoefficient uu(U, U);          
+
+    ConstantCoefficient half(0.5);
+
+    ProductCoefficient kcoeff(half, uu);       
+
+    ke_gf.ProjectCoefficient(kcoeff);
+    
 
     const double ke = 0.5*mass.ParInnerProduct(v,v);
     return ke / volume;
@@ -601,6 +610,119 @@ void ComputeQCriterion(ParGridFunction &u, ParGridFunction &q)
    }
 }
 
+void ComputeDivergence3D(ParGridFunction &u, ParGridFunction &du)
+{
+
+   FiniteElementSpace *v_fes = u.FESpace();
+   FiniteElementSpace *fes = du.FESpace();
+
+   // AccumulateAndCountZones
+   Array<int> zones_per_vdof;
+   zones_per_vdof.SetSize(fes->GetVSize());
+   zones_per_vdof = 0;
+
+   du = 0.0;
+
+   // Local interpolation
+   int elndofs;
+   Array<int> v_dofs, dofs;
+   Vector vals;
+   Vector loc_data;
+   int vdim = v_fes->GetVDim();
+
+   for (int e = 0; e < fes->GetNE(); ++e)
+   {
+      fes->GetElementVDofs(e, dofs);
+      v_fes->GetElementVDofs(e, v_dofs);
+      u.GetSubVector(v_dofs, loc_data);
+      vals.SetSize(dofs.Size());
+      ElementTransformation *tr = fes->GetElementTransformation(e);
+      const FiniteElement *el = fes->GetFE(e);
+      elndofs = el->GetDof();
+
+      for (int dof = 0; dof < elndofs; ++dof)
+      {
+
+         const IntegrationPoint &ip = el->GetNodes().IntPoint(dof);
+         tr->SetIntPoint(&ip);
+
+         // MFEM does all the heavy lifting here:
+         // GetDivergence computes ∇·u at the current integration point
+         vals(dof) = u.GetDivergence(*tr);
+      }
+
+      // Accumulate values in all dofs, count the zones.
+      for (int j = 0; j < dofs.Size(); j++)
+      {
+         int ldof = dofs[j];
+         du(ldof) += vals[j];
+         zones_per_vdof[ldof]++;
+      }
+   }
+
+   // Count the zones globally.
+   GroupCommunicator &gcomm = du.ParFESpace()->GroupComm();
+   gcomm.Reduce<int>(zones_per_vdof, GroupCommunicator::Sum);
+   gcomm.Bcast(zones_per_vdof);
+
+   // Accumulate for all vdofs.
+   gcomm.Reduce<real_t>(du.GetData(), GroupCommunicator::Sum);
+   gcomm.Bcast<real_t>(du.GetData());
+
+   // Compute means
+   for (int i = 0; i < du.Size(); i++)
+   {
+      const int nz = zones_per_vdof[i];
+      if (nz)
+      {
+         du(i) /= nz;
+      }
+   }
+}
+
+void ComputeVorticalPart( NavierSolver *solver, 
+                          ParGridFunction &u,
+                          ParGridFunction &w_gf,
+                          ParGridFunction &u_vort)
+{
+
+    ParFiniteElementSpace *vfes = u.ParFESpace();
+
+    Array<int> ess_tdof_list;
+
+    VectorGridFunctionCoefficient w_coeff(&w_gf);
+    ParLinearForm b(vfes);
+    b.AddDomainIntegrator(new VectorDomainLFIntegrator(w_coeff));
+    b.Assemble();
+
+    ParBilinearForm vLap(vfes);
+    ConstantCoefficient one(1.0); 
+    vLap.AddDomainIntegrator(new VectorDiffusionIntegrator(one));
+    vLap.SetAssemblyLevel(AssemblyLevel::PARTIAL);
+    vLap.Assemble();
+
+    OperatorPtr A;
+    Vector B,X;
+    ParGridFunction x(vfes);
+    x = 0.0;
+
+    vLap.FormLinearSystem(ess_tdof_list, x, b, A, X, B);
+       
+    Solver *prec = new OperatorJacobiSmoother(vLap, ess_tdof_list);
+    
+    CGSolver cg(MPI_COMM_WORLD);
+    cg.SetRelTol(1e-12);
+    cg.SetMaxIter(2000);
+    cg.SetPrintLevel(1);
+    cg.SetOperator(*A);
+    cg.Mult(B, X);
+
+    vLap.RecoverFEMSolution(X, b, x);
+
+    solver->ComputeCurl3D(x, u_vort);
+
+}
+
 // Computes \eta = 2*\nu*(\nabla u + trans(\nabla u))^2
 void ComputeDissipation(ParGridFunction &u, ParGridFunction &d)
 {
@@ -688,7 +810,6 @@ void ComputeDissipation(ParGridFunction &u, ParGridFunction &d)
          d(i) /= nz;
       }
    }
-
 }
 
 // Check to make sure mesh is periodic
@@ -863,6 +984,13 @@ int main(int argc, char *argv[])
                                                  length,
                                                  length, false));
 
+      // init_mesh = new Mesh(Mesh::MakeCartesian3DWith24TetsPerHex(ctx.num_pts,
+      //                                            ctx.num_pts,
+      //                                            ctx.num_pts,
+      //                                            length,
+      //                                            length,
+      //                                            length));
+
       Vector x_translation({length, 0.0, 0.0});
       Vector y_translation({0.0, length, 0.0});
       Vector z_translation({0.0, 0.0, length});
@@ -969,11 +1097,22 @@ int main(int argc, char *argv[])
    ParGridFunction w_gf(velocity_fespace);
    ParGridFunction q_gf(pressure_fespace);
    ParGridFunction d_gf(pressure_fespace);
+   ParGridFunction divu_gf(pressure_fespace);
+   ParGridFunction ke_gf(pressure_fespace);
 
+
+   ParGridFunction u_comp(velocity_fespace);
+   ParGridFunction u_vort(velocity_fespace);
+
+   
    flowsolver->ComputeCurl3D(*u_gf, w_gf);
    ComputeQCriterion(*u_gf, q_gf);
    ComputeDissipation(*u_gf, d_gf);
+   ComputeDivergence3D(*u_gf, divu_gf);
+   ComputeVorticalPart(flowsolver, *u_gf, w_gf, u_vort);
+
    QuantitiesOfInterest kin_energy(pmesh);
+   real_t ke = kin_energy.ComputeKineticEnergy(*u_gf, ke_gf);
 
    ParaViewDataCollection *pvdc = NULL;
    if (ctx.paraview)
@@ -1033,7 +1172,11 @@ int main(int argc, char *argv[])
       dc->RegisterField("pressure", p_gf);
       dc->RegisterField("vorticity", &w_gf);
       dc->RegisterField("qcriterion", &q_gf);
-      // dc->RegisterField("dissipation", &d_gf);
+      dc->RegisterField("dissipation", &d_gf);
+      dc->RegisterField("divu", &divu_gf);
+      dc->RegisterField("ke", &ke_gf);
+   
+      dc->RegisterField("u_vort", &u_vort);
       dc->Save();
    }
 
@@ -1083,7 +1226,7 @@ int main(int argc, char *argv[])
    real_t u_inf = GlobalLpNorm(infinity(), u_inf_loc, MPI_COMM_WORLD);
    real_t p_inf = GlobalLpNorm(infinity(), p_inf_loc, MPI_COMM_WORLD);
 
-   real_t ke = kin_energy.ComputeKineticEnergy(*u_gf);
+   // real_t ke = kin_energy.ComputeKineticEnergy(*u_gf);
    real_t vel_curl_ke = kin_energy.ComputeInertialRangeEnergy(*u_gf);
    real_t enstrophy = kin_energy.ComputeEnstrophy(w_gf);
 
@@ -1265,6 +1408,8 @@ int main(int argc, char *argv[])
          {
             ComputeQCriterion(*u_gf, q_gf);
             flowsolver->ComputeCurl3D(*u_gf, w_gf);
+            ComputeDivergence3D(*u_gf, divu_gf);
+            ComputeVorticalPart(flowsolver, *u_gf, w_gf, u_vort);
 
             if (ctx.paraview)
             {
@@ -1340,6 +1485,7 @@ int main(int argc, char *argv[])
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
             SamplePoints( u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
+            SamplePointsAtDoFs(u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
             // SamplePointsAdios( u_gf, pmesh, global_cycle + step, t, "Velocity",ctx.oversample, &ctx);
             // ComputeElementCenterValues(&w_gf, pmesh, global_cycle + step, t, "Vorticity");
 
@@ -1359,7 +1505,7 @@ int main(int argc, char *argv[])
 
       flowsolver->ComputeCurl3D(*u_gf, w_gf);
 
-      ke = kin_energy.ComputeKineticEnergy(*u_gf);
+      ke = kin_energy.ComputeKineticEnergy(*u_gf,ke_gf);
       vel_curl_ke = kin_energy.ComputeInertialRangeEnergy(*u_gf);
       enstrophy = kin_energy.ComputeEnstrophy(w_gf);
 
