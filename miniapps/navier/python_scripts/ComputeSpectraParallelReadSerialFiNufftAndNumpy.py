@@ -146,7 +146,8 @@ vely_grid = vely.reshape((nx, ny, nz))
 velz_grid = velz.reshape((nx, ny, nz))
 
 # ---- PHYSICAL TKE ----
-tke_physical = 0.5 * np.sum(velx_grid**2 + vely_grid**2 + velz_grid**2)
+# tke_physical = 0.5 * np.sum(velx_grid**2 + vely_grid**2 + velz_grid**2)
+tke_physical = 0.5 * np.mean(velx_grid**2 + vely_grid**2 + velz_grid**2)
 print(f"[Rank 0] Total Kinetic Energy in Physical Space (TKE_physical): {tke_physical:.6f}")
 
 # ---- NUMPY FFT ----
@@ -185,7 +186,8 @@ Fvz_nu = finufft_forward_scattered(x_s, y_s, z_s, velz)
 # ---- ENERGY SPECTRA ----
 E3d_nu = 0.5 * (np.abs(Fvx_nu)**2 + np.abs(Fvy_nu)**2 + np.abs(Fvz_nu)**2)
 E3d_ft = 0.5 * (np.abs(Fvx_ft)**2 + np.abs(Fvy_ft)**2 + np.abs(Fvz_ft)**2)
-print(f"FINUFFT KE: {E3d_nu.sum()*Ntot:.6e}  |  FFT KE: {E3d_ft.sum()*Ntot:.6e}")
+# print(f"FINUFFT KE: {E3d_nu.sum()*Ntot:.6e}  |  FFT KE: {E3d_ft.sum()*Ntot:.6e}")
+print(f"FINUFFT KE: {E3d_nu.mean()*Ntot:.6e}  |  FFT KE: {E3d_ft.mean()*Ntot:.6e}")
 
 # ---- fftshift for standard spectral binning! ----
 Fvx_ft = np.fft.fftshift(Fvx_ft)
@@ -202,7 +204,8 @@ Fvz_nu = np.fft.fftshift(Fvz_nu)
 # ---- ENERGY SPECTRA ----
 E3d_nu = 0.5 * (np.abs(Fvx_nu)**2 + np.abs(Fvy_nu)**2 + np.abs(Fvz_nu)**2)
 E3d_ft = 0.5 * (np.abs(Fvx_ft)**2 + np.abs(Fvy_ft)**2 + np.abs(Fvz_ft)**2)
-print(f"FINUFFT KE: {E3d_nu.sum()*Ntot:.6e}  |  FFT KE: {E3d_ft.sum()*Ntot:.6e}")
+# print(f"FINUFFT KE: {E3d_nu.sum()*Ntot:.6e}  |  FFT KE: {E3d_ft.sum()*Ntot:.6e}")
+print(f"FINUFFT KE: {E3d_nu.mean()*Ntot:.6e}  |  FFT KE: {E3d_ft.mean()*Ntot:.6e}")
 
 # ---- SPECTRAL BINS AND PLOT ----
 kx = np.fft.fftfreq(nx, d=dx/(2*np.pi))

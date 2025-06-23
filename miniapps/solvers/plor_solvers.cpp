@@ -139,7 +139,7 @@ int main(int argc, char *argv[])
    else if (RT) { fec.reset(new RT_FECollection(order-1, dim, b1, b2)); }
    else { fec.reset(new L2_FECollection(order, dim, b1)); }
 
-   ParFiniteElementSpace fes(&mesh, fec.get());
+   ParFiniteElementSpace fes(&mesh, fec.get(),sdim);
    HYPRE_Int ndofs = fes.GlobalTrueVSize();
    if (Mpi::Root()) { cout << "Number of DOFs: " << ndofs << endl; }
 
@@ -150,8 +150,8 @@ int main(int argc, char *argv[])
    ParBilinearForm a(&fes);
    if (H1 || L2)
    {
-      a.AddDomainIntegrator(new MassIntegrator);
-      a.AddDomainIntegrator(new DiffusionIntegrator);
+      // a.AddDomainIntegrator(new VectorMassIntegrator);
+      a.AddDomainIntegrator(new VectorDiffusionIntegrator);
    }
    else
    {
@@ -171,7 +171,7 @@ int main(int argc, char *argv[])
    a.Assemble();
 
    ParLinearForm b(&fes);
-   if (H1 || L2) { b.AddDomainIntegrator(new DomainLFIntegrator(f_coeff)); }
+   if (H1 || L2) { b.AddDomainIntegrator(new VectorDomainLFIntegrator(f_vec_coeff)); }
    else { b.AddDomainIntegrator(new VectorFEDomainLFIntegrator(f_vec_coeff)); }
    if (L2)
    {
@@ -181,7 +181,7 @@ int main(int argc, char *argv[])
    b.Assemble();
 
    ParGridFunction x(&fes);
-   if (H1 || L2) { x.ProjectCoefficient(u_coeff);}
+   if (H1 || L2) { x.ProjectCoefficient(u_vec_coeff);}
    else { x.ProjectCoefficient(u_vec_coeff); }
 
    Vector X, B;
@@ -216,7 +216,7 @@ int main(int argc, char *argv[])
    if (sdim == dim)
    {
       real_t er =
-         (H1 || L2) ? x.ComputeL2Error(u_coeff) : x.ComputeL2Error(u_vec_coeff);
+         (H1 || L2) ? x.ComputeL2Error(u_vec_coeff) : x.ComputeL2Error(u_vec_coeff);
       if (Mpi::Root()) { cout << "L2 error: " << er << endl; }
    }
 

@@ -109,6 +109,7 @@ void ComputeCurl3D(ParGridFunction &u, ParGridFunction &cu)
 }
 
 void ComputeVorticalPart(ParGridFunction &u,
+                         ParMesh *pmesh,
                          ParGridFunction &w_gf,
                          ParGridFunction &u_vort)
 {
@@ -121,16 +122,14 @@ void ComputeVorticalPart(ParGridFunction &u,
   // and we are not setting the mean of b to zero. 
    ParFiniteElementSpace *vfes = u.ParFESpace();
 
-   Array<int> ess_tdof_list;
-   // if (pmesh.bdr_attributes.Size())
-   // {
-   //    Array<int> ess_bdr(pmesh.bdr_attributes.Max());
-   //    ess_bdr = 0;
-   //    // Apply boundary conditions on all external boundaries:
-   //    pmesh.MarkExternalBoundaries(ess_bdr);
-   //    // Boundary conditions can also be applied based on named attributes:
-   //    // pmesh.MarkNamedBoundaries(set_name, ess_bdr)
 
+   Array<int> ess_tdof_list;
+   // vfes->GetBoundaryTrueDofs(ess_tdof_list);
+
+   // if (pmesh->bdr_attributes.Size())
+   // {
+   //    Array<int> ess_bdr(pmesh->bdr_attributes.Max());
+   //    ess_bdr = 0;
    //    vfes->GetEssentialTrueDofs(ess_bdr, ess_tdof_list);
    // }
 
@@ -147,7 +146,7 @@ void ComputeVorticalPart(ParGridFunction &u,
 
    vLap.Assemble();
 
-   OperatorPtr A;
+   OperatorHandle A;
    Vector B,X;
 
    ParGridFunction x(vfes);
@@ -155,14 +154,17 @@ void ComputeVorticalPart(ParGridFunction &u,
 
    vLap.FormLinearSystem(ess_tdof_list, x, b, A, X, B);
 
-   Solver *prec = new OperatorJacobiSmoother(vLap, ess_tdof_list);
+   std::unique_ptr<Solver> solver;
+   solver.reset(new OperatorJacobiSmoother(vLap, ess_tdof_list));
+   // solver.reset(new LORSolver<HypreBoomerAMG>(vLap,ess_tdof_list));
    
    CGSolver cg(MPI_COMM_WORLD);
-   if (prec) { cg.SetPreconditioner(*prec); }
+   cg.SetAbsTol(0.0);
    cg.SetRelTol(1e-12);
-   cg.SetMaxIter(2000);
-   cg.SetPrintLevel(0);
+   cg.SetMaxIter(500);
+   cg.SetPrintLevel(1);
    cg.SetOperator(*A);
+   cg.SetPreconditioner(*solver);
    cg.Mult(B, X);
 
    vLap.RecoverFEMSolution(X, b, x);
@@ -201,12 +203,12 @@ int main(int argc, char *argv[])
    int element_subdivisions_parallel = 0;
    int order = 2;
    bool visualization = false;
-   int num_pts = 64;
+   int num_pts = 8;
    bool visit = true;
-   int max_lref = 5;
+   int max_ref = 5;
 
    OptionsParser args(argc, argv);
-   args.AddOption(&max_lref, "-lref", "--max-lor-refinement", "Max LOR refinement level.");
+   args.AddOption(&max_ref, "-ref", "--max-refinement", "Max refinement level.");
    args.AddOption(&order,
                   "-o",
                   "--order",
@@ -243,25 +245,25 @@ int main(int argc, char *argv[])
    std::vector<double> ref_list, dofs_list, h_list, error_list, rate_list;
    double prev_error = 0.0, prev_h = 0.0;
 
-   for (int lref = 1; lref <= max_lref; ++lref)
+   for (int ref = 1; ref <= max_ref; ++ref)
    {
        double  h_min= 0.0, error;
        int dofs;
-       ComputeError(num_pts, order, lref, dofs, h_min, error);
+       ComputeError(num_pts, order, ref, dofs, h_min, error);
 
        double rate = 0.0;
-       if (lref > 1 && error > 1e-16 && prev_error > 1e-16 && h_min < prev_h && prev_h > 0.0)
+       if (ref > 1 && error > 1e-16 && prev_error > 1e-16 && h_min < prev_h && prev_h > 0.0)
            rate = log(error/prev_error) / log(h_min/prev_h);
 
        if (Mpi::Root()) {
-         std::cout << std::setw(8)  << lref
+         std::cout << std::setw(8)  << ref
                 << std::setw(14) << (long long)dofs
                 << std::setw(14) << h_min
                 << std::setw(18) << error
                 << std::setw(12) << rate << std::endl;
        }
 
-      ref_list.push_back(lref);
+      ref_list.push_back(ref);
       dofs_list.push_back(dofs);
       h_list.push_back(h_min);
       error_list.push_back(error);
@@ -354,7 +356,7 @@ void ComputeError(int num_pts, int order,
 
       ComputeCurl3D(u_gf,w_gf);
       
-      ComputeVorticalPart(u_gf, w_gf, u_vort);
+      ComputeVorticalPart(u_gf,pmesh, w_gf, u_vort);
 
       VectorGridFunctionCoefficient u_vort_coef(&u_vort);
 
@@ -367,6 +369,9 @@ void ComputeError(int num_pts, int order,
       int nel = pmesh->GetGlobalNE();
 
       delete mesh;
+      delete pmesh;
+      delete vfes;
+      delete vfec;
 }
 
 void VerifyPeriodicMesh(mfem::Mesh *mesh, const int num_pts)

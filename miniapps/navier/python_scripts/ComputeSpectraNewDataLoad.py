@@ -15,38 +15,48 @@ data_filename = [args.data_file]
 plt.figure(figsize=(10, 8))
 
 for file_to_extract_data in data_filename:
-    # Read header lines to extract step and time
-    with open(file_to_extract_data, 'r') as header_file:
-        header_lines = [next(header_file) for _ in range(6)]
+    # ---------------------------------------------------------------------------
+    # 1) Read header, extract metadata (same idea as before but regex updated)
+    # ---------------------------------------------------------------------------
+    with open(file_to_extract_data, 'r') as f:
+        header_lines = []
+        while True:
+            pos = f.tell()
+            line = f.readline()
+            if not line.lstrip().startswith('#'):
+                f.seek(pos)              # put the cursor back
+                break
+            header_lines.append(line)
     
     step_number_extracted = None
     time_extracted = None
     for line in header_lines:
-        if 'Step' in line:
-            step_match = re.search(r'Step\s*=\s*(\d+)', line)
-            if step_match:
-                step_number_extracted = step_match.group(1)
-        if 'Time' in line:
-            time_match = re.search(r'Time\s*=\s*([0-9.eE+-]+)', line)
-            if time_match:
-                time_extracted = float(time_match.group(1))
-
-    if step_number_extracted is None:
-        step_number_extracted = "Unknown"
-    if time_extracted is None:
-        time_extracted = 0.0
-
-    # Load data skipping the 6 header lines
-    data = np.genfromtxt(file_to_extract_data, delimiter=' ', skip_header=6)
-    # data = np.genfromtxt(file_to_extract_data, skip_header=8)
-
-    # Assign column data
-    xpos = data[:, 0]
-    ypos = data[:, 1]
-    zpos = data[:, 2]
-    velx = data[:, 3]
-    vely = data[:, 4]
-    velz = data[:, 5]
+        # "# Step   42" --> 42
+        m = re.search(r'Step\s+(\d+)', line)
+        if m: step_number_extracted = int(m.group(1))
+        # "# Time   1.234e-02" --> 1.234e-02
+        m = re.search(r'Time\s+([0-9.+-Ee]+)', line)
+        if m: time_extracted = float(m.group(1))
+    
+    # ---------------------------------------------------------------------------
+    # 2) Load the numerical payload as ONE flat vector
+    # ---------------------------------------------------------------------------
+    with open(file_to_extract_data, 'r') as f:
+        payload = ' '.join(
+            line for line in f if not line.lstrip().startswith('#'))
+    flat = np.fromstring(payload, sep=' ')
+    
+    if flat.size % 6 != 0:
+        raise ValueError("Vector length is not a multiple of 6 – corrupted file?")
+    
+    ND = flat.size // 6
+    xpos = flat[0*ND : 1*ND]
+    ypos = flat[1*ND : 2*ND]
+    zpos = flat[2*ND : 3*ND]
+    velx = flat[3*ND : 4*ND]
+    vely = flat[4*ND : 5*ND]
+    velz = flat[5*ND : 6*ND]
+    
 
     # Round the coordinates to avoid floating-point precision issues
     xpos_rounded = np.round(xpos, decimals=10)

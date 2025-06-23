@@ -102,8 +102,9 @@ public:
    };
 
    real_t ComputeKineticEnergy(ParGridFunction &v, ParGridFunction &ke_gf)
+   // real_t ComputeKineticEnergy(ParGridFunction &v)
    {
-      /*
+     /*
       Vector velx, vely, velz;
       real_t integ = 0.0;
       const FiniteElement *fe;
@@ -152,7 +153,6 @@ public:
     mass.Assemble();
     mass.Finalize();
 
-
     // Create KE grid function
     VectorGridFunctionCoefficient U(&v);     
 
@@ -163,7 +163,6 @@ public:
     ProductCoefficient kcoeff(half, uu);       
 
     ke_gf.ProjectCoefficient(kcoeff);
-    
 
     const double ke = 0.5*mass.ParInnerProduct(v,v);
     return ke / volume;
@@ -572,9 +571,14 @@ void ComputeQCriterion(ParGridFunction &u, ParGridFunction &q)
          grad.SetSize(grad_hat.Height(), Jinv.Width());
          Mult(grad_hat, Jinv, grad);
 
-         real_t q_val = 0.5 * (sq(grad(0, 0)) + sq(grad(1, 1)) + sq(grad(2, 2)))
-                        + grad(0, 1) * grad(1, 0) + grad(0, 2) * grad(2, 0)
-                        + grad(1, 2) * grad(2, 1);
+         real_t q_val = -(0.5 * (sq(grad(0, 0)) + sq(grad(1, 1)) + sq(grad(2, 2)))
+                        + grad(0, 1) * grad(1, 0) 
+                        + grad(0, 2) * grad(2, 0)
+                        + grad(1, 2) * grad(2, 1));
+         // real_t q_val =   grad(0,0)*grad(1,1) + grad(1,1)*grad(2,2) + grad(0,0)*grad(2,2)
+         //                - grad(0,1)*grad(1,0) 
+         //                - grad(0,2)*grad(2,0)
+         //                - grad(1,2)*grad(2,1);
 
          vals(dof) = q_val;
       }
@@ -720,6 +724,8 @@ void ComputeVorticalPart( NavierSolver *solver,
     vLap.RecoverFEMSolution(X, b, x);
 
     solver->ComputeCurl3D(x, u_vort);
+
+    delete prec;
 
 }
 
@@ -1097,19 +1103,18 @@ int main(int argc, char *argv[])
    ParGridFunction w_gf(velocity_fespace);
    ParGridFunction q_gf(pressure_fespace);
    ParGridFunction d_gf(pressure_fespace);
-   ParGridFunction divu_gf(pressure_fespace);
    ParGridFunction ke_gf(pressure_fespace);
+   // ParGridFunction divu_gf(pressure_fespace);
 
+   // ParGridFunction u_comp(velocity_fespace);
+   // ParGridFunction u_vort(velocity_fespace);
 
-   ParGridFunction u_comp(velocity_fespace);
-   ParGridFunction u_vort(velocity_fespace);
-
-   
    flowsolver->ComputeCurl3D(*u_gf, w_gf);
    ComputeQCriterion(*u_gf, q_gf);
    ComputeDissipation(*u_gf, d_gf);
-   ComputeDivergence3D(*u_gf, divu_gf);
-   ComputeVorticalPart(flowsolver, *u_gf, w_gf, u_vort);
+
+   // ComputeDivergence3D(*u_gf, divu_gf);
+   // ComputeVorticalPart(flowsolver, *u_gf, w_gf, u_vort);
 
    QuantitiesOfInterest kin_energy(pmesh);
    real_t ke = kin_energy.ComputeKineticEnergy(*u_gf, ke_gf);
@@ -1172,11 +1177,10 @@ int main(int argc, char *argv[])
       dc->RegisterField("pressure", p_gf);
       dc->RegisterField("vorticity", &w_gf);
       dc->RegisterField("qcriterion", &q_gf);
-      dc->RegisterField("dissipation", &d_gf);
-      dc->RegisterField("divu", &divu_gf);
-      dc->RegisterField("ke", &ke_gf);
-   
-      dc->RegisterField("u_vort", &u_vort);
+      // dc->RegisterField("dissipation", &d_gf);
+      // dc->RegisterField("divu", &divu_gf);
+      // dc->RegisterField("ke", &ke_gf);
+      // dc->RegisterField("u_vort", &u_vort);
       dc->Save();
    }
 
@@ -1408,8 +1412,8 @@ int main(int argc, char *argv[])
          {
             ComputeQCriterion(*u_gf, q_gf);
             flowsolver->ComputeCurl3D(*u_gf, w_gf);
-            ComputeDivergence3D(*u_gf, divu_gf);
-            ComputeVorticalPart(flowsolver, *u_gf, w_gf, u_vort);
+            // ComputeDivergence3D(*u_gf, divu_gf);
+            // ComputeVorticalPart(flowsolver, *u_gf, w_gf, u_vort);
 
             if (ctx.paraview)
             {
@@ -1505,7 +1509,8 @@ int main(int argc, char *argv[])
 
       flowsolver->ComputeCurl3D(*u_gf, w_gf);
 
-      ke = kin_energy.ComputeKineticEnergy(*u_gf,ke_gf);
+      ke = kin_energy.ComputeKineticEnergy(*u_gf, ke_gf);
+      // ke = kin_energy.ComputeKineticEnergy(*u_gf);
       vel_curl_ke = kin_energy.ComputeInertialRangeEnergy(*u_gf);
       enstrophy = kin_energy.ComputeEnstrophy(w_gf);
 

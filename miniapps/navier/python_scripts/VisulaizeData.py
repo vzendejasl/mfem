@@ -96,7 +96,7 @@ if rank == 0:
     # Load data in chunks to handle large files (skipping header)
     print("[Rank 0] Loading data in chunks (skipping header)...")
     chunk_size = 10_000_000
-    chunks = pd.read_csv(data_filename, delimiter=' ', skiprows=5, chunksize=chunk_size, header=None)
+    chunks = pd.read_csv(data_filename, delimiter=' ', skiprows=6, chunksize=chunk_size, header=None)
     xpos, ypos, zpos, velx, vely, velz = [], [], [], [], [], []
     for chunk in chunks:
         print(chunk)

@@ -12,10 +12,11 @@ struct s_NavierContext
    int element_subdivisions_parallel = 0;
    int order = 2;
    bool visualization = false;
-   int num_pts = 64;
+   int num_pts = 8;
    bool visit = true;
 
 } ctx;
+
 
 
 void vel_tgv(const Vector &x, real_t t, Vector &u)
@@ -28,6 +29,7 @@ void vel_tgv(const Vector &x, real_t t, Vector &u)
    u(1) = -cos(xi) * sin(yi) * cos(zi);
    u(2) = 0.0;
 }
+
 
 void ComputeCurl3D(ParGridFunction &u, ParGridFunction &cu)
 {
@@ -120,69 +122,67 @@ void ComputeCurl3D(ParGridFunction &u, ParGridFunction &cu)
    }
 }
 
+
 void ComputeVorticalPart(ParGridFunction &u,
                          ParGridFunction &w_gf,
                          ParGridFunction &u_vort)
 {
-
-  // This routine solves for the vortical part of the
-  // velocity field Ax=b where A is the vector diffusion
-  // integrator and b is - vorticity and x are the vector
-  // coefficients that represent the vortical solution.
-  // Note that this routine assumes triple preiodicity
-  // and we are not setting the mean of b to zero. 
+   // Get the vector finite element space for u.
    ParFiniteElementSpace *vfes = u.ParFESpace();
+   Array<int> ess_tdof_list;  // No essential degrees-of-freedom assumed.
+     
+   // This works with LORSolver
+   vfes->GetBoundaryTrueDofs(ess_tdof_list);
 
-   Array<int> ess_tdof_list;
-   // if (pmesh.bdr_attributes.Size())
-   // {
-   //    Array<int> ess_bdr(pmesh.bdr_attributes.Max());
-   //    ess_bdr = 0;
-   //    // Apply boundary conditions on all external boundaries:
-   //    pmesh.MarkExternalBoundaries(ess_bdr);
-   //    // Boundary conditions can also be applied based on named attributes:
-   //    // pmesh.MarkNamedBoundaries(set_name, ess_bdr)
-
-   //    vfes->GetEssentialTrueDofs(ess_bdr, ess_tdof_list);
-   // }
-
-   // Extract ceofficients of gridfunction to form rhs
+   // Assemble the right-hand side b using the (negative) vorticity w_gf.
    VectorGridFunctionCoefficient w_coeff(&w_gf);
    ParLinearForm b(vfes);
    b.AddDomainIntegrator(new VectorDomainLFIntegrator(w_coeff));
    b.Assemble();
-   b*= -1.0;
 
+   // Assemble the vector diffusion operator.
    ParBilinearForm vLap(vfes);
    vLap.SetAssemblyLevel(AssemblyLevel::PARTIAL);
-   ConstantCoefficient one(1.0); 
+   ConstantCoefficient one(1.0);
    vLap.AddDomainIntegrator(new VectorDiffusionIntegrator(one));
-
    vLap.Assemble();
 
-   OperatorPtr A;
-   Vector B,X;
-
+   // Set the initial guess for the solution.
    ParGridFunction x(vfes);
    x = 0.0;
+   // This works with the LOR Solver
+   x = u;
 
+   // Form the linear system A * X = B.
+   OperatorHandle A;
+   Vector X, B;
    vLap.FormLinearSystem(ess_tdof_list, x, b, A, X, B);
 
-   Solver *prec = new OperatorJacobiSmoother(vLap, ess_tdof_list);
-   
+   // Set up the LOR solver using HypreBoomerAMG as the preconditioner.
+   std::unique_ptr<Solver> lor_solver;
+   // lor_solver.reset(new LORSolver<HypreBoomerAMG>(vLap, ess_tdof_list));
+   lor_solver.reset(new OperatorJacobiSmoother(vLap, ess_tdof_list));
+
+   // Set up the Conjugate Gradient (CG) solver.
    CGSolver cg(MPI_COMM_WORLD);
-   if (prec) { cg.SetPreconditioner(*prec); }
+   cg.SetAbsTol(0.0);
    cg.SetRelTol(1e-12);
-   cg.SetMaxIter(2000);
-   cg.SetPrintLevel(1);
+   cg.SetMaxIter(500);
+   cg.SetPrintLevel(3);
    cg.SetOperator(*A);
+   cg.SetPreconditioner(*lor_solver);
    cg.Mult(B, X);
 
+   // Recover the finite element solution from the linear system solution.
    vLap.RecoverFEMSolution(X, b, x);
+   // u_vort = x;
 
-   ComputeCurl3D(x,u_vort);
-
+   // Compute the curl of the computed vector field x to obtain the vortical part.
+   ComputeCurl3D(x, u_vort);
 }
+
+
+
 
 
 
@@ -265,7 +265,7 @@ int main(int argc, char *argv[])
       // Initialize as mesh
       Mesh *init_mesh;
 
-      real_t length = 2*M_PI;
+      real_t length = 2.0*M_PI;
       init_mesh = new Mesh(Mesh::MakeCartesian3D(ctx.num_pts,
                                                  ctx.num_pts,
                                                  ctx.num_pts,
@@ -279,39 +279,18 @@ int main(int argc, char *argv[])
       Vector z_translation({0.0, 0.0, length});
 
       std::vector<Vector> translations = {x_translation, y_translation, z_translation};
-
       mesh = new Mesh(Mesh::MakePeriodic(*init_mesh, init_mesh->CreatePeriodicVertexMapping(translations)));
+
+
+      // const char *mesh_file = "../data/periodic-cube.mesh";
+      // mesh = new Mesh(mesh_file,1,1);
+
 
       if (Mpi::Root())
       {
          VerifyPeriodicMesh(mesh);
       }
       
-      // Define a translation function for the mesh nodes
-      VectorFunctionCoefficient translate(mesh->Dimension(), [&](const Vector &x_in, Vector &x_out)
-                                          {
-         double shift = -M_PI;
-
-         x_out[0] = x_in[0] + shift; // Translate x-coordinate
-         x_out[1] = x_in[1] + shift; // Translate y-coordinate
-         if (mesh->Dimension() == 3){
-           x_out[2] = x_in[2] + shift; // Translate z-coordinate
-         } });
-
-      // Define a translation function for the mesh nodes
-      VectorFunctionCoefficient scale(mesh->Dimension(), [&](const Vector &x_in, Vector &x_out)
-                                          {
-         double scale = 1.0;
-
-         x_out[0] = x_in[0]/scale ; // Translate x-coordinate
-         x_out[1] = x_in[1]/scale ; // Translate y-coordinate
-         if (mesh->Dimension() == 3){
-           x_out[2] = x_in[2]/scale; // Translate z-coordinate
-         } });
-
-      // mesh->Transform(translate);
-      // mesh->Transform(scale);
-
       if (Mpi::Root() && (ctx.element_subdivisions >= 1))
       {
          mfem::out << "Serial refining the mesh... " << std::endl;
@@ -350,58 +329,57 @@ int main(int argc, char *argv[])
       auto *vfes = new ParFiniteElementSpace(pmesh, vfec, pmesh->Dimension());
       ParGridFunction u_gf(vfes);
       ParGridFunction w_gf(vfes);
-
-      ParGridFunction u_comp(vfes);
       ParGridFunction u_vort(vfes);
-
 
       // Set the initial condition
       VectorFunctionCoefficient u_excoeff(pmesh->Dimension(), vel_tgv);
-
       u_gf.ProjectCoefficient(u_excoeff);
 
-      ComputeCurl3D(u_gf,w_gf);
+      ComputeCurl3D(u_gf, w_gf);
       
+      ComputeVorticalPart(u_gf, w_gf, u_vort);
 
-   // (if desired, you can also compute the compressive part u_comp = u - u_vort)
-   ComputeVorticalPart(u_gf, w_gf, u_vort);
-
-
-   int nel = pmesh->GetGlobalNE();
-   if (Mpi::Root())
-   {
-      mfem::out << "Number of elements: " << nel << std::endl;
-   }
-
-
-   DataCollection *dc = NULL;
-   if (ctx.visit)
-   {
-         std::string visit_dir = std::string("VisitData_") 
-                                                  + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
-                                                  + "RefLv" + std::to_string(
-                                                      ctx.element_subdivisions 
-                                                    + ctx.element_subdivisions_parallel) 
-                                                  + "P" + std::to_string(ctx.order)
-                                                  + "/tgv_output_visit";
-
-         dc = new VisItDataCollection(MPI_COMM_WORLD,visit_dir, pmesh);
+      int nel = pmesh->GetGlobalNE();
+      if (Mpi::Root())
+      {
+         mfem::out << "Number of elements: " << nel << std::endl;
       }
-      int precision = 16;
-      dc->SetPrecision(precision);
-      dc->SetCycle(global_cycle + step);
-      dc->SetTime(t);
-      dc->SetFormat(DataCollection::PARALLEL_FORMAT);
-      dc->RegisterField("velocity", &u_gf);
-      dc->RegisterField("vorticity", &w_gf);
-      dc->RegisterField("u_vort", &u_vort); 
-      dc->Save();
+
+      DataCollection *dc = NULL;
+      if (ctx.visit)
+      {
+            std::string visit_dir = std::string("VisitData_") 
+                                                     + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                                     + "RefLv" + std::to_string(
+                                                         ctx.element_subdivisions 
+                                                       + ctx.element_subdivisions_parallel) 
+                                                     + "P" + std::to_string(ctx.order)
+                                                     + "/tgv_output_visit";
+
+            dc = new VisItDataCollection(MPI_COMM_WORLD,visit_dir, pmesh);
+         int precision = 16;
+         dc->SetPrecision(precision);
+         dc->SetCycle(global_cycle + step);
+         dc->SetTime(t);
+         dc->SetFormat(DataCollection::PARALLEL_FORMAT);
+         dc->RegisterField("velocity", &u_gf);
+         dc->RegisterField("vorticity", &w_gf);
+         dc->RegisterField("u_vort", &u_vort); 
+         dc->Save();
+         }
+
+       {
+          // Save the solution and mesh to disk. The output can be viewed using
+          // GLVis as follows: "glvis -np <np> -m mesh -g sol"
+          u_vort.Save("u_vort");
+          pmesh->Save("mesh");
+       }
 
 
-   delete pmesh;
-   delete mesh;
+        delete pmesh;
+        delete mesh;
 
-   return 0;
+        return 0;
 }
 
 void VerifyPeriodicMesh(mfem::Mesh *mesh)

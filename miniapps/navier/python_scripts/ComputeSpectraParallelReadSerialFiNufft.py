@@ -1,5 +1,3 @@
-Before that -- I want to normalize my energies. I have this script
-
 #!/usr/bin/env python
 """
 This script reads a 3D velocity field from an MFEM discreteley sample
