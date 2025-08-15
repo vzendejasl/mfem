@@ -43,6 +43,12 @@ void SampleDataIntegrationPoints(mfem::ParGridFunction* sol,
 
 void SampleVectorFieldNodalPoints(mfem::ParGridFunction &u, mfem::ParMesh *pmesh, 
                                   int step, double time, const std::string &suffix);
+
+void SamplePointsAtDoFs(ParGridFunction* sol,
+                                ParMesh* pmesh,
+                                int step,
+                                double time,
+                                const std::string &suffix);
 //------------------------------------------------------------------------------
 // Minimal context structure to supply parameters for the sampling function.
 struct s_NavierContext
@@ -474,6 +480,212 @@ void SampledDataElementOneCenter(ParGridFunction* sol,
    MPI_Barrier(comm);
 }
 
+
+void SamplePointsAtDoFs(ParGridFunction* sol,
+                                ParMesh* pmesh,
+                                int step,
+                                double time,
+                                const std::string &suffix)
+
+{
+   // MPI setup
+   MPI_Comm comm = pmesh->GetComm();
+   int rank, size;
+   MPI_Comm_rank(comm, &rank);
+   MPI_Comm_size(comm, &size);
+
+   // Construct the main directory name with suffix.
+   std::string main_dir = "SampledData" + suffix +
+                            "P" + std::to_string(ctx.order);
+
+   // Create subdirectory for this cycle step.
+   std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
+
+   // Construct the filename.
+   std::string fname = cycle_dir + "/sampled_data_at_dofs_points_" + std::to_string(step) + ".txt";
+
+   // Create directories on rank 0
+   if (rank == 0)
+   {
+      if (system(("mkdir -p " + main_dir).c_str()) != 0)
+         std::cerr << "Error creating " << main_dir << " directory!" << std::endl;
+      if (system(("mkdir -p " + cycle_dir).c_str()) != 0)
+         std::cerr << "Error creating " << cycle_dir << " directory!" << std::endl;
+   }
+
+   MPI_Barrier(MPI_COMM_WORLD);
+
+   // Get element information
+   mfem::FiniteElementSpace *fes = sol->FESpace();
+   int vdim = fes->GetVDim();
+   const FiniteElement *fe = fes->GetFE(0);
+   const IntegrationRule &fe_nodes = fe->GetNodes();
+   
+   // Coordinate key function
+   auto coord_key = [](double x, double y, double z) -> std::string {
+       std::ostringstream oss;
+       oss << std::scientific << std::setprecision(17) << x << "," << y << "," << z;
+       return oss.str();
+   };
+   
+   // Phase 1: Each processor samples and deduplicates locally
+   std::set<std::string> seen_coords;
+   std::vector<double> local_x, local_y, local_z;
+   std::vector<double> local_velx, local_vely, local_velz;
+   
+   int local_total_dofs = 0;
+   int local_duplicates = 0;
+
+   for (int e = 0; e < pmesh->GetNE(); e++)
+   {
+      mfem::ElementTransformation *Trans = pmesh->GetElementTransformation(e);
+
+      for (int i = 0; i < fe_nodes.GetNPoints(); ++i){
+        const IntegrationPoint &ip = fe_nodes.IntPoint(i);
+
+        Trans->SetIntPoint(&ip);
+        Vector phys_pt;
+        Trans->Transform(ip,phys_pt);
+
+        local_total_dofs++;
+        
+        // Local deduplication
+        std::string coord_str = coord_key(phys_pt[0], phys_pt[1], phys_pt[2]);
+        
+        if (seen_coords.find(coord_str) != seen_coords.end()) {
+            local_duplicates++;
+            continue; // Skip local duplicate
+        }
+        seen_coords.insert(coord_str);
+
+        Vector vel_val(vdim);
+        sol->GetVectorValue(*Trans,ip,vel_val);
+
+        local_x.push_back(phys_pt[0]);
+        local_y.push_back(phys_pt[1]);
+        local_z.push_back(phys_pt[2]);
+        local_velx.push_back(vel_val[0]);
+        local_vely.push_back(vel_val[1]);
+        local_velz.push_back(vel_val[2]);
+      }
+   }
+
+   int local_unique = local_x.size();
+   
+   if (rank == 0) {
+       mfem::out << "Phase 1 complete: Local deduplication\n";
+       mfem::out << "  Rank 0: " << local_total_dofs << " total, " 
+                 << local_unique << " unique, " << local_duplicates << " local duplicates\n";
+   }
+
+   // Phase 2: Gather all locally unique data to root for global deduplication
+   
+   // First, gather the counts from all processors
+   std::vector<int> all_counts(size);
+   MPI_Gather(&local_unique, 1, MPI_INT, all_counts.data(), 1, MPI_INT, 0, comm);
+   
+   // Calculate displacements for gathering variable-length data
+   std::vector<int> displs(size);
+   int total_gathered = 0;
+   if (rank == 0) {
+       for (int i = 0; i < size; ++i) {
+           displs[i] = total_gathered;
+           total_gathered += all_counts[i];
+       }
+       mfem::out << "Phase 2: Gathering " << total_gathered << " locally unique DOFs to root\n";
+   }
+   
+   // Prepare arrays to receive all data on root
+   std::vector<double> all_x, all_y, all_z;
+   std::vector<double> all_velx, all_vely, all_velz;
+   
+   if (rank == 0) {
+       all_x.resize(total_gathered);
+       all_y.resize(total_gathered);
+       all_z.resize(total_gathered);
+       all_velx.resize(total_gathered);
+       all_vely.resize(total_gathered);
+       all_velz.resize(total_gathered);
+   }
+   
+   // Gather all coordinate and velocity data to root
+   MPI_Gatherv(local_x.data(), local_unique, MPI_DOUBLE,
+               all_x.data(), all_counts.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   MPI_Gatherv(local_y.data(), local_unique, MPI_DOUBLE,
+               all_y.data(), all_counts.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   MPI_Gatherv(local_z.data(), local_unique, MPI_DOUBLE,
+               all_z.data(), all_counts.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   MPI_Gatherv(local_velx.data(), local_unique, MPI_DOUBLE,
+               all_velx.data(), all_counts.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   MPI_Gatherv(local_vely.data(), local_unique, MPI_DOUBLE,
+               all_vely.data(), all_counts.data(), displs.data(), MPI_DOUBLE, 0, comm);
+   MPI_Gatherv(local_velz.data(), local_unique, MPI_DOUBLE,
+               all_velz.data(), all_counts.data(), displs.data(), MPI_DOUBLE, 0, comm);
+
+   // Phase 3: Root processor does global deduplication
+   std::vector<double> final_x, final_y, final_z;
+   std::vector<double> final_velx, final_vely, final_velz;
+   int global_duplicates = 0;
+   int expected_total_dofs = 0;  // Will be calculated on root
+   
+   if (rank == 0) {
+       mfem::out << "Phase 3: Global deduplication on root processor\n";
+       
+       
+       std::set<std::string> global_seen;
+       
+       for (int i = 0; i < total_gathered; ++i) {
+           std::string coord_str = coord_key(all_x[i], all_y[i], all_z[i]);
+           
+           if (global_seen.find(coord_str) != global_seen.end()) {
+               global_duplicates++;
+               continue; // Skip global duplicate
+           }
+           global_seen.insert(coord_str);
+           
+           // Keep this globally unique DOF
+           final_x.push_back(all_x[i]);
+           final_y.push_back(all_y[i]);
+           final_z.push_back(all_z[i]);
+           final_velx.push_back(all_velx[i]);
+           final_vely.push_back(all_vely[i]);
+           final_velz.push_back(all_velz[i]);
+       }
+       
+       int final_count = final_x.size();
+   }
+
+   // Phase 4: Root writes the final deduplicated file
+   if (rank == 0) {
+       std::ofstream outfile(fname);
+       outfile << std::scientific << std::setprecision(16);
+       
+       outfile << "3D Taylor Green Vortex (Perfect MPI Deduplication)\n"
+               << "Step = " << step << "\n"
+               << "Time = " << time << "\n"
+               << "Global unique DOFs = " << final_x.size() << " (target: " << expected_total_dofs << ")\n"
+               << "==================================================================="
+               << "==========================================================================\n"
+               << "            x                      y                      z                   vecx                   vecy                   vecz\n";
+       
+       for (size_t i = 0; i < final_x.size(); i++) {
+           outfile << std::setw(20) << final_x[i] << " "
+                   << std::setw(20) << final_y[i] << " "
+                   << std::setw(20) << final_z[i] << " "
+                   << std::setw(20) << final_velx[i] << " "
+                   << std::setw(20) << final_vely[i] << " "
+                   << std::setw(20) << final_velz[i] << "\n";
+       }
+       
+       outfile.close();
+       std::cout << "Perfect deduplicated file saved: " << fname << std::endl;
+   }
+
+   MPI_Barrier(MPI_COMM_WORLD);
+}
+
+
+
 //------------------------------------------------------------------------------
 // Function to load a checkpoint using VisItDataCollection (prints only on root).
 bool LoadCheckpointVisit(const std::string &visit_dir,
@@ -618,8 +830,11 @@ int main(int argc, char *argv[])
    MPI_Barrier(MPI_COMM_WORLD);
    SampledDataElementOneCenter(sol_gf, pmesh, cycle, t, ctx.field_to_sample);
 
-   HighToLowResolution(sol_gf, pmesh,
-                         cycle, t,ctx.field_to_sample,ctx.order);
+   MPI_Barrier(MPI_COMM_WORLD);
+   SamplePointsAtDoFs(sol_gf, pmesh, cycle, t, ctx.field_to_sample);
+
+   // HighToLowResolution(sol_gf, pmesh,
+   //                       cycle, t,ctx.field_to_sample,ctx.order);
 
    if (myid == 0)
       mfem::out << " Data sampling complete." << endl;

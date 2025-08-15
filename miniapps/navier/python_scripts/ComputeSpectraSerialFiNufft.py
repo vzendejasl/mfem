@@ -195,6 +195,33 @@ k_bin_edges = np.arange(0, num_bins+1) - 0.5
 k_bin_centers = 0.5 * (k_bin_edges[:-1] + k_bin_edges[1:])
 E_k_nu, _ = np.histogram(k_flat, bins=k_bin_edges, weights=E3d_nu.ravel())
 
+# ---- Save spectrum data to text file ----
+input_basename = os.path.basename(data_filename)
+step_suffix_with_underscore = f'_{step_number_extracted}.txt'
+step_suffix_without_underscore = f'{step_number_extracted}.txt'
+
+if input_basename.endswith(step_suffix_with_underscore):
+    type_part = input_basename[:-len(step_suffix_with_underscore)]
+elif input_basename.endswith(step_suffix_without_underscore):
+    type_part = input_basename[:-len(step_suffix_without_underscore)]
+else:
+    type_part = 'unknown'
+
+if type_part != 'unknown':
+    if type_part.startswith('sampled_data_'):
+        type_part = type_part.replace('sampled_data_', '')
+    elif type_part.startswith('SampledData'):
+        type_part = type_part.replace('SampledData', '')
+    else:
+        type_part = 'finufft'
+
+output_filename = os.path.join(os.path.dirname(data_filename), f'energy_spectrum_finufft_{type_part}_step_{step_number_extracted}.txt')
+
+print(f"Saving FINUFFT energy spectrum to {output_filename}")
+np.savetxt(output_filename, np.column_stack((k_bin_centers, E_k_nu)),
+           header=f'Wavenumber_k Energy_E(k) (FINUFFT Step {step_number_extracted}, Time {time_extracted:.3e})',
+           fmt='%.6e %.6e', comments='# ')
+
 # ---- Plot ----
 plt.loglog(k_bin_centers, E_k_nu, 'b-', label=f'FINUFFT step {step_number_extracted}')
 plt.loglog(
@@ -209,4 +236,3 @@ plt.legend()
 plt.grid(True, ls=':')
 plt.tight_layout()
 plt.show()
-

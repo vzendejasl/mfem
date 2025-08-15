@@ -119,12 +119,15 @@ void NavierSolver::Setup(real_t dt)
 
    Array<int> empty;
 
-   // GLL integration rule (Numerical Integration)
+   // // GLL integration rule (Numerical Integration)
+   // const IntegrationRule &ir_ni = gll_rules.Get(pmesh->GetTypicalElementGeometry(),
+   //                                              2 * order - 1);
    const IntegrationRule &ir_ni = gll_rules.Get(pmesh->GetTypicalElementGeometry(),
-                                                2 * order - 1);
+                                                4 * order);
    nlcoeff.constant = -1.0;
    N = new ParNonlinearForm(vfes);
    auto *nlc_nlfi = new VectorConvectionNLFIntegrator(nlcoeff);
+   nlc_nlfi->SetIntRule(&ir_ni);
    if (numerical_integ)
    {
       nlc_nlfi->SetIntRule(&ir_ni);

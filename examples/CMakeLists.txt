@@ -17,6 +17,7 @@ list(APPEND ALL_EXE_SRCS
   victor_compute_error.cpp
   exVectorDecompConvergence.cpp
   exVectorDecomp.cpp
+  exVectorDecompAnalytical.cpp
   ex0.cpp
   ex1.cpp
   ex2.cpp

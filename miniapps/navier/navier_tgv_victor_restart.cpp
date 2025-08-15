@@ -1129,7 +1129,7 @@ int main(int argc, char *argv[])
                                                    ctx.element_subdivisions 
                                                  + ctx.element_subdivisions_parallel) 
                                                + "Order" + std::to_string(ctx.order)
-                                               + "/tgv_output_paraview";
+                                               + "/output_paraview";
 
       pvdc = new ParaViewDataCollection(paraview_dir, pmesh);
       pvdc->SetDataFormat(VTKFormat::BINARY32);
@@ -1150,7 +1150,7 @@ int main(int argc, char *argv[])
       if (ctx.binary)
       {
 #ifdef MFEM_USE_SIDRE
-         dc = new SidreDataCollection("tgv_output_sidre", pmesh);
+         dc = new SidreDataCollection("output_sidre", pmesh);
 #else
          MFEM_ABORT("Must build with MFEM_USE_SIDRE=YES for binary output.");
 #endif
@@ -1164,7 +1164,7 @@ int main(int argc, char *argv[])
                                                       ctx.element_subdivisions 
                                                     + ctx.element_subdivisions_parallel) 
                                                   + "P" + std::to_string(ctx.order)
-                                                  + "/tgv_output_visit";
+                                                  + "/output_visit";
 
          dc = new VisItDataCollection(MPI_COMM_WORLD,visit_dir, pmesh);
       }
@@ -1199,7 +1199,7 @@ int main(int argc, char *argv[])
                                                       ctx.element_subdivisions 
                                                     + ctx.element_subdivisions_parallel) 
                                                   + "P" + std::to_string(ctx.order)
-                                                  + "/tgv_output_conduit";
+                                                  + "/output_conduit";
 
          cdc = new ConduitDataCollection(MPI_COMM_WORLD,conduit_dir, pmesh);
 
@@ -1489,7 +1489,7 @@ int main(int argc, char *argv[])
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
             SamplePoints( u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
-            SamplePointsAtDoFs(u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
+            // SamplePointsAtDoFs(u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
             // SamplePointsAdios( u_gf, pmesh, global_cycle + step, t, "Velocity",ctx.oversample, &ctx);
             // ComputeElementCenterValues(&w_gf, pmesh, global_cycle + step, t, "Vorticity");
 
