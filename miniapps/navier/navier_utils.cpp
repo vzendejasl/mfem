@@ -170,6 +170,11 @@ bool LoadCheckpoint(ParMesh*& pmesh,
     *u_gf = temp_u_gf;
     *p_gf = temp_p_gf;
 
+     if(GetFilter(ctx)){
+       flowsolver->SetFilterAlpha(1e-12); // Update later
+       flowsolver->SetCutoffModes(GetOrder(ctx)-1);   // Cut off highest mode
+     }
+
     flowsolver->Setup(GetDt(ctx));
 
     mfem::real_t u_inf_loc = u_gf->Normlinf();
