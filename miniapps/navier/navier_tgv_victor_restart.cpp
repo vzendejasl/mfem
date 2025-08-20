@@ -55,6 +55,7 @@ struct s_NavierContext
    bool filter = false;
    bool oversample = true;
    real_t alpha = 0.3;
+   bool problem1 = true;
 
 } ctx;
 
@@ -80,9 +81,12 @@ void vel_tgv(const Vector &x, real_t t, Vector &u)
    real_t yi = x(1);
    real_t zi = x(2);
 
-   // real_t xi = 2*M_PI*x(0);
-   // real_t yi = 2*M_PI*x(1);
-   // real_t zi = 2*M_PI*x(2);
+   if (!ctx.problem1)
+   {
+     xi = 2*M_PI*x(0);
+     yi = 2*M_PI*x(1);
+     zi = 2*M_PI*x(2);
+   }
 
    u(0) = sin(xi) * cos(yi) * cos(zi);
    u(1) = -cos(xi) * sin(yi) * cos(zi);
@@ -949,6 +953,9 @@ int main(int argc, char *argv[])
        "--no-Over-Sample",
        "Enable or disable oversampling of solution.");
    args.AddOption(&ctx.alpha, "-alpha", "--Filter-Amplitude", "Filter Amplitude, filter must be true");
+   args.AddOption(&ctx.problem1, "-problem1", "--Problem-1", "-no-problem1",
+                  "--no-Problem-1",
+                  "Domain length will be 2pi, otherwise 1.0");
    args.Parse();
    if (!args.Good())
    {
@@ -1015,8 +1022,13 @@ int main(int argc, char *argv[])
       // Initialize as mesh
       Mesh *init_mesh;
 
+        
       real_t length = 2*M_PI;
-      // real_t length = 1.0;
+      if (!ctx.problem1)
+      {
+        length = 1.0;
+      }
+      // real_t length = 2*M_PI;
       init_mesh = new Mesh(Mesh::MakeCartesian3D(ctx.num_pts,
                                                  ctx.num_pts,
                                                  ctx.num_pts,
