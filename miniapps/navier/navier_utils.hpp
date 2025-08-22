@@ -20,6 +20,8 @@ bool GetPA(const s_NavierContext* ctx);
 bool GetNI(const s_NavierContext* ctx);
 mfem::real_t GetDt(const s_NavierContext* ctx);
 bool GetOverSample(const s_NavierContext* ctx);
+bool GetFilter(const s_NavierContext* ctx);
+mfem::real_t GetAlpha(const s_NavierContext* ctx);
 
 bool LoadCheckpoint(mfem::ParMesh *&pmesh,
                     mfem::ParGridFunction *&u_gf,

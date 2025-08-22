@@ -44,7 +44,7 @@ struct s_NavierContext
    bool ni = false;
    bool visualization = false;
    bool checkres = false;
-   int num_pts = 64;
+   int num_pts = 8;
    bool visit = true;
    bool paraview = false;
    bool binary = false;
@@ -54,6 +54,8 @@ struct s_NavierContext
    int data_dump_cycle = 100;
    bool filter = false;
    bool oversample = true;
+   real_t alpha = 0.3;
+   bool problem1 = true;
 
 } ctx;
 
@@ -69,13 +71,22 @@ real_t GetKinvis(const s_NavierContext* ctx) { return ctx->kinvis; }
 bool GetPA(const s_NavierContext* ctx) { return ctx->pa; }
 bool GetNI(const s_NavierContext* ctx) { return ctx->ni; }
 real_t GetDt(const s_NavierContext* ctx) { return ctx->dt; }
-bool GetOverSample(const s_NavierContext* ctx) { return ctx->oversample; }
+bool GetFilter(const s_NavierContext* ctx) { return ctx->filter; }
+bool GetOverSample(const s_NavierContext* ctx) {return ctx->oversample;};
+real_t GetAlpha(const s_NavierContext* ctx) {return ctx->alpha;};
 
 void vel_tgv(const Vector &x, real_t t, Vector &u)
 {
    real_t xi = x(0);
    real_t yi = x(1);
    real_t zi = x(2);
+
+   if (!ctx.problem1)
+   {
+     xi = 2*M_PI*x(0);
+     yi = 2*M_PI*x(1);
+     zi = 2*M_PI*x(2);
+   }
 
    u(0) = sin(xi) * cos(yi) * cos(zi);
    u(1) = -cos(xi) * sin(yi) * cos(zi);
@@ -357,7 +368,7 @@ public:
       return 0.5 * global_integral / volume;
   }
 
-  void ComputeGridPtsRequirementsTurb(ParGridFunction &u, real_t Kolmogorov_length, real_t *hmin_eta , real_t *kmax_eta)
+  void ComputeGridPtsRequirementsTurb(ParGridFunction &u, real_t Kolmogorov_length, real_t *hmin_eta , real_t *kmax_eta, real_t *kmax_return, real_t *hmin_return)
   {
 
       ParMesh *pmesh_u = u.ParFESpace()->GetParMesh();
@@ -367,11 +378,17 @@ public:
       real_t local_hmin_eta = 0.0; 
       real_t local_kmax_eta = 0.0;
 
+      real_t local_hmin = 0.0; 
+      real_t local_kmax = 0.0;
+
       for (int e = 0; e < fes->GetNE(); ++e)
       {
          real_t hmin = pmesh_u->GetElementSize(e, 1) /
                             (real_t) fes->GetElementOrder(0);
          real_t kmax = M_PI/hmin;
+
+         local_hmin = fmax(local_hmin,hmin); 
+         local_kmax = fmax(local_kmax,kmax);
 
          // For a resolved simulatin hmin/eta should be < 2.1 (Pope)
          local_hmin_eta = fmax(local_hmin_eta, hmin/Kolmogorov_length); 
@@ -398,9 +415,28 @@ public:
 
       *hmin_eta = hmin_eta_global;
       *kmax_eta = kmax_eta_global;
+
+      real_t hmin_global = 0.0;
+      MPI_Allreduce(&local_hmin,
+                    &hmin_global,
+                    1,
+                    MPITypeMap<real_t>::mpi_type,
+                    MPI_MAX,
+                    pmesh_u->GetComm());
+
+      real_t kmax_global = 0.0;
+      MPI_Allreduce(&local_kmax,
+                    &kmax_global,
+                    1,
+                    MPITypeMap<real_t>::mpi_type,
+                    MPI_MAX,
+                    pmesh_u->GetComm());
+
+      *hmin_return = hmin_global;
+      *kmax_return = kmax_global;
   }
 
-  void ComputeKolmogorovAndTaylorMicroLength(ParGridFunction &d_gf, real_t vol_avg_dissipation, real_t *kolmogorov_length, 
+  void ComputeKolmogorovAndTaylorMicroLength(ParGridFunction &d_gf,real_t vol_avg_dissipation, real_t *kolmogorov_length, 
                                                                    real_t *avg_lambda, real_t *avg_kolmogorov_length, 
                                                                    real_t *kolmogorov_time_scale,
                                                                    real_t *avg_kolmogorov_time_scale, real_t *max_diss, real_t ke)
@@ -916,6 +952,10 @@ int main(int argc, char *argv[])
        "-no-ovs",
        "--no-Over-Sample",
        "Enable or disable oversampling of solution.");
+   args.AddOption(&ctx.alpha, "-alpha", "--Filter-Amplitude", "Filter Amplitude, filter must be true");
+   args.AddOption(&ctx.problem1, "-problem1", "--Problem-1", "-no-problem1",
+                  "--no-Problem-1",
+                  "Domain length will be 2pi, otherwise 1.0");
    args.Parse();
    if (!args.Good())
    {
@@ -959,6 +999,7 @@ int main(int argc, char *argv[])
 
          // Reset step from restart for flow solver
          step = 0;
+
       }
       else
       {
@@ -982,6 +1023,10 @@ int main(int argc, char *argv[])
       Mesh *init_mesh;
 
       real_t length = 2*M_PI;
+      if (!ctx.problem1)
+      {
+        length = 1.0;
+      }
       init_mesh = new Mesh(Mesh::MakeCartesian3D(ctx.num_pts,
                                                  ctx.num_pts,
                                                  ctx.num_pts,
@@ -1078,8 +1123,12 @@ int main(int argc, char *argv[])
       VectorFunctionCoefficient u_excoeff(pmesh->Dimension(), vel_tgv);
 
       u_gf->ProjectCoefficient(u_excoeff);
-
       p_gf = flowsolver->GetCurrentPressure();
+
+      if(ctx.filter){
+        flowsolver->SetFilterAlpha(ctx.alpha); // Enable sharp cutoff
+        flowsolver->SetCutoffModes(ctx.order-1);   // Cut off highest mode
+      }
 
       // Set up the flow solver
       flowsolver->Setup(ctx.dt);
@@ -1244,9 +1293,16 @@ int main(int argc, char *argv[])
    real_t u_rms =  pow(2.0/3.0*ke,0.5);
    real_t max_diss = 0.0;
 
+   real_t kmax = 0.0;
+   real_t hmin = 0.0;
+
    real_t avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
    kin_energy.ComputeKolmogorovAndTaylorMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, &avg_kolmTimeScl, &max_diss, ke);
-   kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta);
+   kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta, &kmax, &hmin);
+
+   // Pope definetion of grid resolution
+   real_t avg_hmin_eta = hmin/avg_kolmLenScl;
+   real_t avg_kmax_eta = kmax*avg_kolmLenScl;
 
    // This computes how resolved our grid is.
    // See Aspen 2008 Implicit LES Anaylsis
@@ -1371,11 +1427,12 @@ int main(int argc, char *argv[])
           fprintf(f_turb_grid, "===============================================================================");
           fprintf(f_turb_grid, "=================================================================\n");
           fprintf(f_turb_grid, "        time                       cycle                  K_max*eta (>1.5)              hmin/eta (<2.1)");
-          fprintf(f_turb_grid, "        Average PI_NU              Min PI_NU        \n");
+          fprintf(f_turb_grid, "        Average PI_NU              Min PI_NU        ");
+          fprintf(f_turb_grid, "        K_max*eta(Avg)             hmin/eta(Avg)    \n");
 
           // Write the initial data point
-           fprintf(f_turb_grid, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e\n",
-                       t, static_cast<real_t>(global_cycle + step), kmax_eta, hmin_eta, PI_nu, PI_nu_min);
+           fprintf(f_turb_grid, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e    %20.16e    %20.16e\n",
+                       t, static_cast<real_t>(global_cycle + step), kmax_eta, hmin_eta, PI_nu, PI_nu_min, avg_kmax_eta, avg_hmin_eta);
       } 
 
       fflush(f);
@@ -1388,11 +1445,11 @@ int main(int argc, char *argv[])
    real_t t_final = ctx.t_final;
    bool last_step = false;
 
-   if(ctx.filter){
-     // NOT WORKING!!
-     flowsolver->SetFilterAlpha(0.03); // Enable sharp cutoff
-     flowsolver->SetCutoffModes(3);   // Cut off highest mode
-   }
+   // if(ctx.filter){
+   //   // NOT WORKING!!
+   //   flowsolver->SetFilterAlpha(0.1); // Enable sharp cutoff
+   //   flowsolver->SetCutoffModes(1);   // Cut off highest mode
+   // }
 
    for (; !last_step; ++step)
    {
@@ -1401,6 +1458,27 @@ int main(int argc, char *argv[])
          last_step = true;
       }
 
+      // Adjust alpha for restart
+      real_t effective_alpha = ctx.alpha;  // Default to the original alpha
+      if (ctx.restart && restart_files_found && step <= 500)  // Ramp over first 10 steps
+      {
+   
+         // Gradual ramp up
+         real_t ramp_factor = 0.05 + 0.95 * (step / 500.0);
+         effective_alpha = ctx.alpha * ramp_factor;
+         
+         if (Mpi::Root())
+         {
+            std::cout << "Restart ramp: using alpha = " << effective_alpha 
+                      << " (step " << step << "/500)" << std::endl;
+         }
+      }
+
+      if(ctx.filter){
+        // Update the filter amplification
+        flowsolver->SetFilterAlpha(effective_alpha);
+      }
+   
       flowsolver->Step(t, dt, step);
 
       cfl = flowsolver->ComputeCFL(*u_gf, ctx.dt);
@@ -1517,12 +1595,16 @@ int main(int argc, char *argv[])
       ComputeDissipation(*u_gf, d_gf);
       avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
       kin_energy.ComputeKolmogorovAndTaylorMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, &avg_kolmTimeScl, &max_diss, ke);
-      kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta);
+      kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta, &kmax, &hmin);
       Re_taylor = u_rms*avg_lambda/ctx.kinvis;
       u_rms =  pow(2.0/3.0*ke,0.5);
 
       PI_nu = pow(avg_diss,0.5)/(avg_kolmLenScl*pow(vel_curl_ke,0.75));
       PI_nu_min = pow(max_diss,0.5)/(kolmLenScl*pow(vel_curl_ke,0.75));
+
+      avg_hmin_eta = hmin/avg_kolmLenScl;
+      avg_kmax_eta = kmax*avg_kolmLenScl;
+
 
       if (Mpi::Root())
       {
@@ -1535,8 +1617,10 @@ int main(int argc, char *argv[])
                        t, static_cast<real_t>(global_cycle + step), max_diss, avg_diss, kolmLenScl, 
                        avg_lambda, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
                        Re_taylor, u_rms);
-           fprintf(f_turb_grid, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e\n",
-                       t, static_cast<real_t>(global_cycle + step), kmax_eta, hmin_eta, PI_nu, PI_nu_min);
+           // fprintf(f_turb_grid, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e\n",
+           //             t, static_cast<real_t>(global_cycle + step), kmax_eta, hmin_eta, PI_nu, PI_nu_min);
+           fprintf(f_turb_grid, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e    %20.16e    %20.16e\n",
+                       t, static_cast<real_t>(global_cycle + step), kmax_eta, hmin_eta, PI_nu, PI_nu_min, avg_kmax_eta, avg_hmin_eta);
            fflush(f);
            fflush(f_turb);
            fflush(f_turb_grid);
@@ -1909,5 +1993,6 @@ void ComputeElementCenterValuesScalar(ParGridFunction* sol, ParMesh* pmesh, int 
     
     }
 }
+
 
 

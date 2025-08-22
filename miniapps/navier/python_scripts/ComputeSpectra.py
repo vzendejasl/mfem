@@ -8,13 +8,20 @@ import scipy.stats as stats
 
 ### Parse Command-Line Arguments
 parser = argparse.ArgumentParser(description='Compute energy spectrum from velocity data.')
-parser.add_argument('data_file', type=str, help='Path to the data file')
+parser.add_argument('data_files', type=str, nargs='+', help='Path(s) to the data file(s)')
 args = parser.parse_args()
-data_filename = [args.data_file]
+data_filename = args.data_files
 
 plt.figure(figsize=(10, 8))
 
 for file_to_extract_data in data_filename:
+    # Check if file exists
+    if not os.path.exists(file_to_extract_data):
+        print(f"Warning: File {file_to_extract_data} not found. Skipping...")
+        continue
+        
+    print(f"Processing file: {file_to_extract_data}")
+    
     # Read header lines to extract step and time
     with open(file_to_extract_data, 'r') as header_file:
         header_lines = [next(header_file) for _ in range(6)]
@@ -62,18 +69,18 @@ for file_to_extract_data in data_filename:
     ny = len(y_unique)
     nz = len(z_unique)
 
-    print(f"Number of unique x values: {nx}")
-    print(f"Number of unique y values: {ny}")
-    print(f"Number of unique z values: {nz}")
+    print(f"  Number of unique x values: {nx}")
+    print(f"  Number of unique y values: {ny}")
+    print(f"  Number of unique z values: {nz}")
 
     expected_num_points = nx * ny * nz
     actual_num_points = xpos.size
 
-    print(f"Expected number of points: {expected_num_points}")
-    print(f"Actual number of points: {actual_num_points}")
+    print(f"  Expected number of points: {expected_num_points}")
+    print(f"  Actual number of points: {actual_num_points}")
 
     if actual_num_points != expected_num_points:
-        print("Warning: The actual number of data points does not match the expected number based on grid sizes.")
+        print("  Warning: The actual number of data points does not match the expected number based on grid sizes.")
 
     # Create empty grids for velocities
     velx_grid = np.full((nx, ny, nz), np.nan)
@@ -103,7 +110,7 @@ for file_to_extract_data in data_filename:
     tke_grid = 0.5 * (velx_grid**2 + vely_grid**2 + velz_grid**2)
 
     tke_physical = 0.5 * np.mean(velx_grid**2 + vely_grid**2 + velz_grid**2)
-    print(f"[Rank 0] Total Kinetic Energy in Physical Space (TKE_physical): {tke_physical:.6f}")
+    print(f"  Total Kinetic Energy in Physical Space (TKE_physical): {tke_physical:.6f}")
     
     # Perform 3D FFTs
     fft_velx = np.fft.fftn(velx_grid)
@@ -125,7 +132,7 @@ for file_to_extract_data in data_filename:
     energy_density = 0.5 * (np.abs(fft_velx)**2 + np.abs(fft_vely)**2 + np.abs(fft_velz)**2)
 
     energy_density_mean = np.mean(energy_density)*norm_factor
-    print(f"[Rank 0] Total Kinetic Energy in Fourier Space (TKE_Fourier):{energy_density_mean:.6f}")
+    print(f"  Total Kinetic Energy in Fourier Space (TKE_Fourier): {energy_density_mean:.6f}")
 
     # Compute wavenumber vectors
     dx = x_unique[1] - x_unique[0]
@@ -164,31 +171,35 @@ for file_to_extract_data in data_filename:
 
     # Save wavenumbers and energy to a text file
     output_filename = os.path.join(os.path.dirname(file_to_extract_data), f'energy_spectrum_step_{step_number_extracted}.txt')
-    print(f"[Rank 0] Saving energy spectrum to {output_filename}")
+    print(f"  Saving energy spectrum to {output_filename}")
     np.savetxt(output_filename, np.column_stack((k_bin_centers, E_k)), 
                header=f'Wavenumber_k Energy_E(k) (Step {step_number_extracted}, Time {time_extracted:.3e})', 
                fmt='%.6e %.6e', comments='# ')
 
     plt.loglog(k_bin_centers, E_k, '-', label=label_str)
 
-# Plot -5/3 slope line for reference
-k_ref = 1
-E_ref = .1e1
-E_line = E_ref * (k_bin_centers / k_ref)**(-5.0/3.0)
-plt.loglog(k_bin_centers, E_line, 'r--', label='k^-5/3 slope')
-#plt.semilogy(k_bin_centers, E_line, 'r--', label='k^-5/3 slope')
+# Only plot reference line if we processed at least one file
+if len(data_filename) > 0:
+    # Plot -5/3 slope line for reference
+    k_ref = 1
+    E_ref = .1e1
+    E_line = E_ref * (k_bin_centers / k_ref)**(-5.0/3.0)
+    plt.loglog(k_bin_centers, E_line, 'r--', label='k^-5/3 slope')
+    #plt.semilogy(k_bin_centers, E_line, 'r--', label='k^-5/3 slope')
 
-# ymax = 1e1  
-# ymin = 1e-6
-# plt.ylim(ymin, ymax)
-# xmax = np.max(kx)
-# xmin = 1
-# plt.xlim(xmin,xmax)
+    # ymax = 1e1  
+    # ymin = 1e-6
+    # plt.ylim(ymin, ymax)
+    # xmax = np.max(kx)
+    # xmin = 1
+    # plt.xlim(xmin,xmax)
 
-plt.xlabel('Wavenumber k')
-plt.ylabel('k E(k)')
-plt.title('Energy Spectra of the 3D Taylor-Green Vortex (Multiple Timesteps)')
-plt.legend()
-plt.grid(True, which="both", ls="--")
-plt.tight_layout()
-plt.show()
+    plt.xlabel('Wavenumber k')
+    plt.ylabel('k E(k)')
+    plt.title('Energy Spectra of the 3D Taylor-Green Vortex (Multiple Timesteps)')
+    plt.legend()
+    plt.grid(True, which="both", ls="--")
+    plt.tight_layout()
+    plt.show()
+else:
+    print("No valid files were processed.")
