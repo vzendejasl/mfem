@@ -44,7 +44,7 @@ struct s_NavierContext
    bool ni = false;
    bool visualization = false;
    bool checkres = false;
-   int num_pts = 64;
+   int num_pts = 8;
    bool visit = true;
    bool paraview = false;
    bool binary = false;
@@ -1022,13 +1022,11 @@ int main(int argc, char *argv[])
       // Initialize as mesh
       Mesh *init_mesh;
 
-        
       real_t length = 2*M_PI;
       if (!ctx.problem1)
       {
         length = 1.0;
       }
-      // real_t length = 2*M_PI;
       init_mesh = new Mesh(Mesh::MakeCartesian3D(ctx.num_pts,
                                                  ctx.num_pts,
                                                  ctx.num_pts,
@@ -1476,8 +1474,10 @@ int main(int argc, char *argv[])
          }
       }
 
-      // Update the filter amplification
-      flowsolver->SetFilterAlpha(effective_alpha);
+      if(ctx.filter){
+        // Update the filter amplification
+        flowsolver->SetFilterAlpha(effective_alpha);
+      }
    
       flowsolver->Step(t, dt, step);
 
