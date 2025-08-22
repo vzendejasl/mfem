@@ -15,6 +15,9 @@ void project_Hdiv_to_L2(ParGridFunction &result,
                         ParGridFunction &u_hdiv,
                         ParFiniteElementSpace *test_fes,   // vector L2(DG) target
                         bool pa);
+void compute_Curl_Hcurl_to_Hdiv(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  
+                        ParGridFunction &gftest, ParFiniteElementSpace *test_fes, bool pa);
+
 real_t freq = 1.0, kappa;
 int dim;
 
@@ -148,11 +151,18 @@ int main(int argc, char *argv[])
       cout << "Number of finite element unknowns: " << size << endl;
    }
 
+   // nabla \phi
    VectorFunctionCoefficient grad_phi_coeff(sdim, grad_phi);
    ParGridFunction grad_phi_hcurl(nd_fespace);
    grad_phi_hcurl.ProjectCoefficient(grad_phi_coeff);
 
+   ParGridFunction grad_phi_exact_h1(h1_fespace_vector);
+   grad_phi_exact_h1.ProjectCoefficient(grad_phi_coeff);
+
+   // \nabla \times Ah in H(div)
    VectorFunctionCoefficient curl_A_exact_coeff(sdim, curl_A_exact);
+   ParGridFunction curl_Ah_exact_hdiv(rt_fespace);
+   curl_Ah_exact_hdiv.ProjectCoefficient(curl_A_exact_coeff);
 
    // Create operators
 
@@ -176,8 +186,15 @@ int main(int argc, char *argv[])
    // Define curl u in H(div).
    ParGridFunction curl_u_hdiv(rt_fespace);
    
-   // Apply curl operator to u_hcurl
-   curl_op.Mult(u_hcurl, curl_u_hdiv);
+   // // Apply curl operator to u_hcurl
+   // curl_op.Mult(u_hcurl, curl_u_hdiv);
+
+   // You can use an existing H(div) grid function or create a temporary one
+   ParGridFunction temp_hdiv_test(rt_fespace);  // temporary test function
+   temp_hdiv_test = 0.0;  // initialize
+   
+   compute_Curl_Hcurl_to_Hdiv(curl_u_hdiv, u_hcurl, nd_fespace, temp_hdiv_test, rt_fespace, pa);
+   // compute_Curl_Hcurl_to_Hdiv(curl_u_hdiv, u_hcurl, nd_fespace, rt_fespace)
 
    // Project the curl of u that is in H(div) to H(curl) space
    // to use as the rhs of the linear solve
@@ -316,7 +333,8 @@ int main(int argc, char *argv[])
 
    // Compute curl of Ah in H(div)
    ParGridFunction curl_Ah_hdiv(rt_fespace);
-   curl_op.Mult(x, curl_Ah_hdiv);
+   // curl_op.Mult(x, curl_Ah_hdiv);
+   compute_Curl_Hcurl_to_Hdiv(curl_Ah_hdiv, x, nd_fespace, temp_hdiv_test, rt_fespace, pa);
 
    ParGridFunction div_Ah_hdiv(rt_fespace);
    ParGridFunction Ah_hdiv(rt_fespace);
@@ -347,7 +365,7 @@ int main(int argc, char *argv[])
    ParGridFunction grad_phi_l2(l2_fespace_vector);
    grad_phi_l2 = 0.0;
 
-   VectorGridFunctionCoefficient curl_Ah_l2_coeff(&curl_Ah_hdiv);
+   // VectorGridFunctionCoefficient curl_Ah_l2_coeff(&curl_Ah_hdiv);
    ParGridFunction curl_Ah_l2(l2_fespace_vector);
    // curl_Ah_l2.ProjectCoefficient(curl_Ah_l2_coeff);
    project_Hdiv_to_L2(curl_Ah_l2, curl_Ah_hdiv,l2_fespace_vector,pa);
@@ -356,16 +374,25 @@ int main(int argc, char *argv[])
    grad_phi_l2 -= curl_Ah_l2;
 
 
+   // // Project to grad phi_l2 and curl_Ah_l2 to H1
+   // ParGridFunction grad_phi_h1(h1_fespace_vector);
+   // ParGridFunction curl_Ah_h1(h1_fespace_vector);
+
+   // // Note that here we are using a Project Call
+   // grad_phi_h1.ProjectGridFunction(grad_phi_l2);
+   // curl_Ah_h1.ProjectGridFunction(curl_Ah_l2);
+  
    // Project to grad phi_l2 and curl_Ah_l2 to H1
    ParGridFunction grad_phi_h1(h1_fespace_vector);
    ParGridFunction curl_Ah_h1(h1_fespace_vector);
-
-   // Note that here we are using a Project Call
-   grad_phi_h1.ProjectGridFunction(grad_phi_l2);
-   curl_Ah_h1.ProjectGridFunction(curl_Ah_l2);
-
-
-
+   
+   // Create coefficients from the L2 grid functions
+   VectorGridFunctionCoefficient grad_phi_l2_coeff(&grad_phi_l2);
+   VectorGridFunctionCoefficient curl_Ah_l2_coeff(&curl_Ah_l2);
+   
+   // Use ProjectDiscCoefficient for averaging-based projection from L2 to H1
+   grad_phi_h1.ProjectDiscCoefficient(grad_phi_l2_coeff);
+   curl_Ah_h1.ProjectDiscCoefficient(curl_Ah_l2_coeff);
 
    // 15. Compute and print the L^2 norm of the error.
    {
@@ -440,15 +467,18 @@ int main(int argc, char *argv[])
     dc.RegisterField("Ah", &x);
     dc.RegisterField("Ah_exact", &Agf_exact);
 
+    dc.RegisterField("curl_Ah_exact_hdiv", &curl_Ah_exact_hdiv);
     dc.RegisterField("curl_Ah_l2", &curl_Ah_l2);
     dc.RegisterField("curl_Ah_hdiv", &curl_Ah_hdiv);
     dc.RegisterField("curl_Ah_h1", &curl_Ah_h1);
 
     dc.RegisterField("curl_u_computed", &curl_u_hcurl);
+    dc.RegisterField("curl_u_hdiv", &curl_u_hdiv);
     dc.RegisterField("curl_u_hcurl_l2", &curl_u_hcurl_l2_project);
     dc.RegisterField("curl_u_exact",    &curl_u_exact);
 
     dc.RegisterField("grad_phi_exact_hcurl",   &grad_phi_hcurl);
+    dc.RegisterField("grad_phi_exact_h1",   &grad_phi_exact_h1);
     dc.RegisterField("grad_phi_l2",    &grad_phi_l2);
     dc.RegisterField("grad_phi_h1",    &grad_phi_h1);
     
@@ -484,9 +514,6 @@ void A_exact(const Vector &x, Vector &A)
 {
    if (dim == 3)
    {
-      // E(0) = sin(kappa * x(1));
-      // E(1) = sin(kappa * x(2));
-      // E(2) = sin(kappa * x(0));
       A(0) = -1/(4*M_PI)*cos(4*M_PI*x(2)) + 1/(6*M_PI)*cos(6*M_PI*x(1));
       A(1) = -1/(4*M_PI)*cos(4*M_PI*x(0)) + 1/(6*M_PI)*cos(6*M_PI*x(2));
       A(2) = -1/(4*M_PI)*cos(4*M_PI*x(1)) + 1/(6*M_PI)*cos(6*M_PI*x(0));
@@ -609,6 +636,82 @@ void project_Hcurl_Hdiv(ParGridFunction &result, ParGridFunction &gftrial, ParFi
    result.SetFromTrueDofs(X);
 }
 
+// The test space is what you are projecting to and the trial space is where you are projecting from
+void compute_Curl_Hcurl_to_Hdiv(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  
+                        ParGridFunction &gftest, ParFiniteElementSpace *test_fes, bool pa)
+{
+   ParBilinearForm *a = new ParBilinearForm(test_fes);
+   if (pa) { a->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+   a->AddDomainIntegrator(new VectorFEMassIntegrator());
+   ParMixedBilinearForm *a_mixed = new ParMixedBilinearForm(trial_fes, test_fes);
+   if (pa) {a_mixed->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+   a_mixed->AddDomainIntegrator(new MixedVectorCurlIntegrator());
+
+   a->Assemble();
+   if(!pa){a->Finalize();}
+
+   a_mixed->Assemble();
+   if(!pa){a_mixed->Finalize();}
+
+   Vector B(test_fes->GetTrueVSize());
+   Vector X(test_fes->GetTrueVSize());
+
+   if (pa)
+   {
+      ParLinearForm b(test_fes); // used as a vector
+      a_mixed->Mult(gftrial, b); // process-local multiplication
+      b.ParallelAssemble(B);
+   }
+   else
+   {
+      HypreParMatrix *mixed = a_mixed->ParallelAssemble();
+
+      Vector P(trial_fes->GetTrueVSize());
+      gftrial.GetTrueDofs(P);
+
+      mixed->Mult(P,B);
+
+      delete mixed;
+   }
+
+    // 11. Define and apply a parallel PCG solver for AX=B with Jacobi
+   //     preconditioner.
+   if (pa)
+   {
+      Array<int> ess_tdof_list; // empty
+
+      OperatorPtr A;
+      a->FormSystemMatrix(ess_tdof_list, A);
+
+      OperatorJacobiSmoother Jacobi(*a, ess_tdof_list);
+
+      CGSolver cg(MPI_COMM_WORLD);
+      cg.SetRelTol(1e-12);
+      cg.SetMaxIter(1000);
+      cg.SetPrintLevel(1);
+      cg.SetOperator(*A);
+      cg.SetPreconditioner(Jacobi);
+      X = 0.0;
+      cg.Mult(B, X);
+   }
+   else
+   {
+      HypreParMatrix *Amat = a->ParallelAssemble();
+      HypreDiagScale Jacobi(*Amat);
+      HyprePCG pcg(*Amat);
+      pcg.SetTol(1e-12);
+      pcg.SetMaxIter(1000);
+      pcg.SetPrintLevel(2);
+      pcg.SetPreconditioner(Jacobi);
+      X = 0.0;
+      pcg.Mult(B, X);
+
+      delete Amat;
+   }
+
+   result.SetFromTrueDofs(X);
+}
+
 // Project H(div) field (u_hdiv) into vector L2(DG) (result) in the true L2 sense: M y = b.
 // test_fes must be a vector L2/DG space with vdim = mesh dim.
 void project_Hdiv_to_L2(ParGridFunction &result,
@@ -637,12 +740,11 @@ void project_Hdiv_to_L2(ParGridFunction &result,
 
    if (pa)
    {
-      // Matrix-free path
-      Array<int> ess_tdof_list; // empty for DG/L2
+      Array<int> ess_tdof_list;
       OperatorPtr Aop;
       a.FormSystemMatrix(ess_tdof_list, Aop);
 
-      OperatorJacobiSmoother Jacobi(a, ess_tdof_list); // <— note second arg
+      OperatorJacobiSmoother Jacobi(a, ess_tdof_list); 
       CGSolver cg(test_fes->GetComm());
       cg.SetRelTol(1e-12);
       cg.SetMaxIter(200);
