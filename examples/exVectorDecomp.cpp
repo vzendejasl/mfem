@@ -22,6 +22,10 @@ real_t freq = 1.0, kappa;
 int dim;
 
 void project_Hcurl_Hdiv(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  ParGridFunction &gftest, ParFiniteElementSpace *test_fes, bool pa);
+void project_H1_to_Hcurl(ParGridFunction &result, 
+   ParGridFunction &gftrial, 
+   ParFiniteElementSpace *trial_fes,  
+   ParFiniteElementSpace *test_fes, bool pa);
 
 int main(int argc, char *argv[])
 {
@@ -394,6 +398,9 @@ int main(int argc, char *argv[])
    grad_phi_h1.ProjectDiscCoefficient(grad_phi_l2_coeff);
    curl_Ah_h1.ProjectDiscCoefficient(curl_Ah_l2_coeff);
 
+   ParGridFunction curl_Ah_hcurl_l2_project(nd_fespace);
+   project_H1_to_Hcurl(curl_Ah_hcurl_l2_project, curl_Ah_h1, h1_fespace_vector, nd_fespace, pa);
+
    // 15. Compute and print the L^2 norm of the error.
    {
       real_t error = x.ComputeL2Error(A_coeff);
@@ -471,6 +478,7 @@ int main(int argc, char *argv[])
     dc.RegisterField("curl_Ah_l2", &curl_Ah_l2);
     dc.RegisterField("curl_Ah_hdiv", &curl_Ah_hdiv);
     dc.RegisterField("curl_Ah_h1", &curl_Ah_h1);
+    dc.RegisterField("curl_Ah_hcurl", &curl_Ah_hcurl_l2_project);
 
     dc.RegisterField("curl_u_computed", &curl_u_hcurl);
     dc.RegisterField("curl_u_hdiv", &curl_u_hdiv);
@@ -512,18 +520,9 @@ int main(int argc, char *argv[])
 
 void A_exact(const Vector &x, Vector &A)
 {
-   if (dim == 3)
-   {
-      A(0) = -1/(4*M_PI)*cos(4*M_PI*x(2)) + 1/(6*M_PI)*cos(6*M_PI*x(1));
-      A(1) = -1/(4*M_PI)*cos(4*M_PI*x(0)) + 1/(6*M_PI)*cos(6*M_PI*x(2));
-      A(2) = -1/(4*M_PI)*cos(4*M_PI*x(1)) + 1/(6*M_PI)*cos(6*M_PI*x(0));
-   }
-   else
-   {
-      A(0) = sin(kappa * x(1));
-      A(1) = sin(kappa * x(0));
-      if (x.Size() == 3) { A(2) = 0.0; }
-   }
+   A(0) = -1/(4*M_PI)*cos(4*M_PI*x(2)) + 1/(6*M_PI)*cos(6*M_PI*x(1));
+   A(1) = -1/(4*M_PI)*cos(4*M_PI*x(0)) + 1/(6*M_PI)*cos(6*M_PI*x(2));
+   A(2) = -1/(4*M_PI)*cos(4*M_PI*x(1)) + 1/(6*M_PI)*cos(6*M_PI*x(0));
 }
 
 void w_exact(const Vector &x, Vector &f)
@@ -544,6 +543,13 @@ void w_exact(const Vector &x, Vector &f)
 
 void u_exact(const Vector &x, Vector &A)
 {
+   // real_t xi = 2*M_PI*x(0);
+   // real_t yi = 2*M_PI*x(1);
+   // real_t zi = 2*M_PI*x(2);
+ 
+   // A(0) = sin(xi) * cos(yi) * cos(zi);
+   // A(1) = -cos(xi) * sin(yi) * cos(zi);
+   // A(2) = 0.0;
    if (dim == 3)
    {
       A(0) = sin(2*M_PI*x(0)) + sin(4*M_PI*x(1)) + sin(6*M_PI*x(2));
@@ -770,6 +776,139 @@ void project_Hdiv_to_L2(ParGridFunction &result,
    result = 0.0;
    result.SetFromTrueDofs(X);
 }
+
+// Project H1 (vector) → H(curl) (ND) in L2-sense.
+void project_H1_to_Hcurl(ParGridFunction &result,          // in ND space (output)
+                         ParGridFunction &u_h1,            // in H1 vector space (input)
+                         ParFiniteElementSpace *fes_h1,    // not used, but keep for symmetry
+                         ParFiniteElementSpace *fes_nd,    // ND test/target
+                         bool pa)
+{
+   // Mass matrix on the ND space
+   ParBilinearForm M(fes_nd);
+   if (pa) { M.SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+   M.AddDomainIntegrator(new VectorFEMassIntegrator()); // <- ND/RT mass
+   M.Assemble();
+   if (!pa) { M.Finalize(); }
+
+   // RHS: b_i = (u_h1, w_i) with w_i in ND
+   VectorGridFunctionCoefficient ucoeff(&u_h1);
+   ParLinearForm b(fes_nd);
+   b.AddDomainIntegrator(new VectorFEDomainLFIntegrator(ucoeff)); // <- ND/RT RHS
+   b.Assemble();
+
+   Vector B(fes_nd->GetTrueVSize()), X(fes_nd->GetTrueVSize());
+   b.ParallelAssemble(B);
+   X = 0.0;
+
+   if (pa)
+   {
+      Array<int> ess_tdof_list; // none for pure L2 projection
+      OperatorPtr Mop;
+      M.FormSystemMatrix(ess_tdof_list, Mop);
+      OperatorJacobiSmoother Jacobi(M, ess_tdof_list);
+      CGSolver cg(fes_nd->GetComm());
+      cg.SetRelTol(1e-12);
+      cg.SetMaxIter(500);
+      cg.SetPrintLevel(0);
+      cg.SetOperator(*Mop);
+      cg.SetPreconditioner(Jacobi);
+      cg.Mult(B, X);
+   }
+   else
+   {
+      std::unique_ptr<HypreParMatrix> Mpar(M.ParallelAssemble());
+      HypreDiagScale Jacobi(*Mpar);
+      HyprePCG pcg(*Mpar);
+      pcg.SetTol(1e-12);
+      pcg.SetMaxIter(500);
+      pcg.SetPrintLevel(2);
+      pcg.SetPreconditioner(Jacobi);
+      pcg.Mult(B, X);
+   }
+
+   result = 0.0;
+   result.SetFromTrueDofs(X);
+}
+
+
+// // The test space is what you are projecting to and the trial space is where you are projecting from
+// void project_H1_Hcurl(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  
+//                         ParGridFunction &gftest, ParFiniteElementSpace *test_fes, bool pa)
+// {
+//    ParBilinearForm *a = new ParBilinearForm(test_fes);
+//    if (pa) { a->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+//    a->AddDomainIntegrator(new VectorFEMassIntegrator());
+//    ParMixedBilinearForm *a_mixed = new ParMixedBilinearForm(trial_fes, test_fes);
+//    if (pa) {a_mixed->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+//    a_mixed->AddDomainIntegrator(new VectorMassIntegrator());
+// 
+//    // a_mixed->AddDomainIntegrator(new MixedVectorMassIntegrator());  // More explicit
+// 
+//    a->Assemble();
+//    if(!pa){a->Finalize();}
+// 
+//    a_mixed->Assemble();
+//    if(!pa){a_mixed->Finalize();}
+// 
+//    Vector B(test_fes->GetTrueVSize());
+//    Vector X(test_fes->GetTrueVSize());
+// 
+//    if (pa)
+//    {
+//       ParLinearForm b(test_fes); // used as a vector
+//       a_mixed->Mult(gftrial, b); // process-local multiplication
+//       b.ParallelAssemble(B);
+//    }
+//    else
+//    {
+//       HypreParMatrix *mixed = a_mixed->ParallelAssemble();
+// 
+//       Vector P(trial_fes->GetTrueVSize());
+//       gftrial.GetTrueDofs(P);
+// 
+//       mixed->Mult(P,B);
+// 
+//       delete mixed;
+//    }
+// 
+//     // 11. Define and apply a parallel PCG solver for AX=B with Jacobi
+//    //     preconditioner.
+//    if (pa)
+//    {
+//       Array<int> ess_tdof_list; // empty
+// 
+//       OperatorPtr A;
+//       a->FormSystemMatrix(ess_tdof_list, A);
+// 
+//       OperatorJacobiSmoother Jacobi(*a, ess_tdof_list);
+// 
+//       CGSolver cg(MPI_COMM_WORLD);
+//       cg.SetRelTol(1e-12);
+//       cg.SetMaxIter(1000);
+//       cg.SetPrintLevel(1);
+//       cg.SetOperator(*A);
+//       cg.SetPreconditioner(Jacobi);
+//       X = 0.0;
+//       cg.Mult(B, X);
+//    }
+//    else
+//    {
+//       HypreParMatrix *Amat = a->ParallelAssemble();
+//       HypreDiagScale Jacobi(*Amat);
+//       HyprePCG pcg(*Amat);
+//       pcg.SetTol(1e-12);
+//       pcg.SetMaxIter(1000);
+//       pcg.SetPrintLevel(2);
+//       pcg.SetPreconditioner(Jacobi);
+//       X = 0.0;
+//       pcg.Mult(B, X);
+// 
+//       delete Amat;
+//    }
+// 
+//    result.SetFromTrueDofs(X);
+// }
 
 
 
