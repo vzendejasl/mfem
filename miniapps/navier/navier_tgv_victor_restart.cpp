@@ -1441,8 +1441,8 @@ int main(int argc, char *argv[])
    ParGridFunction curl_Ah(velocity_fespace);
    ParGridFunction grad_phi(velocity_fespace);
 
-   VelocityDecomposition(*u_gf, curl_Ah, grad_phi,pmesh,ctx.order,ctx.pa,ctx.delta_const);
-   SamplePoints( u_gf, pmesh,0, 0, "Velocity", &ctx);
+   // VelocityDecomposition(*u_gf, curl_Ah, grad_phi,pmesh,ctx.order,ctx.pa,ctx.delta_const);
+   // SamplePoints( u_gf, pmesh,0, 0, "Velocity", &ctx);
    // ParGridFunction divu_gf(pressure_fespace);
 
    // ParGridFunction u_comp(velocity_fespace);
@@ -1737,12 +1737,6 @@ int main(int argc, char *argv[])
    real_t t_final = ctx.t_final;
    bool last_step = false;
 
-   // if(ctx.filter){
-   //   // NOT WORKING!!
-   //   flowsolver->SetFilterAlpha(0.1); // Enable sharp cutoff
-   //   flowsolver->SetCutoffModes(1);   // Cut off highest mode
-   // }
-
    for (; !last_step; ++step)
    {
       if (t + dt >= t_final - dt / 2)
@@ -1782,7 +1776,7 @@ int main(int argc, char *argv[])
          {
             ComputeQCriterion(*u_gf, q_gf);
             flowsolver->ComputeCurl3D(*u_gf, w_gf);
-            VelocityDecomposition(*u_gf,curl_Ah,grad_phi,pmesh,ctx.order,ctx.pa,ctx.delta_const);
+            // VelocityDecomposition(*u_gf,curl_Ah,grad_phi,pmesh,ctx.order,ctx.pa,ctx.delta_const);
 
             // ComputeDivergence3D(*u_gf, divu_gf);
             // ComputeVorticalPart(flowsolver, *u_gf, w_gf, u_vort);
@@ -1861,7 +1855,7 @@ int main(int argc, char *argv[])
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
             SamplePoints( u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
-            // SamplePointsAtDoFs(u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
+            SamplePointsAtDoFs(u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
             // SamplePointsAdios( u_gf, pmesh, global_cycle + step, t, "Velocity",ctx.oversample, &ctx);
             // ComputeElementCenterValues(&w_gf, pmesh, global_cycle + step, t, "Vorticity");
 

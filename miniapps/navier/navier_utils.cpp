@@ -344,365 +344,410 @@ void SamplePoints(mfem::ParGridFunction* sol,
    MPI_Barrier(MPI_COMM_WORLD);
 }
 
-/*
-// Loop through each element and save each dof using an integration rule.
-// Also, eliminate copies of DOFS
-void SamplePointsAtDoFs(ParGridFunction      *sol,
-                        ParMesh              *pmesh,
-                        int                   step,
-                        double                time,
-                        const std::string    &suffix,
-                        const s_NavierContext* ctx)
+// Writes unique H1 nodal true-DOFs (coords + vector values) to one file via MPI-IO.
+// Closed-domain emit: includes BOTH endpoints by mirroring boundary true-DOFs.
+void SamplePointsAtDoFs(mfem::ParGridFunction      *u,
+                        mfem::ParMesh              *pmesh,
+                        int                         step,
+                        double                      time,
+                        const std::string          &suffix,
+                        const s_NavierContext      *ctx)
 {
-   // MPI setup
-   MPI_Comm comm = pmesh->GetComm();
-   int rank, size;
-   MPI_Comm_rank(comm, &rank);
-   MPI_Comm_size(comm, &size);
+    MPI_Comm comm = pmesh->GetComm();
+    int rank; MPI_Comm_rank(comm, &rank);
 
-   // Construct the main directory name with suffix
-   std::string main_dir = "SamplePointsAtDofs" + suffix +
-                          "_Re" + std::to_string(static_cast<int>(GetReynum(ctx))) +
-                          "NumPtsPerDir" + std::to_string(GetNumPts(ctx)) +
-                   + "RefLv" + std::to_string(GetElementSubdivisions(ctx) + GetElementSubdivisionsParallel(ctx))
-                   + "P" + std::to_string(GetOrder(ctx));
+    // ---- 0) Output paths
+    std::string main_dir = std::string("SamplePoints") + suffix +
+                           "_Re" + std::to_string((int)GetReynum(ctx)) +
+                           "NumPtsPerDir" + std::to_string(GetNumPts(ctx)) +
+                           "RefLv" + std::to_string(GetElementSubdivisions(ctx) +
+                                                    GetElementSubdivisionsParallel(ctx)) +
+                           "P" + std::to_string(GetOrder(ctx));
+    std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
+    std::string fname     = cycle_dir + "/SampledDataAtDofs" + std::to_string(step) + ".txt";
 
-   // Create subdirectory for this cycle step
-   std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
-   std::string fname = cycle_dir + "/SampledData" + std::to_string(step) + ".txt";
+    if (rank == 0) {
+        (void)system(("mkdir -p " + main_dir).c_str());
+        (void)system(("mkdir -p " + cycle_dir).c_str());
+    }
+    MPI_Barrier(comm);
 
-   // Create directories on rank 0
-   if (rank == 0)
-   {
-      if (system(("mkdir -p " + main_dir).c_str()) != 0)
-         std::cerr << "Error creating " << main_dir << " directory!" << std::endl;
-      if (system(("mkdir -p " + cycle_dir).c_str()) != 0)
-         std::cerr << "Error creating " << cycle_dir << " directory!" << std::endl;
-   }
+    // ---- 1) Preconditions
+    mfem::ParFiniteElementSpace *fes = u->ParFESpace();
+    MFEM_VERIFY(fes->GetFE(0)->GetNodes() != nullptr,
+                "This method requires a nodal (H1) velocity space.");
+    const int vdim = fes->GetVDim();
+    const int sdim = pmesh->SpaceDimension();
+    MFEM_VERIFY(vdim == 3 && sdim == 3, "Adjust printing if not 3D.");
 
-   MPI_Barrier(MPI_COMM_WORLD);
+    // ---- 2) Coordinates on SAME FES as 'u'
+    mfem::ParGridFunction X_on_u(fes);
+    mfem::PositionVectorCoefficient pos(sdim);
+    X_on_u.ProjectCoefficient(pos);     // (x,y,z) at velocity nodal points
+    X_on_u.ParallelAverage();
 
-   // Get element information
-   mfem::FiniteElementSpace *fes = sol->FESpace();
-   int vdim = fes->GetVDim();
-   const FiniteElement *fe = fes->GetFE(0);
-   const IntegrationRule &fe_nodes = fe->GetNodes();
-   
-   // Coordinate key function
-   auto coord_key = [](double x, double y, double z) -> std::string {
-       std::ostringstream oss;
-       oss << std::scientific << std::setprecision(17) << x << "," << y << "," << z;
-       return oss.str();
-   };
-   
-   // Phase 1: Each processor samples and deduplicates locally
-   std::set<std::string> seen_coords;
-   std::vector<double> local_x, local_y, local_z;
-   std::vector<double> local_velx, local_vely, local_velz;
-   
-   int local_total_dofs = 0;
-   int local_duplicates = 0;
+    // Average velocity on a copy (consistent shared-DoFs)
+    mfem::ParGridFunction u_avg(*u);
+    u_avg.ParallelAverage();
 
-   for (int e = 0; e < pmesh->GetNE(); e++)
-   {
-      mfem::ElementTransformation *Trans = pmesh->GetElementTransformation(e);
+    // ---- 3) True DOFs (unique across ranks)
+    mfem::HypreParVector U_true, X_true;
+    u_avg.GetTrueDofs(U_true);
+    X_on_u.GetTrueDofs(X_true);
 
-      for (int i = 0; i < fe_nodes.GetNPoints(); ++i){
-        const IntegrationPoint &ip = fe_nodes.IntPoint(i);
+    const double *U = U_true.Read();   // local partition
+    const double *X = X_true.Read();
 
-        Trans->SetIntPoint(&ip);
-        Vector phys_pt;
-        Trans->Transform(ip,phys_pt);
+    const int tloc = fes->GetTrueVSize() / vdim;  // local scalar true size
+    const auto ord = fes->GetOrdering();
 
-        local_total_dofs++;
-        
-        // Local deduplication
-        std::string coord_str = coord_key(phys_pt[0], phys_pt[1], phys_pt[2]);
-        
-        if (seen_coords.find(coord_str) != seen_coords.end()) {
-            local_duplicates++;
-            continue; // Skip local duplicate
+    auto get_comp = [&](const double *D, int i, int c)->double {
+        // i in [0, tloc), c in [0, vdim)
+        return (ord == mfem::Ordering::byNODES) ? D[i + c * tloc]
+                                                : D[c + i * vdim];
+    };
+
+    // ---- 4) Bounds, eps, and a tiny helper to build mirrored coordinate lists
+    mfem::Vector bbmin(sdim), bbmax(sdim);
+    pmesh->GetBoundingBox(bbmin, bbmax);
+    const double ax = bbmin(0), bx = bbmax(0);
+    const double ay = bbmin(1), by = bbmax(1);
+    const double az = bbmin(2), bz = bbmax(2);
+
+    const double ex = 1e-12 * std::max(1.0, bx - ax);
+    const double ey = 1e-12 * std::max(1.0, by - ay);
+    const double ez = 1e-12 * std::max(1.0, bz - az);
+
+    auto near_min = [](double x, double a, double eps){ return (x - a) <= eps; };
+    auto near_max = [](double x, double b, double eps){ return (b - x) <= eps; };
+
+    // Given a value and [a,b], return {val} plus its mirror if on a face
+    auto variants_1d = [&](double val, double a, double b, double eps)
+    {
+        std::vector<double> v; v.reserve(2);
+        // Snap exact endpoints (stable printing)
+        if (std::abs(val - a) <= eps) val = a;
+        else if (std::abs(val - b) <= eps) val = b;
+        v.push_back(val);
+        if (near_min(val, a, eps)) v.push_back(b);
+        else if (near_max(val, b, eps)) v.push_back(a);
+        return v; // size 1 (interior) or 2 (on a face)
+    };
+
+    // ---- 5) Build payload (rank-local). Single simple nested loop over variants.
+    std::ostringstream data_ss;
+    data_ss.setf(std::ios::scientific);
+    data_ss << std::setprecision(16);
+
+    auto emit = [&](double Xx, double Xy, double Xz,
+                    double Ux, double Uy, double Uz)
+    {
+        data_ss << std::setw(20) << Xx << " "
+                << std::setw(20) << Xy << " "
+                << std::setw(20) << Xz << " "
+                << std::setw(20) << Ux << " "
+                << std::setw(20) << Uy << " "
+                << std::setw(20) << Uz << "\n";
+    };
+
+    for (int i = 0; i < tloc; ++i)
+    {
+        const double Xx0 = get_comp(X, i, 0);
+        const double Xy0 = get_comp(X, i, 1);
+        const double Xz0 = get_comp(X, i, 2);
+
+        const double Ux  = get_comp(U, i, 0);
+        const double Uy  = get_comp(U, i, 1);
+        const double Uz  = get_comp(U, i, 2);
+
+        const auto vx = variants_1d(Xx0, ax, bx, ex);
+        const auto vy = variants_1d(Xy0, ay, by, ey);
+        const auto vz = variants_1d(Xz0, az, bz, ez);
+
+        for (double xx : vx)
+        for (double yy : vy)
+        for (double zz : vz)
+            emit(xx, yy, zz, Ux, Uy, Uz);
+    }
+
+    const std::string data = data_ss.str();
+
+    // ---- 6) Header (rank 0 only)
+    std::string header;
+    if (rank == 0) {
+        std::ostringstream h;
+        h.setf(std::ios::scientific); h << std::setprecision(16);
+        h << "3D Taylor Green Vortex\n"
+          << "Order = " << GetOrder(ctx) << ", Over sample = " << GetOverSample(ctx) << "\n"
+          << "Step = " << step << "\n"
+          << "Time = " << std::scientific << std::setprecision(16) << time << "\n"
+          << "==================================================================="
+          << "==========================================================================\n"
+          << "            x                      y                      z                   vecx                   vecy                   vecz\n";
+        header = h.str();
+    }
+
+    // ---- 7) Simple MPI-IO: header-at-0, view-after-header, rank-ordered write
+    MPI_File fh;
+    int err = MPI_File_open(comm, fname.c_str(),
+                            MPI_MODE_CREATE | MPI_MODE_WRONLY,
+                            MPI_INFO_NULL, &fh);
+    if (err != MPI_SUCCESS) {
+        if (rank == 0) std::cerr << "Error opening " << fname << " with MPI I/O\n";
+        MPI_Abort(comm, 1);
+    }
+
+    MPI_Offset header_bytes = 0;
+    if (rank == 0) {
+        MPI_Status st0;
+        MPI_File_write_at(fh, 0, header.data(), (int)header.size(), MPI_CHAR, &st0);
+        header_bytes = (MPI_Offset)header.size();
+    }
+    MPI_Bcast(&header_bytes, 1, MPI_OFFSET, 0, comm);
+
+    // everyone writes after the header
+    MPI_File_set_view(fh, header_bytes, MPI_CHAR, MPI_CHAR, "native", MPI_INFO_NULL);
+
+    // rank-ordered collective write (no Exscan)
+    {
+        MPI_Status st1;
+        const int my_count = (int)data.size(); // if ever >2GB/rank, chunk this
+        MPI_File_write_ordered(fh, data.data(), my_count, MPI_CHAR, &st1);
+    }
+
+    MPI_File_close(&fh);
+
+    if (rank == 0) {
+        std::cout << "Sampled closed-domain DOF data saved: " << fname << std::endl;
+    }
+}
+
+/*
+// Writes unique H1 nodal true-DOFs (coords + vector values) to one file via MPI-IO.
+// Closed-domain emit: includes both endpoints by mirroring points at each end to the opposite end.
+// Coordinates are NOT ParallelAveraged (to avoid smearing periodic endpoints).
+void SamplePointsAtDoFs(mfem::ParGridFunction      *u,
+                        mfem::ParMesh              *pmesh,
+                        int                         step,
+                        double                      time,
+                        const std::string          &suffix,
+                        const s_NavierContext      *ctx)
+{
+    MPI_Comm comm = pmesh->GetComm();
+    int rank; MPI_Comm_rank(comm, &rank);
+
+    // ---- 0) Output paths
+    std::string main_dir = std::string("SamplePoints") + suffix +
+                           "_Re" + std::to_string((int)GetReynum(ctx)) +
+                           "NumPtsPerDir" + std::to_string(GetNumPts(ctx)) +
+                           "RefLv" + std::to_string(GetElementSubdivisions(ctx) +
+                                                    GetElementSubdivisionsParallel(ctx)) +
+                           "P" + std::to_string(GetOrder(ctx));
+    std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
+    std::string fname     = cycle_dir + "/SampledDataAtDofs" + std::to_string(step) + ".txt";
+
+    if (rank == 0) {
+        (void)system(("mkdir -p " + main_dir).c_str());
+        (void)system(("mkdir -p " + cycle_dir).c_str());
+    }
+    MPI_Barrier(comm);
+
+    // ---- 1) Preconditions
+    mfem::ParFiniteElementSpace *fes = u->ParFESpace();
+    MFEM_VERIFY(fes->GetFE(0)->GetNodes() != nullptr,
+                "This method requires a nodal (H1) velocity space.");
+    const int vdim = fes->GetVDim();
+    const int sdim = pmesh->SpaceDimension();
+    MFEM_VERIFY(vdim == 3 && sdim == 3, "Adjust printing if not 3D.");
+
+    // ---- 2) Coordinates on SAME FES as 'u' (NO ParallelAverage on coords)
+    mfem::ParGridFunction X_on_u(fes);
+    mfem::PositionVectorCoefficient pos(sdim);
+    X_on_u.ProjectCoefficient(pos);   // (x,y,z) at velocity nodal points
+    // DO NOT: X_on_u.ParallelAverage();  // <-- removing this avoids endpoint smearing
+
+    // Average velocity on a copy (safe & keeps values consistent across shared DOFs)
+    mfem::ParGridFunction u_avg(*u);
+    u_avg.ParallelAverage();
+
+    // ---- 3) True DOFs (unique & partitioned)
+    mfem::HypreParVector U_true, X_true;
+    u_avg.GetTrueDofs(U_true);
+    X_on_u.GetTrueDofs(X_true);
+
+    const double *U = U_true.Read();   // local partition
+    const double *X = X_true.Read();
+
+    const int tloc = fes->GetTrueVSize() / vdim;   // local scalar true size
+    const auto ord = fes->GetOrdering();
+
+    auto get_comp = [&](const double *D, int i, int c)->double {
+        // i in [0, tloc), c in [0, vdim)
+        if (ord == mfem::Ordering::byNODES) {      // XXX..., YYY..., ZZZ...
+            return D[i + c * tloc];
+        } else {                                    // byVDIM: XYZ, XYZ, ...
+            return D[c + i * vdim];
         }
-        seen_coords.insert(coord_str);
+    };
 
-        Vector vel_val(vdim);
-        sol->GetVectorValue(*Trans,ip,vel_val);
+    // ---- 4) Endpoint snapping (both ends) + mirroring both directions
+    mfem::Vector bbmin(sdim), bbmax(sdim);
+    pmesh->GetBoundingBox(bbmin, bbmax);
+    const double ax = bbmin(0), bx = bbmax(0);
+    const double ay = bbmin(1), by = bbmax(1);
+    const double az = bbmin(2), bz = bbmax(2);
+    const double ex = 1e-12 * std::max(1.0, bx - ax);
+    const double ey = 1e-12 * std::max(1.0, by - ay);
+    const double ez = 1e-12 * std::max(1.0, bz - az);
 
-        local_x.push_back(phys_pt[0]);
-        local_y.push_back(phys_pt[1]);
-        local_z.push_back(phys_pt[2]);
-        local_velx.push_back(vel_val[0]);
-        local_vely.push_back(vel_val[1]);
-        local_velz.push_back(vel_val[2]);
-      }
-   }
+    auto snap = [](double &x, double a, double b, double eps){
+        if (std::abs(x - a) <= eps) x = a;
+        else if (std::abs(x - b) <= eps) x = b;
+    };
 
-   int local_unique = local_x.size();
-   
-   if (rank == 0) {
-       mfem::out << "Phase 1 complete: Local deduplication\n";
-       mfem::out << "  Rank 0: " << local_total_dofs << " total, " 
-                 << local_unique << " unique, " << local_duplicates << " local duplicates\n";
-   }
+    // Build per-rank data payload (no header here)
+    std::ostringstream data_ss;
+    data_ss.setf(std::ios::scientific);
+    data_ss << std::setprecision(16);
 
-   // Phase 2: Gather all locally unique data to root for global deduplication
-   
-   // First, gather the counts from all processors
-   std::vector<int> all_counts(size);
-   MPI_Gather(&local_unique, 1, MPI_INT, all_counts.data(), 1, MPI_INT, 0, comm);
-   
-   // Calculate displacements for gathering variable-length data
-   std::vector<int> displs(size);
-   int total_gathered = 0;
-   if (rank == 0) {
-       for (int i = 0; i < size; ++i) {
-           displs[i] = total_gathered;
-           total_gathered += all_counts[i];
-       }
-       mfem::out << "Phase 2: Gathering " << total_gathered << " locally unique DOFs to root\n";
-   }
-   
-   // Prepare arrays to receive all data on root
-   std::vector<double> all_x, all_y, all_z;
-   std::vector<double> all_velx, all_vely, all_velz;
-   
-   if (rank == 0) {
-       all_x.resize(total_gathered);
-       all_y.resize(total_gathered);
-       all_z.resize(total_gathered);
-       all_velx.resize(total_gathered);
-       all_vely.resize(total_gathered);
-       all_velz.resize(total_gathered);
-   }
-   
-   // Gather all coordinate and velocity data to root
-   MPI_Gatherv(local_x.data(), local_unique, MPI_DOUBLE,
-               all_x.data(), all_counts.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_y.data(), local_unique, MPI_DOUBLE,
-               all_y.data(), all_counts.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_z.data(), local_unique, MPI_DOUBLE,
-               all_z.data(), all_counts.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_velx.data(), local_unique, MPI_DOUBLE,
-               all_velx.data(), all_counts.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_vely.data(), local_unique, MPI_DOUBLE,
-               all_vely.data(), all_counts.data(), displs.data(), MPI_DOUBLE, 0, comm);
-   MPI_Gatherv(local_velz.data(), local_unique, MPI_DOUBLE,
-               all_velz.data(), all_counts.data(), displs.data(), MPI_DOUBLE, 0, comm);
+    auto emit_line = [&](double Xx, double Xy, double Xz,
+                         double Ux, double Uy, double Uz)
+    {
+        data_ss << std::setw(20) << Xx << " "
+                << std::setw(20) << Xy << " "
+                << std::setw(20) << Xz << " "
+                << std::setw(20) << Ux << " "
+                << std::setw(20) << Uy << " "
+                << std::setw(20) << Uz << "\n";
+    };
 
-   // Phase 3: Root processor does global deduplication
-   std::vector<double> final_x, final_y, final_z;
-   std::vector<double> final_velx, final_vely, final_velz;
-   int global_duplicates = 0;
-   int expected_total_dofs = 0;  // Will be calculated on root
-   
-   if (rank == 0) {
-       mfem::out << "Phase 3: Global deduplication on root processor\n";
-       
-       // Calculate expected count dynamically
-       int num_pts_per_dir = GetNumPts(ctx);  
-       int order = GetOrder(ctx);              
-       int expected_coords_per_dir = num_pts_per_dir * order + 1;
-       expected_total_dofs = expected_coords_per_dir * expected_coords_per_dir * expected_coords_per_dir;
-       
-       std::set<std::string> global_seen;
-       
-       for (int i = 0; i < total_gathered; ++i) {
-           std::string coord_str = coord_key(all_x[i], all_y[i], all_z[i]);
-           
-           if (global_seen.find(coord_str) != global_seen.end()) {
-               global_duplicates++;
-               continue; // Skip global duplicate
-           }
-           global_seen.insert(coord_str);
-           
-           // Keep this globally unique DOF
-           final_x.push_back(all_x[i]);
-           final_y.push_back(all_y[i]);
-           final_z.push_back(all_z[i]);
-           final_velx.push_back(all_velx[i]);
-           final_vely.push_back(all_vely[i]);
-           final_velz.push_back(all_velz[i]);
-       }
-       
-       int final_count = final_x.size();
-       
-       mfem::out << "Global Deduplication Results:\n";
-       mfem::out << "  Mesh: " << GetNumPts(ctx) << "^3 elements, Order " << GetOrder(ctx) << "\n";
-       mfem::out << "  Expected coords per direction: " << (GetNumPts(ctx) * GetOrder(ctx) + 1) << "\n";
-       mfem::out << "  Total gathered: " << total_gathered << "\n";
-       mfem::out << "  Global duplicates removed: " << global_duplicates << "\n";
-       mfem::out << "  Final unique DOFs: " << final_count << "\n";
-       mfem::out << "  Target (calculated): " << expected_total_dofs << "\n";
-       mfem::out << "  Accuracy: " << (100.0 * final_count / (double)expected_total_dofs) << "%\n";
-       mfem::out << "  Perfect deduplication: " << (final_count == expected_total_dofs ? "YES" : "NO") << "\n";
-   }
+    for (int i = 0; i < tloc; ++i) {
+        // Base (true DOF) values
+        double Xx = get_comp(X, i, 0);
+        double Xy = get_comp(X, i, 1);
+        double Xz = get_comp(X, i, 2);
+        const double Ux = get_comp(U, i, 0);
+        const double Uy = get_comp(U, i, 1);
+        const double Uz = get_comp(U, i, 2);
 
-   // Phase 4: Root writes the final deduplicated file
-   if (rank == 0) {
-       std::ofstream outfile(fname);
-       outfile << std::scientific << std::setprecision(16);
-       
-       outfile << "3D Taylor Green Vortex (Perfect MPI Deduplication)\n"
-               << "Order = " << GetOrder(ctx) << "\n"
-               << "Step = " << step << " "
-               << "Time = " << time << "\n"
-               << "Global unique DOFs = " << final_x.size() << " (target: " << expected_total_dofs << ")\n"
-               << "==================================================================="
-               << "==========================================================================\n"
-               << "            x                      y                      z                   vecx                   vecy                   vecz\n";
-       
-       for (size_t i = 0; i < final_x.size(); i++) {
-           outfile << std::setw(20) << final_x[i] << " "
-                   << std::setw(20) << final_y[i] << " "
-                   << std::setw(20) << final_z[i] << " "
-                   << std::setw(20) << final_velx[i] << " "
-                   << std::setw(20) << final_vely[i] << " "
-                   << std::setw(20) << final_velz[i] << "\n";
-       }
-       
-       outfile.close();
-       std::cout << "Perfect deduplicated file saved: " << fname << std::endl;
-   }
+        // Snap to exact endpoints (but keep whichever side they already are on)
+        snap(Xx, ax, bx, ex);
+        snap(Xy, ay, by, ey);
+        snap(Xz, az, bz, ez);
 
-   MPI_Barrier(MPI_COMM_WORLD);
+        // Determine if each coord is at an endpoint
+        const bool at_ax = std::abs(Xx - ax) <= ex;
+        const bool at_bx = std::abs(Xx - bx) <= ex;
+        const bool at_ay = std::abs(Xy - ay) <= ey;
+        const bool at_by = std::abs(Xy - by) <= ey;
+        const bool at_az = std::abs(Xz - az) <= ez;
+        const bool at_bz = std::abs(Xz - bz) <= ez;
+
+        // Emit the base point
+        emit_line(Xx, Xy, Xz, Ux, Uy, Uz);
+
+        // Mirror rules (both directions):
+        // If at 'a', also emit at 'b' (same y,z); if at 'b', also emit at 'a'.
+        auto mirror_if = [&](bool cond, double a, double b, double &coord,
+                             double cx, double cy, double cz)
+        {
+            if (cond) {
+                double mcoord = (std::abs(coord - a) <= 1e-300 ? b : a);
+                emit_line( ( &coord==&Xx ? mcoord : cx ),
+                           ( &coord==&Xy ? mcoord : cy ),
+                           ( &coord==&Xz ? mcoord : cz ),
+                           Ux, Uy, Uz);
+            }
+        };
+
+        // Mirror along each axis independently (faces)
+        if (at_ax || at_bx) { double cx=Xx, cy=Xy, cz=Xz; double &ref=Xx;
+            if (at_ax) { double tmp = bx; emit_line(tmp, cy, cz, Ux, Uy, Uz); }
+            if (at_bx) { double tmp = ax; emit_line(tmp, cy, cz, Ux, Uy, Uz); }
+        }
+        if (at_ay || at_by) { double cx=Xx, cy=Xy, cz=Xz;
+            if (at_ay) { double tmp = by; emit_line(cx, tmp, cz, Ux, Uy, Uz); }
+            if (at_by) { double tmp = ay; emit_line(cx, tmp, cz, Ux, Uy, Uz); }
+        }
+        if (at_az || at_bz) { double cx=Xx, cy=Xy, cz=Xz;
+            if (at_az) { double tmp = bz; emit_line(cx, cy, tmp, Ux, Uy, Uz); }
+            if (at_bz) { double tmp = az; emit_line(cx, cy, tmp, Ux, Uy, Uz); }
+        }
+
+        // Edges/corners: if multiple coords are at endpoints, emit the cross-combinations.
+        // This ensures full population of the closed tensor grid.
+        auto vec = [&](bool a0,bool b0,double aV,double bV,double base)->std::vector<double>{
+            std::vector<double> out{base};
+            if (a0) out.push_back(bV);
+            if (b0) out.push_back(aV);
+            return out;
+        };
+        const std::vector<double> Xxv = vec(at_ax, at_bx, ax, bx, Xx);
+        const std::vector<double> Xyv = vec(at_ay, at_by, ay, by, Xy);
+        const std::vector<double> Xzv = vec(at_az, at_bz, az, bz, Xz);
+
+        for (double xx : Xxv)
+        for (double yy : Xyv)
+        for (double zz : Xzv)
+        {
+            // Skip the base point; it was already emitted.
+            if (xx==Xx && yy==Xy && zz==Xz) continue;
+            emit_line(xx, yy, zz, Ux, Uy, Uz);
+        }
+    }
+
+    const std::string data = data_ss.str();
+
+    // ---- 5) Header (rank 0 only)
+    std::string header;
+    if (rank == 0) {
+        std::ostringstream h;
+        h.setf(std::ios::scientific); h << std::setprecision(16);
+        h << "3D Taylor Green Vortex\n"
+          << "Order = " << GetOrder(ctx) << ", Over sample = " << GetOverSample(ctx) << "\n"
+          << "Step = " << step << "\n"
+          << "Time = " << std::scientific << std::setprecision(16) << time << "\n"
+          << "==================================================================="
+          << "==========================================================================\n"
+          << "            x                      y                      z                   vecx                   vecy                   vecz\n";
+        header = h.str();
+    }
+
+    // ---- 6) Two-phase parallel write (header-at-0 + explicit offsets)
+    MPI_File fh;
+    int err = MPI_File_open(comm, fname.c_str(),
+                            MPI_MODE_CREATE | MPI_MODE_WRONLY,
+                            MPI_INFO_NULL, &fh);
+    if (err != MPI_SUCCESS) {
+        if (rank==0) std::cerr << "Error opening " << fname << " with MPI I/O\n";
+        MPI_Abort(comm, 1);
+    }
+
+    MPI_Offset header_bytes = 0;
+    if (rank == 0) {
+        MPI_Status st;
+        MPI_File_write_at(fh, 0, header.data(), (int)header.size(), MPI_CHAR, &st);
+        header_bytes = (MPI_Offset)header.size();
+    }
+    MPI_Bcast(&header_bytes, 1, MPI_OFFSET, 0, comm);
+
+    const MPI_Offset my_bytes = (MPI_Offset)data.size();
+    MPI_Offset my_offset = 0;
+    MPI_Exscan(&my_bytes, &my_offset, 1, MPI_OFFSET, MPI_SUM, comm);
+    if (rank == 0) my_offset = 0;
+
+    MPI_Status st;
+    MPI_File_write_at_all(fh, header_bytes + my_offset,
+                          data.data(), (int)my_bytes, MPI_CHAR, &st);
+
+    MPI_File_close(&fh);
+
+    if (rank == 0) {
+        std::cout << "Sampled closed-domain DOF data saved: " << fname << std::endl;
+    }
 }*/
 
-
 /*
-// Loop through each element and save each dof using an integration rule
-void SamplePointsAtDoFs(ParGridFunction      *sol,
-                        ParMesh              *pmesh,
-                        int                   step,
-                        double                time,
-                        const std::string    &suffix,
-                        const s_NavierContext* ctx)
-{
-   // MPI setup
-   MPI_Comm comm = pmesh->GetComm();
-   int rank, size;
-   MPI_Comm_rank(comm, &rank);
-   MPI_Comm_size(comm, &size);
-
-   // Construct the main directory name with suffix
-   std::string main_dir = "SamplePointsAtDofs" + suffix +
-                          "_Re" + std::to_string(static_cast<int>(GetReynum(ctx))) +
-                          "NumPtsPerDir" + std::to_string(GetNumPts(ctx)) +
-                   + "RefLv" + std::to_string(GetElementSubdivisions(ctx) + GetElementSubdivisionsParallel(ctx))
-                   + "P" + std::to_string(GetOrder(ctx));
-
-   // Create subdirectory for this cycle step
-   std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
-   // Construct the filename inside the cycle directory
-   std::string fname = cycle_dir + "/SampledData" + std::to_string(step) + ".txt";
-
-   // Create directories on rank 0
-   if (rank == 0)
-   {
-      if (system(("mkdir -p " + main_dir).c_str()) != 0)
-         std::cerr << "Error creating " << main_dir << " directory!" << std::endl;
-      if (system(("mkdir -p " + cycle_dir).c_str()) != 0)
-         std::cerr << "Error creating " << cycle_dir << " directory!" << std::endl;
-   }
-
-   // Synchronize all ranks before proceeding
-   MPI_Barrier(MPI_COMM_WORLD);
-
-   // Local arrays to store data from the local elements
-   std::vector<double> local_x, local_y, local_z;
-   std::vector<double> local_velx, local_vely, local_velz;
-
-   mfem::FiniteElementSpace *fes = sol->FESpace();
-   int vdim = fes->GetVDim();
-
-   // Get element information
-   const FiniteElement *fe = fes->GetFE(0);
-   const IntegrationRule &fe_nodes = fe->GetNodes();
-   const int NPoints = fe_nodes.GetNPoints();
-   const int NElements = pmesh->GetNE();
-
-   // Loop over local elements
-   for (int e = 0; e < pmesh->GetNE(); e++)
-   {
-      // Get element transformation for element e
-      mfem::ElementTransformation *Trans = pmesh->GetElementTransformation(e);
-
-      for (int i = 0; i < fe_nodes.GetNPoints(); ++i){
-        const IntegrationPoint &ip = fe_nodes.IntPoint(i);
-
-        Trans->SetIntPoint(&ip);
-        Vector phys_pt;
-        Trans->Transform(ip,phys_pt);
-
-        Vector vel_val(vdim);
-        sol->GetVectorValue(*Trans,ip,vel_val);
-
-        local_x.push_back(phys_pt[0]);
-        local_y.push_back(phys_pt[1]);
-        local_z.push_back(phys_pt[2]);
-        local_velx.push_back(vel_val[0]);
-        local_vely.push_back(vel_val[1]);
-        local_velz.push_back(vel_val[2]);
-      }
-   }
-      
-   // Prepare the data string, including the header on rank 0
-   std::string data_str;
-   if (rank == 0)
-   {
-      std::ostringstream header_stream;
-      header_stream << "3D Taylor Green Vortex\n"
-                    << "Order = " << GetOrder(ctx) << "\n"
-                    << "Step = " << step << "\n"
-                    << "Time = " << std::scientific << std::setprecision(16) << time << "\n"
-                    << "==================================================================="
-                    << "==========================================================================\n"
-                    << "            x                      y                      z                   vecx                   vecy                   vecz\n";
-      data_str = header_stream.str();
-   }
-
-   // Append local data to data_str
-   std::ostringstream local_data_stream;
-   for (size_t i = 0; i < local_x.size(); i++)
-   {
-      local_data_stream << std::scientific << std::setprecision(16)
-                        << std::setw(20) << local_x[i] << " "
-                        << std::setw(20) << local_y[i] << " "
-                        << std::setw(20) << local_z[i] << " "
-                        << std::setw(20) << local_velx[i] << " "
-                        << std::setw(20) << local_vely[i] << " "
-                        << std::setw(20) << local_velz[i] << "\n";
-   }
-   data_str += local_data_stream.str();
-
-   // Open the file collectively with MPI I/O
-   MPI_File fh;
-   int err = MPI_File_open(comm, fname.c_str(), MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
-   if (err != MPI_SUCCESS)
-   {
-      if (rank == 0) std::cerr << "Error opening file " << fname << " with MPI I/O" << std::endl;
-      MPI_Abort(comm, 1);
-   }
-
-   // All ranks write their data (including header on rank 0) in order using the shared file pointer
-   MPI_File_write_ordered(fh, data_str.c_str(), data_str.size(), MPI_CHAR, MPI_STATUS_IGNORE);
-
-   // Clear memory
-   local_x.clear(); local_y.clear(); local_z.clear();
-   local_velx.clear(); local_vely.clear(); local_velz.clear();
-   data_str.clear();
-
-   // Close the file
-   MPI_File_close(&fh);
-
-   // Output confirmation on rank 0
-   if (rank == 0)
-      std::cout << "Sampled data file saved: " << fname << std::endl;
-
-   // Final synchronization
-   MPI_Barrier(MPI_COMM_WORLD);
-}
-*/
-
 // Parell version of extracting unique dofs, but 
 // only works in serial.
 void SamplePointsAtDoFs(ParGridFunction      *sol,
@@ -760,125 +805,8 @@ void SamplePointsAtDoFs(ParGridFunction      *sol,
           << std::setw(20) << vel_data[i+2*scalar_true_dofs]       << "\n";
   }
   out.close();
-}
+}*/
  
-
-/*
-// This serial version works
-void SamplePointsAtDoFs(ParGridFunction      *sol,
-                        ParMesh              *pmesh,
-                        int                   step,
-                        double                time,
-                        const std::string    &suffix,
-                        const s_NavierContext* ctx)
-{
-   ParFiniteElementSpace *vfes = sol->ParFESpace();
-   MPI_Comm comm = vfes->GetComm();
-   int rank; MPI_Comm_rank(comm, &rank);
-
-   const int scalar_dofs = vfes->GetNDofs();
-
-   VectorFunctionCoefficient position_coeff(3,
-      [](const Vector &x, Vector &y){ y = x; });
-
-   ParGridFunction position_gf(vfes);
-   position_gf.ProjectCoefficient(position_coeff);
-
-   std::unique_ptr<HypreParVector> vel_tdof (sol->GetTrueDofs());
-   std::unique_ptr<HypreParVector> pos_tdof (position_gf.GetTrueDofs());
-
-   const double *vel_data = vel_tdof->Read();
-   const double *pos_data = pos_tdof->Read();
-   
-   // vel_tdof, xyz_tdof are HypreParVector* (by-VDIM ordering assumed)
-   auto vel = std::unique_ptr<Vector>(vel_tdof->GlobalVector());
-   auto xyz = std::unique_ptr<Vector>(pos_tdof->GlobalVector());
-
-   const double *V = vel->Read();              // [   u …   v …   w … ]
-   const double *X = xyz->Read();              // [   x …   y …   z … ]
-   const HYPRE_BigInt n = vel->Size() / 3;     // DOFs per component
-   
-   std::ofstream out("samples.txt");
-   out << std::scientific << std::setprecision(16);
-   out << "# x               y               z               "
-          "u               v               w\n";
-   
-   for (int i = 0; i < n; ++i)
-   {
-       out << std::setw(20) << X[i]           << " "
-           << std::setw(20) << X[i+n]         << " "
-           << std::setw(20) << X[i+2*n]       << " "
-           << std::setw(20) << V[i]           << " "
-           << std::setw(20) << V[i+n]         << " "
-           << std::setw(20) << V[i+2*n]       << "\n";
-   }
-
-
-   // std::vector<double> all_x(scalar_dofs), all_y(scalar_dofs), all_z(scalar_dofs);
-   // std::vector<double> all_u(scalar_dofs), all_v(scalar_dofs), all_w(scalar_dofs);
-
-   // for (int i = 0; i < scalar_dofs; ++i)
-   // {
-   //    all_x[i] = pos_data[i];
-   //    all_y[i] = pos_data[i + scalar_dofs];
-   //    all_z[i] = pos_data[i + 2*scalar_dofs];
-
-   //    all_u[i] = vel_data[i];
-   //    all_v[i] = vel_data[i + scalar_dofs];
-   //    all_w[i] = vel_data[i + 2*scalar_dofs];
-   // }
-
-   // std::string main_dir = "SamplePointsAtDofs" + suffix +
-   //     "_Re" + std::to_string(static_cast<int>(GetReynum(ctx))) +
-   //     "NumPtsPerDir" + std::to_string(GetNumPts(ctx)) +
-   //     "RefLv" + std::to_string(GetElementSubdivisions(ctx) +
-   //                              GetElementSubdivisionsParallel(ctx)) +
-   //     "P" + std::to_string(GetOrder(ctx));
-
-   // std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
-   // std::string fname     = cycle_dir + "/SampledData" + std::to_string(step) + ".txt";
-
-   // if (rank == 0)
-   // {
-   //    if (system(("mkdir -p " + cycle_dir).c_str()) != 0)
-   //       std::cerr << "Error creating " << cycle_dir << std::endl;
-   // }
-   // MPI_Barrier(comm);   // ensure directory exists before any rank opens file
-
-   // if (rank == 0)
-   // {
-   //    std::ofstream outfile(fname);
-   //    if (!outfile.is_open())
-   //    {
-   //       std::cerr << "Error opening file " << fname << std::endl;
-   //       return;
-   //    }
-
-   //    outfile << std::scientific << std::setprecision(16);
-   //    outfile << "3D Taylor Green Vortex (PARALLEL true-DOFs)\n"
-   //            << "Order = " << GetOrder(ctx) << " (sampling at DoFs)\n"
-   //            << "Step = "  << step << ", Time = " << time << ", "
-   //            << "Total DOFs per component = " << scalar_dofs << "\n"
-   //            << "====================================================================================\n"
-   //            << "            x                      y                      z"
-   //            << "                   valx                   valy                   valz\n";
-
-   //    for (int i = 0; i < scalar_dofs; ++i)
-   //    {
-   //       outfile << std::setw(20) << all_x[i] << " "
-   //               << std::setw(20) << all_y[i] << " "
-   //               << std::setw(20) << all_z[i] << " "
-   //               << std::setw(20) << all_u[i] << " "
-   //               << std::setw(20) << all_v[i] << " "
-   //               << std::setw(20) << all_w[i] << "\n";
-   //    }
-   //    std::cout << "Sampled data file saved: " << fname << std::endl;
-   // }
-}
-*/
-
-
-
 
 /*
 // -------------------------------------------------------------
