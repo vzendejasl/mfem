@@ -16,12 +16,16 @@ void project_Hdiv_to_L2(ParGridFunction &result,
                         ParFiniteElementSpace *test_fes,   // vector L2(DG) target
                         bool pa);
 void compute_Curl_Hcurl_to_Hdiv(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  
-                        ParGridFunction &gftest, ParFiniteElementSpace *test_fes, bool pa);
-
+                         ParFiniteElementSpace *test_fes, bool pa);
+void compute_div_Hdiv_to_L2(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  
+                        ParFiniteElementSpace *test_fes, bool pa);
+// void compute_Curl_H1_to_HCurl(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  
+//                         ParFiniteElementSpace *test_fes, bool pa);
 real_t freq = 1.0, kappa;
 int dim;
 
-void project_Hcurl_Hdiv(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  ParGridFunction &gftest, ParFiniteElementSpace *test_fes, bool pa);
+void project_Hcurl_Hdiv(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes, 
+                        ParFiniteElementSpace *test_fes, bool pa);
 void project_H1_to_Hcurl(ParGridFunction &result, 
    ParGridFunction &gftrial, 
    ParFiniteElementSpace *trial_fes,  
@@ -168,15 +172,6 @@ int main(int argc, char *argv[])
    ParGridFunction curl_Ah_exact_hdiv(rt_fespace);
    curl_Ah_exact_hdiv.ProjectCoefficient(curl_A_exact_coeff);
 
-   // Create operators
-
-   // Applying this operator is going to move the object from 
-   // H(curl)->H(div) (nd to rt fespace)
-   ParDiscreteLinearOperator curl_op(nd_fespace, rt_fespace);
-   curl_op.AddDomainInterpolator(new CurlInterpolator);
-   curl_op.Assemble();
-   curl_op.Finalize();
-
    VectorFunctionCoefficient u_coeff(sdim, u_exact);
 
    // Define u in H(curl)
@@ -191,14 +186,7 @@ int main(int argc, char *argv[])
    ParGridFunction curl_u_hdiv(rt_fespace);
    
    // // Apply curl operator to u_hcurl
-   // curl_op.Mult(u_hcurl, curl_u_hdiv);
-
-   // You can use an existing H(div) grid function or create a temporary one
-   ParGridFunction temp_hdiv_test(rt_fespace);  // temporary test function
-   temp_hdiv_test = 0.0;  // initialize
-   
-   compute_Curl_Hcurl_to_Hdiv(curl_u_hdiv, u_hcurl, nd_fespace, temp_hdiv_test, rt_fespace, pa);
-   // compute_Curl_Hcurl_to_Hdiv(curl_u_hdiv, u_hcurl, nd_fespace, rt_fespace)
+   compute_Curl_Hcurl_to_Hdiv(curl_u_hdiv, u_hcurl, nd_fespace, rt_fespace, pa);
 
    // Project the curl of u that is in H(div) to H(curl) space
    // to use as the rhs of the linear solve
@@ -218,7 +206,7 @@ int main(int argc, char *argv[])
    // H(curl) from the trial space H(div)
    // Note that the trial space needs to not be empyt ie.
    // be projected to
-   project_Hcurl_Hdiv(curl_u_hcurl_l2_project, curl_u_hdiv, rt_fespace, u_hcurl, nd_fespace, pa);
+   project_Hcurl_Hdiv(curl_u_hcurl_l2_project, curl_u_hdiv, rt_fespace, nd_fespace, pa);
 
    // Project the exact space for comparison later
    VectorFunctionCoefficient curl_u_coeff_exact(dim, w_exact);
@@ -337,8 +325,7 @@ int main(int argc, char *argv[])
 
    // Compute curl of Ah in H(div)
    ParGridFunction curl_Ah_hdiv(rt_fespace);
-   // curl_op.Mult(x, curl_Ah_hdiv);
-   compute_Curl_Hcurl_to_Hdiv(curl_Ah_hdiv, x, nd_fespace, temp_hdiv_test, rt_fespace, pa);
+   compute_Curl_Hcurl_to_Hdiv(curl_Ah_hdiv, x, nd_fespace, rt_fespace, pa);
 
    ParGridFunction div_Ah_hdiv(rt_fespace);
    ParGridFunction Ah_hdiv(rt_fespace);
@@ -346,24 +333,16 @@ int main(int argc, char *argv[])
 
    // The test space which is being projected to is
    // H(div) from the trial space H(curl)
-   project_Hcurl_Hdiv(Ah_hdiv, x, nd_fespace, Ah_hcurl, rt_fespace, pa);
-
-   // Option 1: Use a Linear Interpolator to compute curl A in H(div)
+   project_Hcurl_Hdiv(Ah_hdiv, x, nd_fespace, rt_fespace, pa);
 
    // Set \nabla \cdot (\nabla \times Ah) to be in L2
-   ParGridFunction div_curl_Ah(l2_fespace_scalar);
-   ParDiscreteLinearOperator div_op(rt_fespace, l2_fespace_scalar);
-   div_op.AddDomainInterpolator(new DivergenceInterpolator);
-   div_op.Assemble();
-   div_op.Finalize();
-
    // Compute \nabla \cdot (\nabla \times Ah) in H(div)
    ParGridFunction div_curl_Ah_l2(l2_fespace_scalar);
-   div_op.Mult(curl_Ah_hdiv, div_curl_Ah_l2);
 
    ParGridFunction div_Ah_l2(l2_fespace_scalar);
-   div_op.Mult(Ah_hdiv, div_Ah_l2);
 
+   compute_div_Hdiv_to_L2(div_curl_Ah_l2, curl_Ah_hdiv, rt_fespace,l2_fespace_scalar,pa);
+   compute_div_Hdiv_to_L2(div_Ah_l2, Ah_hdiv, rt_fespace,l2_fespace_scalar,pa);
 
    // Project curl Ah to L2 space
    ParGridFunction grad_phi_l2(l2_fespace_vector);
@@ -371,21 +350,11 @@ int main(int argc, char *argv[])
 
    // VectorGridFunctionCoefficient curl_Ah_l2_coeff(&curl_Ah_hdiv);
    ParGridFunction curl_Ah_l2(l2_fespace_vector);
-   // curl_Ah_l2.ProjectCoefficient(curl_Ah_l2_coeff);
    project_Hdiv_to_L2(curl_Ah_l2, curl_Ah_hdiv,l2_fespace_vector,pa);
 
    grad_phi_l2 = u_l2;
    grad_phi_l2 -= curl_Ah_l2;
 
-
-   // // Project to grad phi_l2 and curl_Ah_l2 to H1
-   // ParGridFunction grad_phi_h1(h1_fespace_vector);
-   // ParGridFunction curl_Ah_h1(h1_fespace_vector);
-
-   // // Note that here we are using a Project Call
-   // grad_phi_h1.ProjectGridFunction(grad_phi_l2);
-   // curl_Ah_h1.ProjectGridFunction(curl_Ah_l2);
-  
    // Project to grad phi_l2 and curl_Ah_l2 to H1
    ParGridFunction grad_phi_h1(h1_fespace_vector);
    ParGridFunction curl_Ah_h1(h1_fespace_vector);
@@ -401,18 +370,30 @@ int main(int argc, char *argv[])
    ParGridFunction curl_Ah_hcurl_l2_project(nd_fespace);
    project_H1_to_Hcurl(curl_Ah_hcurl_l2_project, curl_Ah_h1, h1_fespace_vector, nd_fespace, pa);
 
+   grad_phi_hcurl = 0.0;
+   project_H1_to_Hcurl(grad_phi_hcurl, grad_phi_h1, h1_fespace_vector, nd_fespace,pa);
+
+   ParGridFunction curl_grad_phi_hdiv(rt_fespace);
+   curl_grad_phi_hdiv = 0.0;
+   compute_Curl_Hcurl_to_Hdiv(curl_grad_phi_hdiv,grad_phi_hcurl,nd_fespace,rt_fespace,pa);
+
    // 15. Compute and print the L^2 norm of the error.
    {
       real_t error = x.ComputeL2Error(A_coeff);
-
       // Discretely this operation should be zero
       ConstantCoefficient zero(0.0);
+
+      Vector zero_v(dim);
+      zero_v = 0.0;
+      VectorConstantCoefficient zero_vec(zero_v);
+
       double div_curl_A_error = div_curl_Ah_l2.ComputeL2Error(zero);
       double div_A_error = div_Ah_l2.ComputeL2Error(zero);
       double grad_phi_error = grad_phi_l2.ComputeL2Error(grad_phi_coeff);
       double curl_Ah_l2_error = curl_Ah_l2.ComputeL2Error(curl_A_exact_coeff);
       double grad_phi_error_h1 = grad_phi_h1.ComputeL2Error(grad_phi_coeff);
       double curl_Ah_h1_error = curl_Ah_h1.ComputeL2Error(curl_A_exact_coeff);
+      double curl_grad_phi_hdiv_error = curl_grad_phi_hdiv.ComputeL2Error(zero_vec);
 
       if (myid == 0)
       {
@@ -423,6 +404,7 @@ int main(int argc, char *argv[])
          cout << "curl Ah L2 norm: " << curl_Ah_l2_error << endl;
          cout << "grad_phi H1 L2 norm: " << grad_phi_error_h1 << endl;
          cout << "curl Ah H1 L2 norm: " << curl_Ah_h1_error << endl;
+         cout << "curl grad phi Hdiv L2 norm: " << curl_grad_phi_hdiv_error << endl;
       }
    }
 
@@ -479,6 +461,7 @@ int main(int argc, char *argv[])
     dc.RegisterField("curl_Ah_hdiv", &curl_Ah_hdiv);
     dc.RegisterField("curl_Ah_h1", &curl_Ah_h1);
     dc.RegisterField("curl_Ah_hcurl", &curl_Ah_hcurl_l2_project);
+    dc.RegisterField("div_curl_Ah_l2", &div_curl_Ah_l2);
 
     dc.RegisterField("curl_u_computed", &curl_u_hcurl);
     dc.RegisterField("curl_u_hdiv", &curl_u_hdiv);
@@ -489,6 +472,7 @@ int main(int argc, char *argv[])
     dc.RegisterField("grad_phi_exact_h1",   &grad_phi_exact_h1);
     dc.RegisterField("grad_phi_l2",    &grad_phi_l2);
     dc.RegisterField("grad_phi_h1",    &grad_phi_h1);
+    dc.RegisterField("curl_grad_phi_hdiv", &curl_grad_phi_hdiv);
     
     dc.Save();
 
@@ -566,7 +550,7 @@ void u_exact(const Vector &x, Vector &A)
 
 // The test space is what you are projecting to and the trial space is where you are projecting from
 void project_Hcurl_Hdiv(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  
-                        ParGridFunction &gftest, ParFiniteElementSpace *test_fes, bool pa)
+                        ParFiniteElementSpace *test_fes, bool pa)
 {
    ParBilinearForm *a = new ParBilinearForm(test_fes);
    if (pa) { a->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
@@ -644,7 +628,7 @@ void project_Hcurl_Hdiv(ParGridFunction &result, ParGridFunction &gftrial, ParFi
 
 // The test space is what you are projecting to and the trial space is where you are projecting from
 void compute_Curl_Hcurl_to_Hdiv(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  
-                        ParGridFunction &gftest, ParFiniteElementSpace *test_fes, bool pa)
+                        ParFiniteElementSpace *test_fes, bool pa)
 {
    ParBilinearForm *a = new ParBilinearForm(test_fes);
    if (pa) { a->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
@@ -831,84 +815,81 @@ void project_H1_to_Hcurl(ParGridFunction &result,          // in ND space (outpu
    result.SetFromTrueDofs(X);
 }
 
+// The test space is what you are projecting to and the trial space is where you are projecting from
+void compute_div_Hdiv_to_L2(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  
+                        ParFiniteElementSpace *test_fes, bool pa)
+{
+   ParBilinearForm *a = new ParBilinearForm(test_fes);
+   if (pa) { a->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+   a->AddDomainIntegrator(new MassIntegrator());
+   ParMixedBilinearForm *a_mixed = new ParMixedBilinearForm(trial_fes, test_fes);
+   if (pa) {a_mixed->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+   a_mixed->AddDomainIntegrator(new VectorFEDivergenceIntegrator());
 
-// // The test space is what you are projecting to and the trial space is where you are projecting from
-// void project_H1_Hcurl(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  
-//                         ParGridFunction &gftest, ParFiniteElementSpace *test_fes, bool pa)
-// {
-//    ParBilinearForm *a = new ParBilinearForm(test_fes);
-//    if (pa) { a->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-//    a->AddDomainIntegrator(new VectorFEMassIntegrator());
-//    ParMixedBilinearForm *a_mixed = new ParMixedBilinearForm(trial_fes, test_fes);
-//    if (pa) {a_mixed->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-//    a_mixed->AddDomainIntegrator(new VectorMassIntegrator());
-// 
-//    // a_mixed->AddDomainIntegrator(new MixedVectorMassIntegrator());  // More explicit
-// 
-//    a->Assemble();
-//    if(!pa){a->Finalize();}
-// 
-//    a_mixed->Assemble();
-//    if(!pa){a_mixed->Finalize();}
-// 
-//    Vector B(test_fes->GetTrueVSize());
-//    Vector X(test_fes->GetTrueVSize());
-// 
-//    if (pa)
-//    {
-//       ParLinearForm b(test_fes); // used as a vector
-//       a_mixed->Mult(gftrial, b); // process-local multiplication
-//       b.ParallelAssemble(B);
-//    }
-//    else
-//    {
-//       HypreParMatrix *mixed = a_mixed->ParallelAssemble();
-// 
-//       Vector P(trial_fes->GetTrueVSize());
-//       gftrial.GetTrueDofs(P);
-// 
-//       mixed->Mult(P,B);
-// 
-//       delete mixed;
-//    }
-// 
-//     // 11. Define and apply a parallel PCG solver for AX=B with Jacobi
-//    //     preconditioner.
-//    if (pa)
-//    {
-//       Array<int> ess_tdof_list; // empty
-// 
-//       OperatorPtr A;
-//       a->FormSystemMatrix(ess_tdof_list, A);
-// 
-//       OperatorJacobiSmoother Jacobi(*a, ess_tdof_list);
-// 
-//       CGSolver cg(MPI_COMM_WORLD);
-//       cg.SetRelTol(1e-12);
-//       cg.SetMaxIter(1000);
-//       cg.SetPrintLevel(1);
-//       cg.SetOperator(*A);
-//       cg.SetPreconditioner(Jacobi);
-//       X = 0.0;
-//       cg.Mult(B, X);
-//    }
-//    else
-//    {
-//       HypreParMatrix *Amat = a->ParallelAssemble();
-//       HypreDiagScale Jacobi(*Amat);
-//       HyprePCG pcg(*Amat);
-//       pcg.SetTol(1e-12);
-//       pcg.SetMaxIter(1000);
-//       pcg.SetPrintLevel(2);
-//       pcg.SetPreconditioner(Jacobi);
-//       X = 0.0;
-//       pcg.Mult(B, X);
-// 
-//       delete Amat;
-//    }
-// 
-//    result.SetFromTrueDofs(X);
-// }
+   a->Assemble();
+   if(!pa){a->Finalize();}
+
+   a_mixed->Assemble();
+   if(!pa){a_mixed->Finalize();}
+
+   Vector B(test_fes->GetTrueVSize());
+   Vector X(test_fes->GetTrueVSize());
+
+   if (pa)
+   {
+      ParLinearForm b(test_fes); // used as a vector
+      a_mixed->Mult(gftrial, b); // process-local multiplication
+      b.ParallelAssemble(B);
+   }
+   else
+   {
+      HypreParMatrix *mixed = a_mixed->ParallelAssemble();
+
+      Vector P(trial_fes->GetTrueVSize());
+      gftrial.GetTrueDofs(P);
+
+      mixed->Mult(P,B);
+
+      delete mixed;
+   }
+
+    // 11. Define and apply a parallel PCG solver for AX=B with Jacobi
+   //     preconditioner.
+   if (pa)
+   {
+      Array<int> ess_tdof_list; // empty
+
+      OperatorPtr A;
+      a->FormSystemMatrix(ess_tdof_list, A);
+
+      OperatorJacobiSmoother Jacobi(*a, ess_tdof_list);
+
+      CGSolver cg(MPI_COMM_WORLD);
+      cg.SetRelTol(1e-12);
+      cg.SetMaxIter(1000);
+      cg.SetPrintLevel(1);
+      cg.SetOperator(*A);
+      cg.SetPreconditioner(Jacobi);
+      X = 0.0;
+      cg.Mult(B, X);
+   }
+   else
+   {
+      HypreParMatrix *Amat = a->ParallelAssemble();
+      HypreDiagScale Jacobi(*Amat);
+      HyprePCG pcg(*Amat);
+      pcg.SetTol(1e-12);
+      pcg.SetMaxIter(1000);
+      pcg.SetPrintLevel(2);
+      pcg.SetPreconditioner(Jacobi);
+      X = 0.0;
+      pcg.Mult(B, X);
+
+      delete Amat;
+   }
+
+   result.SetFromTrueDofs(X);
+}
 
 
 
