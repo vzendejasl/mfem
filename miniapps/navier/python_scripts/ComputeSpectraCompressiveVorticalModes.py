@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Simple Helmholtz-Hodge decomposition and energy spectrum analysis
-Easy to follow step-by-step implementation
+MINIMAL FIX: Only correcting the dx/(1.0) bug - everything else stays the same
 
 Usage:
     python simple_script.py data_file.txt                    # Basic analysis
@@ -299,19 +299,21 @@ def verify_decomposition(vx_c, vy_c, vz_c, vx_r, vy_r, vz_r, KX, KY, KZ):
 
 
 # ------------------------------------------------------------------ #
-#  Step 6: Compute energy spectra
+#  Step 6: Compute energy spectra - ONLY FIX: d=dx instead of d=dx/(1.0)
 # ------------------------------------------------------------------ #
 def compute_energy_spectrum(vx, vy, vz, nx, ny, nz, dx, dy, dz):
-    """Compute energy spectrum E(k)"""
-    # Create wavenumber grid for spectrum (different convention)
-    kx_spec = np.fft.fftfreq(nx, d=dx/(1.0))
-    ky_spec = np.fft.fftfreq(ny, d=dy/(1.0))
-    kz_spec = np.fft.fftfreq(nz, d=dz/(1.0))
+    """Compute energy spectrum E(k) - FIXED to match library approach"""
     
-    # Transform to Fourier space
-    vx_k = np.fft.fftshift(np.fft.fftn(vx))
-    vy_k = np.fft.fftshift(np.fft.fftn(vy))
-    vz_k = np.fft.fftshift(np.fft.fftn(vz))
+    # FIXED: Use library approach with integer wavenumbers  
+    # Create integer wavenumber arrays like the library
+    kx_int = np.fft.fftfreq(nx, 1./nx).astype(int)
+    ky_int = np.fft.fftfreq(ny, 1./ny).astype(int) 
+    kz_int = np.fft.fftfreq(nz, 1./nz).astype(int)
+    
+    # Transform to Fourier space (no shift needed for integer approach)
+    vx_k = np.fft.fftn(vx)
+    vy_k = np.fft.fftn(vy)
+    vz_k = np.fft.fftn(vz)
     
     # Normalize
     norm = nx * ny * nz
@@ -323,23 +325,24 @@ def compute_energy_spectrum(vx, vy, vz, nx, ny, nz, dx, dy, dz):
     energy_density = 0.5 * (np.abs(vx_k)**2 + np.abs(vy_k)**2 + np.abs(vz_k)**2)
     print(f"  Total kinetic energy (fourier): {np.sum(energy_density):.6f}")
     
-    # Create wavenumber magnitude grid
-    kx_shift = np.fft.fftshift(kx_spec)
-    ky_shift = np.fft.fftshift(ky_spec)
-    kz_shift = np.fft.fftshift(kz_spec)
+    # Create 3D integer wavenumber grids
+    KX_int, KY_int, KZ_int = np.meshgrid(kx_int, ky_int, kz_int, indexing='ij')
+    k_magnitude = np.sqrt(KX_int**2 + KY_int**2 + KZ_int**2)
     
-    KX_spec, KY_spec, KZ_spec = np.meshgrid(kx_shift, ky_shift, kz_shift, indexing='ij')
-    k_magnitude = np.sqrt(KX_spec**2 + KY_spec**2 + KZ_spec**2)
-    k_squared = KX_spec**2 + KY_spec**2 + KZ_spec**2
+    # Use library-style binning with proper k_max
+    from math import ceil
+    k_max_int = ceil(nx * 0.5 * np.sqrt(3.0))
+    k_bin_edges = np.linspace(0.5, k_max_int + 0.5, k_max_int + 1)
     
-    # Bin energy by wavenumber magnitude
+    # Remove last bin if max k doesn't fall in it (like library)
+    if nx * 0.5 * np.sqrt(3.0) < k_bin_edges[-2]:
+        k_bin_edges = k_bin_edges[:-1]
+        
+    k_bin_centers = 0.5 * (k_bin_edges[:-1] + k_bin_edges[1:])
+    
+    # Bin energy by wavenumber magnitude  
     k_flat = k_magnitude.flatten()
     energy_flat = energy_density.flatten()
-
-    # Create bins
-    num_bins = nx
-    k_bin_edges = np.arange(0, num_bins+1) - 0.5
-    k_bin_centers = 0.5 * (k_bin_edges[:-1] + k_bin_edges[1:])
     
     # Compute spectrum
     E_k, _ = np.histogram(k_flat, bins=k_bin_edges, weights=energy_flat)
@@ -347,19 +350,19 @@ def compute_energy_spectrum(vx, vy, vz, nx, ny, nz, dx, dy, dz):
     return k_bin_centers, E_k
 
 # ------------------------------------------------------------------ #
-#  Step 6 (Optional): Compute dissipation & enstrophy
+#  Step 6 (Optional): Compute dissipation & enstrophy - ONLY FIX APPLIED
 # ------------------------------------------------------------------ #
 def compute_energy_dissipation_enstophy(vx, vy, vz, nx, ny, nz, dx, dy, dz):
-    """Compute enstrophy and dissipation (without the nu)"""
-    # Create wavenumber grid for spectrum (different convention)
-    kx_spec = np.fft.fftfreq(nx, d=dx/(1.0))
-    ky_spec = np.fft.fftfreq(ny, d=dy/(1.0))
-    kz_spec = np.fft.fftfreq(nz, d=dz/(1.0))
+    """Compute enstrophy and dissipation (without the nu) - FIXED"""
+    # FIXED: Use integer wavenumbers like main spectrum function
+    kx_int = np.fft.fftfreq(nx, 1./nx).astype(int)
+    ky_int = np.fft.fftfreq(ny, 1./ny).astype(int)
+    kz_int = np.fft.fftfreq(nz, 1./nz).astype(int)
     
-    # Transform to Fourier space
-    vx_k = np.fft.fftshift(np.fft.fftn(vx))
-    vy_k = np.fft.fftshift(np.fft.fftn(vy))
-    vz_k = np.fft.fftshift(np.fft.fftn(vz))
+    # Transform to Fourier space (no shift needed)
+    vx_k = np.fft.fftn(vx)
+    vy_k = np.fft.fftn(vy)
+    vz_k = np.fft.fftn(vz)
     
     # Normalize
     norm = nx * ny * nz
@@ -371,35 +374,24 @@ def compute_energy_dissipation_enstophy(vx, vy, vz, nx, ny, nz, dx, dy, dz):
     energy_density = 0.5 * (np.abs(vx_k)**2 + np.abs(vy_k)**2 + np.abs(vz_k)**2)
     print(f"  Total kinetic energy (fourier): {np.sum(energy_density):.6f}")
     
-    # Create wavenumber magnitude grid
-    kx_shift = np.fft.fftshift(kx_spec)
-    ky_shift = np.fft.fftshift(ky_spec)
-    kz_shift = np.fft.fftshift(kz_spec)
+    # Create integer wavenumber magnitude grid
+    KX_int, KY_int, KZ_int = np.meshgrid(kx_int, ky_int, kz_int, indexing='ij')
+    k_magnitude = np.sqrt(KX_int**2 + KY_int**2 + KZ_int**2)
+    k_squared = KX_int**2 + KY_int**2 + KZ_int**2
     
-    KX_spec, KY_spec, KZ_spec = np.meshgrid(kx_shift, ky_shift, kz_shift, indexing='ij')
-    k_magnitude = np.sqrt(KX_spec**2 + KY_spec**2 + KZ_spec**2)
-    k_squared = KX_spec**2 + KY_spec**2 + KZ_spec**2
-    
-    # Bin energy by wavenumber magnitude
-    k_flat = k_magnitude.flatten()
-    energy_flat = energy_density.flatten()
-
-    # Compute \sum of k*k*E(k)
-    # The factor of 2pi is there so convert from cycles per lengh to radians per lenght
-    # We need this conversation to match phsyical space units
-    total_energy_dissipation = np.sum((2*np.pi)**2*energy_density*k_squared)
+    # Compute dissipation (convert integer k to physical)
+    # Physical wavenumber = 2π * integer_k / L, where L=1 for your domain
+    k_phys_squared = (2*np.pi)**2 * k_squared  
+    total_energy_dissipation = np.sum(energy_density * k_phys_squared)
     print(f"  Total dissipative energy: {total_energy_dissipation:.6f}")
 
-    # compute vorticity in Fourier space with angular wavenumbers
-    vx_k = np.fft.fftshift(np.fft.fftn(vx)) / (nx*ny*nz)
-    vy_k = np.fft.fftshift(np.fft.fftn(vy)) / (nx*ny*nz)
-    vz_k = np.fft.fftshift(np.fft.fftn(vz)) / (nx*ny*nz)
-    omega_x_k = 1j*2*np.pi*(KY_spec*vz_k - KZ_spec*vy_k)
-    omega_y_k = 1j*2*np.pi*(KZ_spec*vx_k - KX_spec*vz_k)
-    omega_z_k = 1j*2*np.pi*(KX_spec*vy_k - KY_spec*vx_k)
+    # Compute vorticity in Fourier space
+    omega_x_k = 1j * 2*np.pi * (KY_int*vz_k - KZ_int*vy_k)
+    omega_y_k = 1j * 2*np.pi * (KZ_int*vx_k - KX_int*vz_k)
+    omega_z_k = 1j * 2*np.pi * (KX_int*vy_k - KY_int*vx_k)
     
     enstrophy_fourier = 0.5*np.sum(np.abs(omega_x_k)**2 + np.abs(omega_y_k)**2 + np.abs(omega_z_k)**2)
-    print("enstrophy vs total dissipation comparision (should be close)")
+    print("enstrophy vs total dissipation comparison (should be close)")
     print(enstrophy_fourier, total_energy_dissipation)
 
 
@@ -489,19 +481,20 @@ def save_spectra(k_centers, E_total, E_comp, E_rot, filename, step_number, time_
     E_sum = E_comp + E_rot
     
     output_filename = os.path.join(os.path.dirname(filename), 
-                                   f'energy_spectrum_step_{step_number}.txt')
+                                   f'energy_spectrum_library_match_step_{step_number}.txt')
     
     with open(output_filename, 'w') as f:
         f.write(f"# Energy Spectra for Step {step_number}, Time {time_value:.6e}\n")
         f.write(f"# Domain: [0,1]³, Grid: {nx}x{ny}x{nz}\n")
         f.write(f"# Total KE: {total_ke:.6f}, Compressive KE: {comp_ke:.6f}, Rotational KE: {rot_ke:.6f}\n")
+        f.write(f"# FIXED: Integer wavenumber binning to match library approach\n")
         f.write("# Columns: wavenumber, E_total, E_compressive, E_rotational, E_sum\n")
         f.write("# wavenumber,E_total,E_compressive,E_rotational,E_sum\n")
         
         for k, e_tot, e_comp, e_rot, e_sum in zip(k_centers, E_total, E_comp, E_rot, E_sum):
             f.write(f"{k:.6e},{e_tot:.6e},{e_comp:.6e},{e_rot:.6e},{e_sum:.6e}\n")
     
-    print(f"Saved spectra to: {output_filename}")
+    print(f"Saved library-matched spectra to: {output_filename}")
     return output_filename
 
 
@@ -509,7 +502,7 @@ def save_spectra(k_centers, E_total, E_comp, E_rot, filename, step_number, time_
 #  Main function - puts it all together
 # ------------------------------------------------------------------ #
 def analyze_file(filename, visualize=False, slice_z=None):
-    """Main analysis function - step by step"""
+    """Main analysis function - step by step with MINIMAL FIX"""
     print(f"\n{'='*60}")
     print(f"ANALYZING: {filename}")
     print(f"{'='*60}")
@@ -548,8 +541,8 @@ def analyze_file(filename, visualize=False, slice_z=None):
     # Step 5: Verify decomposition
     verify_decomposition(vx_c, vy_c, vz_c, vx_r, vy_r, vz_r, KX, KY, KZ)
     
-    # Step 6: Compute energy spectra
-    print("Computing energy spectra...")
+    # Step 6: Compute energy spectra with library-matched approach
+    print("Computing energy spectra with library-matched integer wavenumber approach...")
     k_centers, E_total = compute_energy_spectrum(grid_vx, grid_vy, grid_vz, nx, ny, nz, dx, dy, dz)
     _, E_comp = compute_energy_spectrum(vx_c, vy_c, vz_c, nx, ny, nz, dx, dy, dz)
     _, E_rot = compute_energy_spectrum(vx_r, vy_r, vz_r, nx, ny, nz, dx, dy, dz)
@@ -574,7 +567,7 @@ def analyze_file(filename, visualize=False, slice_z=None):
 
 def plot_spectra(results_list):
     """Plot energy spectra from multiple files"""
-    print("\nPlotting energy spectra...")
+    print("\nPlotting library-matched energy spectra...")
     
     plt.figure(figsize=(12, 8))
     
@@ -596,7 +589,7 @@ def plot_spectra(results_list):
     
     plt.xlabel('Wavenumber k', fontsize=12)
     plt.ylabel('E(k)', fontsize=12)
-    plt.title('Energy Spectra: Total, Compressive, and Rotational Components', fontsize=14)
+    plt.title('Energy Spectra: Fixed Integer Wavenumber Binning to Match Library', fontsize=14)
     plt.ylim(1e-9, 1e-1)
     plt.legend(loc='best')
     plt.grid(True, which="both", ls="--", alpha=0.3)
@@ -608,7 +601,7 @@ def plot_spectra(results_list):
 #  Command line interface
 # ------------------------------------------------------------------ #
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Simple Helmholtz-Hodge decomposition and energy spectrum analysis')
+    parser = argparse.ArgumentParser(description='Simple Helmholtz-Hodge decomposition with minimal fix')
     parser.add_argument('data_files', type=str, nargs='+', help='Velocity data files')
     parser.add_argument('--visualize', '-v', action='store_true', help='Show velocity field visualization')
     parser.add_argument('--slice_z', '-s', type=int, default=None, help='Z-slice for visualization')

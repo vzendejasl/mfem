@@ -1252,8 +1252,25 @@ int main(int argc, char *argv[])
    {
       args.PrintOptions(mfem::out);
    }
+
+   // K0 = 1.0/L0
+   double L0 = (ctx.problem1) ? 1.0 : 1.0/(2.0*M_PI);
+   double dt_scale = (ctx.problem1) ? 1.0 : 1.0/L0;
+
    // Update kinematic viscosity
-   ctx.kinvis = 1.0 / ctx.reynum;
+   ctx.kinvis = L0 / (ctx.reynum);
+   ctx.dt *=dt_scale;
+   ctx.t_final *=dt_scale;
+
+   if (Mpi::Root())
+   {
+      double Re_eff = L0 / (ctx.kinvis);
+      std::cout << "Configured L0 =" << L0 
+                << ", nu=" << ctx.kinvis
+                << ", dt=" << ctx.dt
+                << ", t_final=" << ctx.t_final
+                << ", effective Re=" << Re_eff << std::endl;
+   }
 
    ParMesh *pmesh = nullptr;
    Mesh *mesh = nullptr;
