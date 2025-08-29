@@ -6,11 +6,19 @@ import argparse
 
 import scipy.stats as stats
 
+# Example run
+# python energy_spectrum.py --domain-0-to-1 file1.txt file2.txt
+
 ### Parse Command-Line Arguments
 parser = argparse.ArgumentParser(description='Compute energy spectrum from velocity data.')
 parser.add_argument('data_files', type=str, nargs='+', help='Path(s) to the data file(s)')
+parser.add_argument('--domain-0-to-1', action='store_true', 
+                    help='Set to True if domain is 0 to 1, False if domain is 0 to 2π (default: False)')
 args = parser.parse_args()
 data_filename = args.data_files
+domain_0_to_1 = args.domain_0_to_1
+
+print(f"Domain type: {'0 to 1' if domain_0_to_1 else '0 to 2π'}")
 
 plt.figure(figsize=(10, 8))
 
@@ -134,14 +142,28 @@ for file_to_extract_data in data_filename:
     energy_density_mean = np.mean(energy_density)*norm_factor
     print(f"  Total Kinetic Energy in Fourier Space (TKE_Fourier): {energy_density_mean:.6f}")
 
-    # Compute wavenumber vectors
+    # Domain is 0 to 1: use regular spacing
     dx = x_unique[1] - x_unique[0]
     dy = y_unique[1] - y_unique[0]
     dz = z_unique[1] - z_unique[0]
+
+    # Compute wavenumber vectors with domain-dependent dx
+    if domain_0_to_1:
+        # Domain is 0 to 1: use regular spacing
+        dx = dx 
+        dy = dy
+        dz = dz
+        print(f"  Using domain 0 to 1: dx = {dx:.6f}")
+    else:
+        # Domain is 0 to 2π: override with 1/(2π)
+        dx = dx / (2.0 * np.pi)
+        dy = dy / (2.0 * np.pi)
+        dz = dz / (2.0 * np.pi)
+        print(f"  Using domain 0 to 2π: dx = {dx:.6f}")
     
-    kx = np.fft.fftfreq(nx, d=dx/(2*np.pi))
-    ky = np.fft.fftfreq(ny, d=dy/(2*np.pi))
-    kz = np.fft.fftfreq(nz, d=dz/(2*np.pi))
+    kx = np.fft.fftfreq(nx, d=dx)
+    ky = np.fft.fftfreq(ny, d=dy)
+    kz = np.fft.fftfreq(nz, d=dz)
 
     kx = np.fft.fftshift(kx)
     ky = np.fft.fftshift(ky)

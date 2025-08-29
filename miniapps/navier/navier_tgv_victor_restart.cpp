@@ -1259,8 +1259,8 @@ int main(int argc, char *argv[])
 
    // Update kinematic viscosity
    ctx.kinvis = L0 / (ctx.reynum);
-   ctx.dt *=dt_scale;
-   ctx.t_final *=dt_scale;
+   ctx.dt /=dt_scale;
+   ctx.t_final /=dt_scale;
 
    if (Mpi::Root())
    {

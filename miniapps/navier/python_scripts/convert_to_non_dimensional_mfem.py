@@ -36,7 +36,10 @@ def process_file(fname: str, U0: float, domain_length: float) -> None:
     # --- 2) Raw derivatives
     dt = df['time'].diff()                    # Δt, first row = NaN
     df['dk_dt'] = df['kinetic_energy'].diff() / dt
+    # I believe this is correct
     df['effective_nu_half'] = -df['dk_dt'] / (2.0 * df['enstrophy'])
+
+    # I believe this is not correct but standard in definitions
     df['effective_nu'] = -df['dk_dt'] / (df['enstrophy'])
     
     # back‐fill first‐row NaNs so nothing is missing
@@ -44,8 +47,11 @@ def process_file(fname: str, U0: float, domain_length: float) -> None:
     df[['dk_dt','effective_nu_half']] = df[['dk_dt','effective_nu_half']].bfill()
     
     # Reynolds number
-    df['Re'] = (U0 * L) / df['effective_nu']
+    # I believe this is correct
     df['Re_half'] = (U0 * L) / df['effective_nu_half']
+
+    # I believe this is not correct but standard in definitions
+    df['Re'] = (U0 * L) / df['effective_nu']
     
     # Example non‐dimensional quantities:
     # t* = t * U0 / L
@@ -55,13 +61,22 @@ def process_file(fname: str, U0: float, domain_length: float) -> None:
     # ω* = 2.0*ω / (U0/L)^2
     df['enstrophy_star'] = df['enstrophy'] * 2.0 / (U0/L)**2
     
+
     # --- 4) Write out
     out_dir   = os.path.dirname(os.path.abspath(fname))
     base, ext = os.path.splitext(os.path.basename(fname))
     out_name  = f"{base}_processed{ext}"
     out_path  = os.path.join(out_dir, out_name)
     
-    df.to_csv(out_path, index=False, float_format="%.12e")
+    # Write CSV with spaced headers
+    with open(out_path, 'w') as f:
+        # Write header with spaces after commas
+        header = ',   '.join(df.columns)
+        f.write(header + '\n')
+        
+        # Write the data (without header since we already wrote it)
+        df.to_csv(f, index=False, header=False, float_format="%.12e")
+    
     print(f"[✔] Processed {fname} → {out_path}")
     print(f"    Output columns: {list(df.columns)}", file=sys.stderr)
 
