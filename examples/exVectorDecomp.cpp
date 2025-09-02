@@ -19,17 +19,20 @@ void compute_Curl_Hcurl_to_Hdiv(ParGridFunction &result, ParGridFunction &gftria
                          ParFiniteElementSpace *test_fes, bool pa);
 void compute_div_Hdiv_to_L2(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  
                         ParFiniteElementSpace *test_fes, bool pa);
-// void compute_Curl_H1_to_HCurl(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  
-//                         ParFiniteElementSpace *test_fes, bool pa);
+void project_H1_to_Hcurl(ParGridFunction &result,          // in ND space (output)
+                         ParGridFunction &u_h1,            // in H1 vector space (input)
+                         ParFiniteElementSpace *fes_nd,    // ND test/target
+                         bool pa);
+void project_H1_to_L2(ParGridFunction &result,          // in L2 space (output)
+                      ParGridFunction &u_h1,            // in H1 vector space (input)
+                      ParFiniteElementSpace *fes_l2,    // L2 test/target space
+                      bool pa);
+
 real_t freq = 1.0, kappa;
 int dim;
 
 void project_Hcurl_Hdiv(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes, 
                         ParFiniteElementSpace *test_fes, bool pa);
-void project_H1_to_Hcurl(ParGridFunction &result, 
-   ParGridFunction &gftrial, 
-   ParFiniteElementSpace *trial_fes,  
-   ParFiniteElementSpace *test_fes, bool pa);
 
 int main(int argc, char *argv[])
 {
@@ -159,6 +162,7 @@ int main(int argc, char *argv[])
       cout << "Number of finite element unknowns: " << size << endl;
    }
 
+
    // nabla \phi
    VectorFunctionCoefficient grad_phi_coeff(sdim, grad_phi);
    ParGridFunction grad_phi_hcurl(nd_fespace);
@@ -178,18 +182,24 @@ int main(int argc, char *argv[])
    ParGridFunction u_hcurl(nd_fespace);
    u_hcurl.ProjectCoefficient(u_coeff);
 
+   // Define u in H1
+   ParGridFunction u_h1(h1_fespace_vector);
+   u_h1.ProjectCoefficient(u_coeff);
+
    // Define u in L2
    ParGridFunction u_l2(l2_fespace_vector);
-   u_l2.ProjectCoefficient(u_coeff);
+   u_l2 = 0.0;
+   project_H1_to_L2(u_l2, u_h1, l2_fespace_vector, pa);          // in L2 space (output)
+   // u_l2.ProjectCoefficient(u_coeff);
 
-   // Define curl u in H(div).
+   // Project u1 to Hcurl
+   ParGridFunction u_hcurl_l2_project(nd_fespace);
+   project_H1_to_Hcurl(u_hcurl_l2_project, u_h1, nd_fespace, pa);
+
+   // Compute the curl of u
    ParGridFunction curl_u_hdiv(rt_fespace);
-   
-   // // Apply curl operator to u_hcurl
-   compute_Curl_Hcurl_to_Hdiv(curl_u_hdiv, u_hcurl, nd_fespace, rt_fespace, pa);
-
-   // Project the curl of u that is in H(div) to H(curl) space
-   // to use as the rhs of the linear solve
+   curl_u_hdiv = 0.0;
+   compute_Curl_Hcurl_to_Hdiv(curl_u_hdiv, u_hcurl_l2_project, nd_fespace, rt_fespace, pa);
 
    // This is one way of moving from one space to another 
    VectorGridFunctionCoefficient curl_u_coeff(&curl_u_hdiv);
@@ -347,10 +357,11 @@ int main(int argc, char *argv[])
    // Project curl Ah to L2 space
    ParGridFunction grad_phi_l2(l2_fespace_vector);
    grad_phi_l2 = 0.0;
+   // grad_phi_l2.ProjectCoefficient(grad_phi_coeff);
 
    // VectorGridFunctionCoefficient curl_Ah_l2_coeff(&curl_Ah_hdiv);
    ParGridFunction curl_Ah_l2(l2_fespace_vector);
-   project_Hdiv_to_L2(curl_Ah_l2, curl_Ah_hdiv,l2_fespace_vector,pa);
+   project_Hdiv_to_L2(curl_Ah_l2, curl_Ah_hdiv, l2_fespace_vector, pa);
 
    grad_phi_l2 = u_l2;
    grad_phi_l2 -= curl_Ah_l2;
@@ -368,10 +379,12 @@ int main(int argc, char *argv[])
    curl_Ah_h1.ProjectDiscCoefficient(curl_Ah_l2_coeff);
 
    ParGridFunction curl_Ah_hcurl_l2_project(nd_fespace);
-   project_H1_to_Hcurl(curl_Ah_hcurl_l2_project, curl_Ah_h1, h1_fespace_vector, nd_fespace, pa);
+   project_H1_to_Hcurl(curl_Ah_hcurl_l2_project, curl_Ah_h1, nd_fespace, pa);
 
    grad_phi_hcurl = 0.0;
-   project_H1_to_Hcurl(grad_phi_hcurl, grad_phi_h1, h1_fespace_vector, nd_fespace,pa);
+   // When grad phi exact is used here, the curl holds fine.
+   // project_H1_to_Hcurl(grad_phi_hcurl, grad_phi_exact_h1, nd_fespace,pa);
+   project_H1_to_Hcurl(grad_phi_hcurl, grad_phi_h1, nd_fespace,pa);
 
    ParGridFunction curl_grad_phi_hdiv(rt_fespace);
    curl_grad_phi_hdiv = 0.0;
@@ -392,6 +405,7 @@ int main(int argc, char *argv[])
       double grad_phi_error = grad_phi_l2.ComputeL2Error(grad_phi_coeff);
       double curl_Ah_l2_error = curl_Ah_l2.ComputeL2Error(curl_A_exact_coeff);
       double grad_phi_error_h1 = grad_phi_h1.ComputeL2Error(grad_phi_coeff);
+      double grad_phi_error_hcurl = grad_phi_hcurl.ComputeL2Error(grad_phi_coeff);
       double curl_Ah_h1_error = curl_Ah_h1.ComputeL2Error(curl_A_exact_coeff);
       double curl_grad_phi_hdiv_error = curl_grad_phi_hdiv.ComputeL2Error(zero_vec);
 
@@ -403,6 +417,7 @@ int main(int argc, char *argv[])
          cout << "grad_phi L2 norm: " << grad_phi_error << endl;
          cout << "curl Ah L2 norm: " << curl_Ah_l2_error << endl;
          cout << "grad_phi H1 L2 norm: " << grad_phi_error_h1 << endl;
+         cout << "grad_phi Hcurl L2 norm: " << grad_phi_error_hcurl << endl;
          cout << "curl Ah H1 L2 norm: " << curl_Ah_h1_error << endl;
          cout << "curl grad phi Hdiv L2 norm: " << curl_grad_phi_hdiv_error << endl;
       }
@@ -764,7 +779,6 @@ void project_Hdiv_to_L2(ParGridFunction &result,
 // Project H1 (vector) → H(curl) (ND) in L2-sense.
 void project_H1_to_Hcurl(ParGridFunction &result,          // in ND space (output)
                          ParGridFunction &u_h1,            // in H1 vector space (input)
-                         ParFiniteElementSpace *fes_h1,    // not used, but keep for symmetry
                          ParFiniteElementSpace *fes_nd,    // ND test/target
                          bool pa)
 {
@@ -915,4 +929,60 @@ void curl_A_exact(const Vector &x, Vector &Acurl)
       Acurl(1) = (1. + kappa * kappa) * sin(kappa * x(0));
       if (x.Size() == 3) { Acurl(2) = 0.0; }
    }
+}
+
+// Project H1 (vector) → L2 (vector) in the true L2 sense:
+// Find y ∈ L2^d such that (y, v) = (u_h1, v)  ∀ v ∈ L2^d.
+// That is:  M_L2 * y = b,  with  b_i = (u_h1, φ_i) on the L2 space.
+void project_H1_to_L2(ParGridFunction &result,              // in L2 space (output)
+                      ParGridFunction &u_h1,                // in H1 vector space (input)
+                      ParFiniteElementSpace *fes_l2,        // L2^d target (vdim = mesh dim)
+                      bool pa)
+{
+   // 1) L2^d mass matrix on the target space
+   ParBilinearForm M_L2(fes_l2);
+   if (pa) { M_L2.SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+   M_L2.AddDomainIntegrator(new VectorMassIntegrator());  // correct for L2/H1 vector spaces
+   M_L2.Assemble();
+   if (!pa) { M_L2.Finalize(); }
+
+   // 2) RHS b = ∫ u_h1 · v_l2  (build it as a LinearForm on the L2 space)
+   VectorGridFunctionCoefficient ucoeff(&u_h1);
+   ParLinearForm b(fes_l2);
+   b.AddDomainIntegrator(new VectorDomainLFIntegrator(ucoeff)); // no mixed operator needed
+   b.Assemble();
+
+   // 3) Solve M_L2 X = B
+   Vector B(fes_l2->GetTrueVSize()), X(fes_l2->GetTrueVSize());
+   b.ParallelAssemble(B);
+   X = 0.0;
+
+   if (pa)
+   {
+      Array<int> ess;                      // none for pure L2 projection
+      OperatorPtr Mop;
+      M_L2.FormSystemMatrix(ess, Mop);     // PA path OK for VectorMassIntegrator on L2
+      OperatorJacobiSmoother J(M_L2, ess); // simple diagonal smoother works well for mass
+      CGSolver cg(fes_l2->GetComm());
+      cg.SetRelTol(1e-12);
+      cg.SetMaxIter(300);
+      cg.SetPrintLevel(0);
+      cg.SetOperator(*Mop);
+      cg.SetPreconditioner(J);
+      cg.Mult(B, X);
+   }
+   else
+   {
+      std::unique_ptr<HypreParMatrix> Mpar(M_L2.ParallelAssemble());
+      HypreDiagScale J(*Mpar);
+      HyprePCG pcg(*Mpar);
+      pcg.SetTol(1e-12);
+      pcg.SetMaxIter(300);
+      pcg.SetPrintLevel(0);
+      pcg.SetPreconditioner(J);
+      pcg.Mult(B, X);
+   }
+
+   result = 0.0;
+   result.SetFromTrueDofs(X);
 }
