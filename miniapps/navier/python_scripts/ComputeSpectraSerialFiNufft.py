@@ -7,17 +7,77 @@ import pandas as pd
 import sys
 import os
 
-# -------------------------------------------------------------------------------
-parser = argparse.ArgumentParser(description='Compute 3D energy spectrum using FINUFFT from velocity data.')
+# --------------------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------------------
+def wrap_to_half_open(arr, amin, L):
+    """Map arr to [amin, amin+L) robustly (periodic)."""
+    out = (arr - amin) % L + amin
+    # pull any numerical hits exactly at top edge back inside
+    tol = 1e-12 * (abs(amin) + abs(L) + 1.0)
+    top = amin + L
+    mask = out >= (top - tol)
+    out[mask] -= L
+    return out
+
+def deduce_L_and_wrap(coord, round_dec=12):
+    """
+    Infer periodic box: use span = u[-1]-u[0] as the true length (endpoints present),
+    wrap to half-open [amin, amin+L), and report a representative dx ~ span/(n-1).
+    """
+    u = np.unique(np.round(coord, round_dec))
+    if len(u) == 1:
+        amin = float(u[0]); L = 1.0; dx = 1.0
+        return np.full_like(coord, amin), (amin, L, dx)
+    amin = float(u[0])
+    span = float(u[-1] - u[0])
+    if span <= 0:
+        span = 1.0
+    L = span
+    wrapped = wrap_to_half_open(coord, amin, L)
+    dx = span / max(len(u) - 1, 1)
+    return wrapped, (amin, L, dx)
+
+def periodic_1d_voronoi_weights(u, L):
+    """
+    Periodic 1D Voronoi (midpoint) weights for sorted unique coords u in [a, a+L).
+    w[i] = 0.5 * (gap to next + gap from prev), with wrap at the seam.
+    """
+    u = np.array(u, dtype=float)
+    n = len(u)
+    w = np.empty(n, dtype=float)
+    for i in range(n):
+        # forward gap
+        if i < n - 1:
+            g_f = u[i+1] - u[i]
+        else:
+            g_f = (u[0] + L) - u[i]
+        # backward gap
+        if i > 0:
+            g_b = u[i] - u[i-1]
+        else:
+            g_b = u[0] - (u[-1] - L)
+        w[i] = 0.5 * (g_f + g_b)
+    return w
+
+# --------------------------------------------------------------------------------------
+# Args
+# --------------------------------------------------------------------------------------
+parser = argparse.ArgumentParser(description='Compute 3D energy spectrum using FINUFFT from (possibly nonuniform) velocity samples.')
 parser.add_argument('data_file', type=str, help='Path to the data file')
+parser.add_argument('--no-rescale', action='store_true',
+                    help='Do NOT force exact TKE match (only weighted NUFFT Parseval).')
 args = parser.parse_args()
 data_filename = args.data_file
+force_rescale = (not args.no_rescale)
 
-eps = 1e-12  # Requested accuracy for FINUFFT
+eps = 1e-12  # requested accuracy for FINUFFT
 
 plt.figure(figsize=(8, 6))
 
-# ---- HEADER ----
+# --------------------------------------------------------------------------------------
+# Header
+# --------------------------------------------------------------------------------------
 print(f"Reading header and data from file:\n  {data_filename}")
 with open(data_filename, 'r') as f:
     header_lines = [next(f) for _ in range(6)]
@@ -38,7 +98,9 @@ if time_extracted is None:
     time_extracted = 0.0
 print(f"Header: Step = {step_number_extracted}, Time = {time_extracted:.3e}")
 
-# ---- DATA LOADING ----
+# --------------------------------------------------------------------------------------
+# Load data (chunked)
+# --------------------------------------------------------------------------------------
 print("Loading data in chunks (skipping header)...")
 chunk_size = 5_000_000
 reader = pd.read_csv(
@@ -54,148 +116,160 @@ xpos_list, ypos_list, zpos_list = [], [], []
 velx_list, vely_list, velz_list = [], [], []
 
 for chunk in reader:
-    xp = np.round(chunk.iloc[:, 0].values, 10)
-    yp = np.round(chunk.iloc[:, 1].values, 10)
-    zp = np.round(chunk.iloc[:, 2].values, 10)
+    xp = np.round(chunk.iloc[:, 0].values, 12)
+    yp = np.round(chunk.iloc[:, 1].values, 12)
+    zp = np.round(chunk.iloc[:, 2].values, 12)
     vx = chunk.iloc[:, 3].values
     vy = chunk.iloc[:, 4].values
     vz = chunk.iloc[:, 5].values
-
-    xpos_list.append(xp)
-    ypos_list.append(yp)
-    zpos_list.append(zp)
-    velx_list.append(vx)
-    vely_list.append(vy)
-    velz_list.append(vz)
+    xpos_list.append(xp); ypos_list.append(yp); zpos_list.append(zp)
+    velx_list.append(vx); vely_list.append(vy); velz_list.append(vz)
 
 total_pts = sum(arr.size for arr in xpos_list)
-xpos = np.empty(total_pts, dtype=xpos_list[0].dtype)
-ypos = np.empty(total_pts, dtype=ypos_list[0].dtype)
-zpos = np.empty(total_pts, dtype=zpos_list[0].dtype)
-velx = np.empty(total_pts, dtype=velx_list[0].dtype)
-vely = np.empty(total_pts, dtype=vely_list[0].dtype)
-velz = np.empty(total_pts, dtype=velz_list[0].dtype)
+xpos = np.empty(total_pts); ypos = np.empty(total_pts); zpos = np.empty(total_pts)
+velx = np.empty(total_pts); vely = np.empty(total_pts); velz = np.empty(total_pts)
 
 offset = 0
-for xp, yp, zp, vx, vy, vz in zip(
-        xpos_list, ypos_list, zpos_list,
-        velx_list, vely_list, velz_list):
+for xp, yp, zp, vx, vy, vz in zip(xpos_list, ypos_list, zpos_list, velx_list, vely_list, velz_list):
     n = xp.size
-    xpos[offset:offset+n] = xp
-    ypos[offset:offset+n] = yp
-    zpos[offset:offset+n] = zp
-    velx[offset:offset+n] = vx
-    vely[offset:offset+n] = vy
-    velz[offset:offset+n] = vz
+    xpos[offset:offset+n] = xp; ypos[offset:offset+n] = yp; zpos[offset:offset+n] = zp
+    velx[offset:offset+n] = vx; vely[offset:offset+n] = vy; velz[offset:offset+n] = vz
     offset += n
+del xpos_list, ypos_list, zpos_list, velx_list, vely_list, velz_list
 
-# Free memory from chunk lists
-del xpos_list, ypos_list, zpos_list
-del velx_list, vely_list, velz_list
+# --------------------------------------------------------------------------------------
+# Periodic canonicalization to half-open box, then deduplicate
+# --------------------------------------------------------------------------------------
+xpos, (xmin, Lx, dx_est_x) = deduce_L_and_wrap(xpos, round_dec=12)
+ypos, (ymin, Ly, dx_est_y) = deduce_L_and_wrap(ypos, round_dec=12)
+zpos, (zmin, Lz, dx_est_z) = deduce_L_and_wrap(zpos, round_dec=12)
 
-# ---- Deduplication ----
-xpos_rounded = np.round(xpos, decimals=10)
-ypos_rounded = np.round(ypos, decimals=10)
-zpos_rounded = np.round(zpos, decimals=10)
-positions = np.stack([xpos_rounded, ypos_rounded, zpos_rounded], axis=1)
-unique_pos, unique_indices = np.unique(positions, axis=0, return_index=True)
-xpos_rounded = xpos_rounded[unique_indices]
-ypos_rounded = ypos_rounded[unique_indices]
-zpos_rounded = zpos_rounded[unique_indices]
-velx = velx[unique_indices]
-vely = vely[unique_indices]
-velz = velz[unique_indices]
+# Round after wrapping to stabilize uniqueness
+xpos_r = np.round(xpos, 12); ypos_r = np.round(ypos, 12); zpos_r = np.round(zpos, 12)
 
-# ---- Grid info ----
-x_unique = np.unique(xpos_rounded)
-y_unique = np.unique(ypos_rounded)
-z_unique = np.unique(zpos_rounded)
-nx = len(x_unique)
-ny = len(y_unique)
-nz = len(z_unique)
+positions = np.stack([xpos_r, ypos_r, zpos_r], axis=1)
+_, unique_indices = np.unique(positions, axis=0, return_index=True)
+
+xpos_r = xpos_r[unique_indices]; ypos_r = ypos_r[unique_indices]; zpos_r = zpos_r[unique_indices]
+velx   = velx[unique_indices];   vely   = vely[unique_indices];   velz   = velz[unique_indices]
+
+# Grid info
+x_unique = np.unique(xpos_r); nx = len(x_unique)
+y_unique = np.unique(ypos_r); ny = len(y_unique)
+z_unique = np.unique(zpos_r); nz = len(z_unique)
+
 print(f"Number of unique x values: {nx}")
 print(f"Number of unique y values: {ny}")
 print(f"Number of unique z values: {nz}")
 
 expected_num_points = nx * ny * nz
-actual_num_points = xpos_rounded.size
+actual_num_points   = xpos_r.size
 print(f"Expected number of points: {expected_num_points}")
 print(f"Actual number of points:   {actual_num_points}")
 if actual_num_points != expected_num_points:
-    print("ERROR: After deduplication, number of unique points does not match grid shape!")
+    print("ERROR: points do not form a full tensor grid after canonicalization!")
     sys.exit(1)
 
-# ---- (Optional) Sort lexicographically ----
-x_idx = np.searchsorted(x_unique, xpos_rounded)
-y_idx = np.searchsorted(y_unique, ypos_rounded)
-z_idx = np.searchsorted(z_unique, zpos_rounded)
+# Lexicographic sort (i,j,k) for consistent indexing
+x_idx = np.searchsorted(x_unique, xpos_r)
+y_idx = np.searchsorted(y_unique, ypos_r)
+z_idx = np.searchsorted(z_unique, zpos_r)
 sort_indices = np.lexsort((z_idx, y_idx, x_idx))
-xpos_rounded = xpos_rounded[sort_indices]
-ypos_rounded = ypos_rounded[sort_indices]
-zpos_rounded = zpos_rounded[sort_indices]
-velx = velx[sort_indices]
-vely = vely[sort_indices]
-velz = velz[sort_indices]
+xpos_r = xpos_r[sort_indices]; ypos_r = ypos_r[sort_indices]; zpos_r = zpos_r[sort_indices]
+velx   = velx[sort_indices];   vely   = vely[sort_indices];   velz   = velz[sort_indices]
+x_idx  = x_idx[sort_indices];  y_idx  = y_idx[sort_indices];  z_idx  = z_idx[sort_indices]
 
-tke_physical = 0.5 * np.sum(velx**2 + vely**2 + velz**2)
-print(f"[Rank 0] Total Kinetic Energy in Physical Space (TKE_physical): {tke_physical:.6f}")
+# --------------------------------------------------------------------------------------
+# Voronoi volume weights (periodic, separable)
+# --------------------------------------------------------------------------------------
+wx = periodic_1d_voronoi_weights(x_unique, Lx)
+wy = periodic_1d_voronoi_weights(y_unique, Ly)
+wz = periodic_1d_voronoi_weights(z_unique, Lz)
+# 3D volume weight per gridpoint in current ordering
+wvol = wx[x_idx] * wy[y_idx] * wz[z_idx]
+Wtot = wx.sum() * wy.sum() * wz.sum()   # should be ~ Lx*Ly*Lz
 
-# ---- Map to [-pi, pi] domain for FINUFFT ----
-dx = x_unique[1] - x_unique[0] if nx > 1 else 1.0
-dy = y_unique[1] - y_unique[0] if ny > 1 else 1.0
-dz = z_unique[1] - z_unique[0] if nz > 1 else 1.0
-Lx = x_unique[-1] - x_unique[0] + dx
-Ly = y_unique[-1] - y_unique[0] + dy
-Lz = z_unique[-1] - z_unique[0] + dz
+# --------------------------------------------------------------------------------------
+# Energies (unweighted vs weighted)
+# --------------------------------------------------------------------------------------
+tke_phys_unweighted = 0.5 * np.sum(velx**2 + vely**2 + velz**2)
+tke_phys_weighted   = 0.5 * np.sum(wvol * (velx**2 + vely**2 + velz**2))
+print(f"[Physical] TKE (unweighted samples) = {tke_phys_unweighted:.10e}")
+print(f"[Physical] TKE (weighted, ~integral) = {tke_phys_weighted:.10e}  (Wtot≈{Wtot:.6e})")
 
-def map_to_pi(arr, amin, L):
-    return (arr - amin) * (2 * np.pi / L) - np.pi
+# --------------------------------------------------------------------------------------
+# Map to [-pi, pi) for FINUFFT
+# --------------------------------------------------------------------------------------
+x_s = (xpos_r - xmin) * (2*np.pi / Lx) - np.pi
+y_s = (ypos_r - ymin) * (2*np.pi / Ly) - np.pi
+z_s = (zpos_r - zmin) * (2*np.pi / Lz) - np.pi
 
-x_s = map_to_pi(xpos_rounded, x_unique[0], Lx)
-y_s = map_to_pi(ypos_rounded, y_unique[0], Ly)
-z_s = map_to_pi(zpos_rounded, z_unique[0], Lz)
-
-# ---- FINUFFT forward transforms ----
+# --------------------------------------------------------------------------------------
+# NUFFT (type-1) of sqrt(w)*u  → improves Parseval for nonuniform nodes
+# --------------------------------------------------------------------------------------
 Ntot = nx * ny * nz
+sqrtw = np.sqrt(wvol)
 
-def finufft_forward_scattered(x_, y_, z_, v_):
+def nufft_type1(x_, y_, z_, c_):
     F_flat = finufft.nufft3d1(
         x_, y_, z_,
-        v_.astype(np.complex128),
+        c_.astype(np.complex128),
         (nx, ny, nz), eps=eps, isign=1, modeord=1
     )
-    return F_flat.reshape((nx, ny, nz)) / Ntot
+    return F_flat.reshape((nx, ny, nz))
 
-Fvx_nu = finufft_forward_scattered(x_s, y_s, z_s, velx)
-Fvy_nu = finufft_forward_scattered(x_s, y_s, z_s, vely)
-Fvz_nu = finufft_forward_scattered(x_s, y_s, z_s, velz)
+# transform of sqrt(w)*u
+Fvx = nufft_type1(x_s, y_s, z_s, sqrtw * velx)
+Fvy = nufft_type1(x_s, y_s, z_s, sqrtw * vely)
+Fvz = nufft_type1(x_s, y_s, z_s, sqrtw * velz)
 
-# ---- fftshift for turbulence binning convention ----
-Fvx_nu = np.fft.fftshift(Fvx_nu)
-Fvy_nu = np.fft.fftshift(Fvy_nu)
-Fvz_nu = np.fft.fftshift(Fvz_nu)
+# center zero mode
+Fvx = np.fft.fftshift(Fvx); Fvy = np.fft.fftshift(Fvy); Fvz = np.fft.fftshift(Fvz)
 
-# ---- Spectral energy ----
-E3d_nu = 0.5 * (np.abs(Fvx_nu)**2 + np.abs(Fvy_nu)**2 + np.abs(Fvz_nu)**2)
-print(f"FINUFFT KE: {E3d_nu.sum()*Ntot:.6e}")
+# Spectral energy from weighted transform.
+# With uniform grids this reduces to: ∑ w|u|^2  ≈ (1/Ntot) ∑ |F|^2.
+E3d = 0.5 * (np.abs(Fvx)**2 + np.abs(Fvy)**2 + np.abs(Fvz)**2)
+tke_spec_weighted = E3d.sum() / Ntot
+print(f"[Spectral] TKE (weighted NUFFT)   = {tke_spec_weighted:.10e}")
+rel_err = abs(tke_spec_weighted - tke_phys_weighted) / max(tke_phys_weighted, 1e-30)
+print(f"[Parseval] weighted rel. error    = {rel_err:.3e}")
 
-# ---- Wavenumbers and binning ----
-kx = np.fft.fftfreq(nx, d=dx/(2*np.pi))
-ky = np.fft.fftfreq(ny, d=dy/(2*np.pi))
-kz = np.fft.fftfreq(nz, d=dz/(2*np.pi))
-kx = np.fft.fftshift(kx)
-ky = np.fft.fftshift(ky)
-kz = np.fft.fftshift(kz)
-KX, KY, KZ = np.meshgrid(kx, ky, kz, indexing='ij')
-k_magnitude = np.sqrt(KX**2 + KY**2 + KZ**2)
-k_flat = k_magnitude.flatten()
+# Optional: force exact match (scalar rescale that preserves spectral shape)
+if force_rescale and tke_spec_weighted > 0:
+    gamma = tke_phys_weighted / tke_spec_weighted
+    scale = np.sqrt(gamma)
+    Fvx *= scale; Fvy *= scale; Fvz *= scale
+    E3d = 0.5 * (np.abs(Fvx)**2 + np.abs(Fvy)**2 + np.abs(Fvz)**2)
+    tke_spec_weighted = E3d.sum() / Ntot
+    print(f"[Rescale ] Applied global scale √γ={scale:.6e} so TKE matches exactly.")
 
-num_bins = nx
-k_bin_edges = np.arange(0, num_bins+1) - 0.5
-k_bin_centers = 0.5 * (k_bin_edges[:-1] + k_bin_edges[1:])
-E_k_nu, _ = np.histogram(k_flat, bins=k_bin_edges, weights=E3d_nu.ravel())
+print(f"[Check   ] TKE_phys(weighted)={tke_phys_weighted:.10e},  TKE_spec={tke_spec_weighted:.10e}")
 
-# ---- Save spectrum data to text file ----
+# --------------------------------------------------------------------------------------
+# Radial spectrum (mode-index shells); plot in cycles/length if cubic
+# --------------------------------------------------------------------------------------
+kx_idx = np.fft.fftshift(np.fft.fftfreq(nx) * nx)
+ky_idx = np.fft.fftshift(np.fft.fftfreq(ny) * ny)
+kz_idx = np.fft.fftshift(np.fft.fftfreq(nz) * nz)
+KX_i, KY_i, KZ_i = np.meshgrid(kx_idx, ky_idx, kz_idx, indexing='ij')
+K_idx = np.sqrt(KX_i**2 + KY_i**2 + KZ_i**2)
+
+Kmax_idx = int(np.floor(K_idx.max()))
+edges_idx = np.arange(0, Kmax_idx + 1) - 0.5
+centers_idx = 0.5 * (edges_idx[:-1] + edges_idx[1:])
+E_k, _ = np.histogram(K_idx.ravel(), bins=edges_idx, weights=E3d.ravel())
+
+equal_box = np.isclose(Lx, Ly, rtol=1e-6, atol=0) and np.isclose(Lx, Lz, rtol=1e-6, atol=0)
+if equal_box:
+    k_centers = centers_idx / Lx  # cycles per length
+    xlabel = r'$|k|$ (cycles/length)'
+else:
+    k_centers = centers_idx        # index units
+    xlabel = r'Shell index $|m|$'
+
+# --------------------------------------------------------------------------------------
+# Save spectrum
+# --------------------------------------------------------------------------------------
 input_basename = os.path.basename(data_filename)
 step_suffix_with_underscore = f'_{step_number_extracted}.txt'
 step_suffix_without_underscore = f'{step_number_extracted}.txt'
@@ -205,34 +279,40 @@ if input_basename.endswith(step_suffix_with_underscore):
 elif input_basename.endswith(step_suffix_without_underscore):
     type_part = input_basename[:-len(step_suffix_without_underscore)]
 else:
-    type_part = 'unknown'
+    type_part = 'finufft'
 
-if type_part != 'unknown':
-    if type_part.startswith('sampled_data_'):
-        type_part = type_part.replace('sampled_data_', '')
-    elif type_part.startswith('SampledData'):
-        type_part = type_part.replace('SampledData', '')
-    else:
-        type_part = 'finufft'
+if type_part.startswith('sampled_data_'):
+    type_part = type_part.replace('sampled_data_', '')
+elif type_part.startswith('SampledData'):
+    type_part = type_part.replace('SampledData', '')
 
-output_filename = os.path.join(os.path.dirname(data_filename), f'energy_spectrum_finufft_{type_part}_step_{step_number_extracted}.txt')
-
-print(f"Saving FINUFFT energy spectrum to {output_filename}")
-np.savetxt(output_filename, np.column_stack((k_bin_centers, E_k_nu)),
-           header=f'Wavenumber_k Energy_E(k) (FINUFFT Step {step_number_extracted}, Time {time_extracted:.3e})',
-           fmt='%.6e %.6e', comments='# ')
-
-# ---- Plot ----
-plt.loglog(k_bin_centers, E_k_nu, 'b-', label=f'FINUFFT step {step_number_extracted}')
-plt.loglog(
-    k_bin_centers, 
-    0.1 * (k_bin_centers / k_bin_centers[1])**(-5/3), 
-    'r:', label=r'$k^{-5/3}$'
+output_filename = os.path.join(
+    os.path.dirname(data_filename),
+    f'energy_spectrum_finufft_{type_part}_step_{step_number_extracted}.txt'
 )
-plt.xlabel(r'$|k|$')
-plt.ylabel(r'$E(k)$')
-plt.title('3-D energy spectrum (FINUFFT)')
-plt.legend()
+print(f"Saving energy spectrum to {output_filename}")
+np.savetxt(
+    output_filename,
+    np.column_stack((k_centers, E_k)),
+    header=f'k_center  E(k)  (FINUFFT Step {step_number_extracted}, Time {time_extracted:.3e})',
+    fmt='%.6e %.6e',
+    comments='# '
+)
+
+# --------------------------------------------------------------------------------------
+# Plot
+# --------------------------------------------------------------------------------------
+# Reference slope (avoid divide-by-zero at k=0)
+mask = k_centers > 0
+ref = np.zeros_like(k_centers)
+ref[mask] = (k_centers[mask] / k_centers[mask][0])**(-5/3)
+
+plt.loglog(k_centers[mask], E_k[mask], label=f'FINUFFT (weighted) step {step_number_extracted}')
+plt.loglog(k_centers[mask], 0.1 * ref[mask], 'r:', label=r'$k^{-5/3}$')
+plt.xlabel(xlabel); plt.ylabel(r'$E(k)$')
+title = '3-D energy spectrum (FINUFFT, weighted)'
+plt.title(title + ('' if equal_box else ' — non-cubic box: index shells'))
 plt.grid(True, ls=':')
+plt.legend()
 plt.tight_layout()
 plt.show()

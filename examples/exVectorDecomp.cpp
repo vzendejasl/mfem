@@ -28,6 +28,35 @@ void project_H1_to_L2(ParGridFunction &result,          // in L2 space (output)
                       ParFiniteElementSpace *fes_l2,    // L2 test/target space
                       bool pa);
 
+void solve_scalar_potential(ParGridFunction &phi,
+                           ParGridFunction &u_vector,
+                           ParFiniteElementSpace *h1_fes_scalar,
+                           ParFiniteElementSpace *vector_fes,
+                           ParFiniteElementSpace *l2_fes_scalar,  // Need this for div computation
+                           bool pa);
+// Project H1 (vector) → H(div) in L2-sense
+void project_H1_to_Hdiv(ParGridFunction &result,          // in H(div) space (output)
+                        ParGridFunction &u_h1,            // in H1 vector space (input)
+                        ParFiniteElementSpace *fes_h1,    // H1 vector space
+                        ParFiniteElementSpace *fes_hdiv,  // H(div) target
+                        bool pa);
+
+void solve_scalar_potential_direct(ParGridFunction &phi,
+                                  ParGridFunction &div_u_h1,      // divergence already in H1 scalar space
+                                  ParFiniteElementSpace *h1_fes_scalar,
+                                  bool pa);
+
+void project_L2_to_H1_scalar(ParGridFunction &result,          // in H1 space (output)
+                             ParGridFunction &u_l2,            // in L2 scalar space (input)
+                             ParFiniteElementSpace *fes_l2,    // L2 scalar space
+                             ParFiniteElementSpace *fes_h1,    // H1 scalar target
+                             bool pa);
+void compute_gradient_H1_to_Hcurl(ParGridFunction &result,       // in H(curl) space (output)
+                                  ParGridFunction &phi_h1,        // in H1 scalar space (input) 
+                                  ParFiniteElementSpace *h1_fes,  // H1 scalar trial space
+                                  ParFiniteElementSpace *nd_fes,  // H(curl) test space
+                                  bool pa);
+
 real_t freq = 1.0, kappa;
 int dim;
 
@@ -162,7 +191,6 @@ int main(int argc, char *argv[])
       cout << "Number of finite element unknowns: " << size << endl;
    }
 
-
    // nabla \phi
    VectorFunctionCoefficient grad_phi_coeff(sdim, grad_phi);
    ParGridFunction grad_phi_hcurl(nd_fespace);
@@ -238,6 +266,48 @@ int main(int argc, char *argv[])
       cout << "  H(curl) norm error = " << hcurl_err << "\n";
       cout << "  H(curl) norm error lin sys = " << l2_err_sys << "\n\n";
    }
+
+   if (myid == 0) { cout << "\nStarting Option A workflow for Poisson solve" << endl; }
+   
+   // 1. Project u from H1 → H(div)
+   ParGridFunction u_hdiv_for_poisson(rt_fespace);
+   project_H1_to_Hdiv(u_hdiv_for_poisson, u_h1, h1_fespace_vector, rt_fespace, pa);
+   
+   // 2. Divergence: H(div) → L2
+   ParGridFunction div_u_l2_poisson(l2_fespace_scalar);
+   compute_div_Hdiv_to_L2(div_u_l2_poisson, u_hdiv_for_poisson, rt_fespace, l2_fespace_scalar, pa);
+   
+   // 3. Project L2 → H1
+   ParGridFunction div_u_h1_poisson(h1_fespace_scalar);
+   project_L2_to_H1_scalar(div_u_h1_poisson, div_u_l2_poisson, l2_fespace_scalar, h1_fespace_scalar, pa);
+   
+   // 4. Solve Poisson: -∇²φ = div(u) where both are now in H1
+   ParGridFunction phi_scalar(h1_fespace_scalar);
+   solve_scalar_potential_direct(phi_scalar, div_u_h1_poisson, h1_fespace_scalar, pa);
+
+   // After solving for phi_scalar, compute its gradient for comparison
+   ParGridFunction grad_phi_computed(nd_fespace);
+   compute_gradient_H1_to_Hcurl(grad_phi_computed, phi_scalar, h1_fespace_scalar, nd_fespace, pa);
+   
+   // Compute curl of grad_phi (should be zero)
+   ParGridFunction curl_grad_phi_computed(rt_fespace);
+   compute_Curl_Hcurl_to_Hdiv(curl_grad_phi_computed, grad_phi_computed, nd_fespace, rt_fespace, pa);
+   
+   // Now compare with your exact gradient
+   double grad_phi_poisson_error = grad_phi_computed.ComputeL2Error(grad_phi_coeff);
+   
+   // Check if curl(grad φ) ≈ 0
+   Vector zero_v(dim);
+   zero_v = 0.0;
+   VectorConstantCoefficient zero_vec(zero_v);
+   double curl_grad_phi_computed_error = curl_grad_phi_computed.ComputeL2Error(zero_vec);
+   
+   if (myid == 0)
+   {
+      cout << "Gradient of computed phi L2 error: " << grad_phi_poisson_error << endl;
+      cout << "curl(grad phi) L2 error (should be ~0): " << curl_grad_phi_computed_error << endl;
+   }
+
 
    // 8. Determine the list of true (i.e. parallel conforming) essential
    //    boundary dofs. In this example, the boundary conditions are defined
@@ -487,8 +557,10 @@ int main(int argc, char *argv[])
     dc.RegisterField("grad_phi_exact_h1",   &grad_phi_exact_h1);
     dc.RegisterField("grad_phi_l2",    &grad_phi_l2);
     dc.RegisterField("grad_phi_h1",    &grad_phi_h1);
+    dc.RegisterField("grad_phi_computed",    &grad_phi_computed);
     dc.RegisterField("curl_grad_phi_hdiv", &curl_grad_phi_hdiv);
-    
+    dc.RegisterField("curl_grad_phi_computed", &curl_grad_phi_computed);
+
     dc.Save();
 
    // 17. Send the solution by socket to a GLVis server.
@@ -985,4 +1057,324 @@ void project_H1_to_L2(ParGridFunction &result,              // in L2 space (outp
 
    result = 0.0;
    result.SetFromTrueDofs(X);
+}
+
+// Solve Poisson problem: -∇²φ = div_u_h1 where div_u_h1 is already in H1 space
+// Uses OrthoSolver to handle null space in periodic domains
+void solve_scalar_potential_direct(ParGridFunction &phi,
+                                  ParGridFunction &div_u_h1,      // divergence already in H1 scalar space
+                                  ParFiniteElementSpace *h1_fes_scalar,
+                                  bool pa)
+{
+   int myid = Mpi::WorldRank();
+   
+   // Set up Laplacian operator in H1 space
+   ParBilinearForm laplacian(h1_fes_scalar);
+   if (pa) { laplacian.SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+   laplacian.AddDomainIntegrator(new DiffusionIntegrator());
+   laplacian.Assemble();
+   if (!pa) { laplacian.Finalize(); }
+   
+   // Set up RHS using div_u_h1 (both already in same H1 space)
+   GridFunctionCoefficient div_u_coeff(&div_u_h1);
+   ParLinearForm rhs(h1_fes_scalar);
+   rhs.AddDomainIntegrator(new DomainLFIntegrator(div_u_coeff));
+   rhs.Assemble();
+   
+   Vector RHS(h1_fes_scalar->GetTrueVSize());
+   Vector PHI(h1_fes_scalar->GetTrueVSize());
+   rhs.ParallelAssemble(RHS);
+   RHS *= -1.0;
+   PHI = 0.0;
+   
+   // Use OrthoSolver to handle null space (constant functions)
+   Array<int> empty_ess_tdof;  // No essential BC for periodic problem
+   
+   if (pa)
+   {
+      OperatorPtr laplacian_op;
+      laplacian.FormSystemMatrix(empty_ess_tdof, laplacian_op);
+      
+      // Create preconditioner
+      OperatorJacobiSmoother jac(laplacian, empty_ess_tdof);
+      
+      // Set up base solver
+      CGSolver base_solver(h1_fes_scalar->GetComm());
+      base_solver.SetRelTol(1e-12);
+      base_solver.SetMaxIter(1000);
+      base_solver.SetPrintLevel(0);  // Reduce output since OrthoSolver will print
+      base_solver.SetOperator(*laplacian_op);
+      base_solver.SetPreconditioner(jac);
+      
+      // Create OrthoSolver to handle null space
+      OrthoSolver ortho_solver(h1_fes_scalar->GetComm());
+      ortho_solver.SetSolver(base_solver);
+      ortho_solver.SetOperator(*laplacian_op);
+      
+      if (myid == 0) 
+      {
+         cout << "Using OrthoSolver for direct Poisson problem with null space" << endl;
+      }
+      
+      ortho_solver.Mult(RHS, PHI);
+   }
+   else
+   {
+      std::unique_ptr<HypreParMatrix> A(laplacian.ParallelAssemble());
+      
+      // Create base preconditioner  
+      HypreBoomerAMG amg(*A);
+      amg.SetPrintLevel(0);
+      
+      // Set up base solver
+      HyprePCG base_solver(*A);
+      base_solver.SetTol(1e-12);
+      base_solver.SetMaxIter(1000);
+      base_solver.SetPrintLevel(0);  // Reduce output
+      base_solver.SetPreconditioner(amg);
+      
+      // Create OrthoSolver to handle null space
+      OrthoSolver ortho_solver(h1_fes_scalar->GetComm());
+      ortho_solver.SetSolver(base_solver);
+      ortho_solver.SetOperator(*A);
+      
+      if (myid == 0) 
+      {
+         cout << "Using OrthoSolver for direct Poisson problem with null space" << endl;
+      }
+      
+      ortho_solver.Mult(RHS, PHI);
+   }
+   
+   // Set the solution
+   phi = 0.0;
+   
+   phi.SetFromTrueDofs(PHI);
+
+   if (myid == 0)
+   {
+      cout << "Solved direct Poisson problem -∇²φ = div(u) for scalar potential" << endl;
+   }
+}
+
+// You'll also need this projection function (scalar version)
+void project_L2_to_H1_scalar(ParGridFunction &result,          // in H1 space (output)
+                             ParGridFunction &u_l2,            // in L2 scalar space (input)
+                             ParFiniteElementSpace *fes_l2,    // L2 scalar space
+                             ParFiniteElementSpace *fes_h1,    // H1 scalar target
+                             bool pa)
+{
+   // Mass matrix on the H1 space
+   ParBilinearForm M(fes_h1);
+   if (pa) { M.SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+   M.AddDomainIntegrator(new MassIntegrator()); // H1 scalar mass
+   M.Assemble();
+   if (!pa) { M.Finalize(); }
+
+   // RHS: b_i = (u_l2, w_i) with w_i in H1
+   GridFunctionCoefficient ucoeff(&u_l2);
+   ParLinearForm b(fes_h1);
+   b.AddDomainIntegrator(new DomainLFIntegrator(ucoeff)); // H1 scalar RHS
+   b.Assemble();
+
+   Vector B(fes_h1->GetTrueVSize()), X(fes_h1->GetTrueVSize());
+   b.ParallelAssemble(B);
+   X = 0.0;
+
+   if (pa)
+   {
+      Array<int> ess_tdof_list; // none for pure L2 projection
+      OperatorPtr Mop;
+      M.FormSystemMatrix(ess_tdof_list, Mop);
+      OperatorJacobiSmoother Jacobi(M, ess_tdof_list);
+      CGSolver cg(fes_h1->GetComm());
+      cg.SetRelTol(1e-12);
+      cg.SetMaxIter(500);
+      cg.SetPrintLevel(0);
+      cg.SetOperator(*Mop);
+      cg.SetPreconditioner(Jacobi);
+      cg.Mult(B, X);
+   }
+   else
+   {
+      std::unique_ptr<HypreParMatrix> Mpar(M.ParallelAssemble());
+      HypreDiagScale Jacobi(*Mpar);
+      HyprePCG pcg(*Mpar);
+      pcg.SetTol(1e-12);
+      pcg.SetMaxIter(500);
+      pcg.SetPrintLevel(0);
+      pcg.SetPreconditioner(Jacobi);
+      pcg.Mult(B, X);
+   }
+
+   result = 0.0;
+   result.SetFromTrueDofs(X);
+}
+// Project H1 (vector) → H(div) in L2-sense
+void project_H1_to_Hdiv(ParGridFunction &result,          // in H(div) space (output)
+                        ParGridFunction &u_h1,            // in H1 vector space (input)
+                        ParFiniteElementSpace *fes_h1,    // H1 vector space
+                        ParFiniteElementSpace *fes_hdiv,  // H(div) target
+                        bool pa)
+{
+   // Mass matrix on the H(div) space
+   ParBilinearForm M(fes_hdiv);
+   if (pa) { M.SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+   M.AddDomainIntegrator(new VectorFEMassIntegrator()); // H(div) mass
+   M.Assemble();
+   if (!pa) { M.Finalize(); }
+
+   // RHS: b_i = (u_h1, w_i) with w_i in H(div)
+   VectorGridFunctionCoefficient ucoeff(&u_h1);
+   ParLinearForm b(fes_hdiv);
+   b.AddDomainIntegrator(new VectorFEDomainLFIntegrator(ucoeff)); // H(div) RHS
+   b.Assemble();
+
+   Vector B(fes_hdiv->GetTrueVSize()), X(fes_hdiv->GetTrueVSize());
+   b.ParallelAssemble(B);
+   X = 0.0;
+
+   if (pa)
+   {
+      Array<int> ess_tdof_list;
+      OperatorPtr Mop;
+      M.FormSystemMatrix(ess_tdof_list, Mop);
+      OperatorJacobiSmoother Jacobi(M, ess_tdof_list);
+      CGSolver cg(fes_hdiv->GetComm());
+      cg.SetRelTol(1e-12);
+      cg.SetMaxIter(500);
+      cg.SetPrintLevel(0);
+      cg.SetOperator(*Mop);
+      cg.SetPreconditioner(Jacobi);
+      cg.Mult(B, X);
+   }
+   else
+   {
+      std::unique_ptr<HypreParMatrix> Mpar(M.ParallelAssemble());
+      HypreDiagScale Jacobi(*Mpar);
+      HyprePCG pcg(*Mpar);
+      pcg.SetTol(1e-12);
+      pcg.SetMaxIter(500);
+      pcg.SetPrintLevel(0);
+      pcg.SetPreconditioner(Jacobi);
+      pcg.Mult(B, X);
+   }
+
+   result = 0.0;
+   result.SetFromTrueDofs(X);
+}
+// Compute gradient of H1 scalar field and project to H(curl) space
+// Maps H1 scalar → H(curl) using gradient operator
+void compute_gradient_H1_to_Hcurl(ParGridFunction &result,       // in H(curl) space (output)
+                                  ParGridFunction &phi_h1,        // in H1 scalar space (input) 
+                                  ParFiniteElementSpace *h1_fes,  // H1 scalar trial space
+                                  ParFiniteElementSpace *nd_fes,  // H(curl) test space
+                                  bool pa)
+{
+   // H(curl) mass matrix on the target space
+   ParBilinearForm *a = new ParBilinearForm(nd_fes);
+   if (pa) { a->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+   a->AddDomainIntegrator(new VectorFEMassIntegrator()); // H(curl) mass
+   
+   // Mixed gradient operator: H1 scalar → H(curl)
+   ParMixedBilinearForm *a_mixed = new ParMixedBilinearForm(h1_fes, nd_fes);
+   if (pa) { a_mixed->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+   a_mixed->AddDomainIntegrator(new MixedVectorGradientIntegrator()); // grad operator
+   
+   a->Assemble();
+   if (!pa) { a->Finalize(); }
+   
+   a_mixed->Assemble();
+   if (!pa) { a_mixed->Finalize(); }
+   
+   Vector B(nd_fes->GetTrueVSize());
+   Vector X(nd_fes->GetTrueVSize());
+   
+   if (pa)
+   {
+      ParLinearForm b(nd_fes); // used as a vector
+      a_mixed->Mult(phi_h1, b); // process-local multiplication
+      b.ParallelAssemble(B);
+   }
+   else
+   {
+      HypreParMatrix *mixed = a_mixed->ParallelAssemble();
+      
+      Vector P(h1_fes->GetTrueVSize());
+      phi_h1.GetTrueDofs(P);
+      
+      mixed->Mult(P, B);
+      
+      delete mixed;
+   }
+   
+   // Solve the linear system
+   if (pa)
+   {
+      Array<int> ess_tdof_list; // empty
+      
+      OperatorPtr A;
+      a->FormSystemMatrix(ess_tdof_list, A);
+      
+      OperatorJacobiSmoother Jacobi(*a, ess_tdof_list);
+      
+      CGSolver cg(MPI_COMM_WORLD);
+      cg.SetRelTol(1e-12);
+      cg.SetMaxIter(1000);
+      cg.SetPrintLevel(0);
+      cg.SetOperator(*A);
+      cg.SetPreconditioner(Jacobi);
+      X = 0.0;
+      cg.Mult(B, X);
+   }
+   else
+   {
+      HypreParMatrix *Amat = a->ParallelAssemble();
+      HypreDiagScale Jacobi(*Amat);
+      HyprePCG pcg(*Amat);
+      pcg.SetTol(1e-12);
+      pcg.SetMaxIter(1000);
+      pcg.SetPrintLevel(0);
+      pcg.SetPreconditioner(Jacobi);
+      X = 0.0;
+      pcg.Mult(B, X);
+      
+      delete Amat;
+   }
+   
+   result.SetFromTrueDofs(X);
+   
+   // Clean up
+   delete a;
+   delete a_mixed;
+}
+void RemoveMean(ParGridFunction &gf, ParFiniteElementSpace *fes)
+{
+   int myid = Mpi::WorldRank();
+   
+   // Method 1: Use inner product properly
+   Vector gf_vec(fes->GetTrueVSize());
+   gf.GetTrueDofs(gf_vec);
+   
+   // Create constant function = 1 everywhere
+   ParGridFunction one_gf(fes);
+   ConstantCoefficient one_coeff(1.0);
+   one_gf.ProjectCoefficient(one_coeff);
+   
+   Vector one_vec(fes->GetTrueVSize());
+   one_gf.GetTrueDofs(one_vec);
+   
+   // Compute ∫gf dx / ∫1 dx = mean
+   double numerator = gf_vec * one_vec;    // ∫gf dx
+   double denominator = one_vec * one_vec;  // ∫1 dx = volume
+   double mean = numerator / denominator;
+   
+   // Subtract mean
+   gf_vec.Add(-mean, one_vec);
+   gf.SetFromTrueDofs(gf_vec);
+   
+   if (myid == 0)
+   {
+      cout << "Removed mean value: " << mean << " from field" << endl;
+   }
 }
