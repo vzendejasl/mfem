@@ -28,6 +28,11 @@ void project_H1_to_L2(ParGridFunction &result,          // in L2 space (output)
                       ParFiniteElementSpace *fes_l2,    // L2 test/target space
                       bool pa);
 
+void project_L2_to_H1(ParGridFunction &result,              // in L2 space (output)
+                      ParGridFunction &u_l2,                // in H1 vector space (input)
+                      ParFiniteElementSpace *fes_h1,        // L2^d target (vdim = mesh dim)
+                      bool pa);
+
 // Project H1 (vector) → H(div) in L2-sense
 void project_H1_to_Hdiv(ParGridFunction &result,          // in H(div) space (output)
                         ParGridFunction &u_h1,            // in H1 vector space (input)
@@ -291,18 +296,35 @@ int main(int argc, char *argv[])
    ParGridFunction curl_Ah_l2(l2_fespace_vector);
    project_Hdiv_to_L2(curl_Ah_l2, curl_Ah, l2_fespace_vector, pa);
 
-   // Create coefficients from the L2 grid functions
-   VectorGridFunctionCoefficient curl_Ah_l2_coeff(&curl_Ah_l2);
-   
-   // Use ProjectDiscCoefficient for averaging-based projection from L2 to H1
+   // Project from L2 to H1 by solving linear system
    ParGridFunction curl_Ah_h1(h1_fespace_vector);
-   curl_Ah_h1.ProjectDiscCoefficient(curl_Ah_l2_coeff);
+   project_L2_to_H1(curl_Ah_h1, curl_Ah_l2, h1_fespace_vector, pa);
+
+   // Use ProjectDiscCoefficient for averaging-based projection from L2 to H1
+   // Note that this approach destroys the divergence free property of the 
+   // vector potential. Intead perform an L2 projection.
+
+   // Create coefficients from the L2 grid functions
+   // VectorGridFunctionCoefficient curl_Ah_l2_coeff(&curl_Ah_l2);
+   // curl_Ah_h1.ProjectDiscCoefficient(curl_Ah_l2_coeff);
+
+   // ParGridFunction curl_Ah_hcurl(nd_fespace);
+   // project_H1_to_Hcurl(curl_Ah_hcurl, curl_Ah_h1, nd_fespace, pa);
+   
+   // ParGridFunction curl_Ah_hdiv(rt_fespace);
+   // project_Hcurl_Hdiv(curl_Ah_hdiv, curl_Ah_hcurl, nd_fespace, rt_fespace, pa);
+
+   // ParGridFunction div_curl_Ah_l2(l2_fespace_scalar);
+   // compute_div_Hdiv_to_L2(div_curl_Ah_l2, curl_Ah_hdiv, rt_fespace, l2_fespace_scalar, pa);
+
 
 
    /*
    // This did not consergve the divergence free and curl free of the Helmholtz-Hoddge Decomposition
    // I suspsect it might be related to the ProjectDiscCoeff call that might be breaking things since 
    // it is an averaging operator
+   // Update: if you solve for the projection of L2 to H1 you do recover the desired curl and divergence
+   // free properties of the field. The averaging destroyes this property.
 
    // Define u in L2
    ParGridFunction u_l2(l2_fespace_vector);
@@ -377,11 +399,15 @@ int main(int argc, char *argv[])
 
    ParGridFunction grad_phi_l2(l2_fespace_vector);
    project_Hdiv_to_L2(grad_phi_l2, grad_phi_hdiv, l2_fespace_vector, pa);
-   VectorGridFunctionCoefficient grad_phi_l2_coeff(&grad_phi_l2);
 
    ParGridFunction grad_phi_h1(h1_fespace_vector);
-   grad_phi_h1.ProjectDiscCoefficient(grad_phi_l2_coeff);
+   project_L2_to_H1(grad_phi_h1, grad_phi_l2, h1_fespace_vector, pa);
 
+   // Use ProjectDiscCoefficient for averaging-based projection from L2 to H1
+   // Note that this approach destroys the curl free free property of the 
+   // scalar potential. Instead perform an L2 projection.
+   // VectorGridFunctionCoefficient grad_phi_l2_coeff(&grad_phi_l2);
+   // grad_phi_h1.ProjectDiscCoefficient(grad_phi_l2_coeff);
 
    // Sanity Checks
    ParGridFunction u_l2(l2_fespace_vector);
@@ -411,7 +437,9 @@ int main(int argc, char *argv[])
       VectorConstantCoefficient zero_vec(zero_v);
 
       double curl_grad_phi_computed_error = curl_grad_phi.ComputeL2Error(zero_vec);
+      // double curl_grad_phi_computed_error_project = curl_grad_phi_hdiv.ComputeL2Error(zero_vec);
       double div_curl_A_error = div_curl_Ah.ComputeL2Error(zero);
+      // double div_curl_A_error_l2 = div_curl_Ah_l2.ComputeL2Error(zero);
       double div_A_error = div_Ah.ComputeL2Error(zero);
       double grad_phi_error = grad_phi.ComputeL2Error(grad_phi_coeff);
       double grad_phi_error_h1 = grad_phi_h1.ComputeL2Error(grad_phi_coeff);
@@ -424,12 +452,14 @@ int main(int argc, char *argv[])
       {
          cout << "\n|| A_h - A ||_{L^2} = " << error << '\n' << endl;
          cout << "div(curl A) L2 norm (should be ~0): " << div_curl_A_error << endl;
+         // cout << "div(curl A) H1 L2 norm (should be ~0): " << div_curl_A_error_l2 << endl;
          cout << "div(A) L2 norm (should be ~0): " << div_A_error << endl;
 
          cout << "curl Ah L2 norm: " << curl_Ah_l2_error << endl;
          cout << "curl Ah H1 L2 norm: " << curl_Ah_h1_error << endl;
 
          cout << "curl(grad phi) L2 error (should be ~0): " << curl_grad_phi_computed_error << endl;
+         // cout << "curl(grad phi) project L2 error (should be ~0): " << curl_grad_phi_computed_error_project << endl;
          cout << "grad_phi L2 norm: " << grad_phi_error << endl;
          cout << "grad_phi H1 L2 norm: " << grad_phi_error_h1 << endl;
          cout << "vel error from reconstruction: " << total_vel_error << endl;
@@ -494,6 +524,7 @@ int main(int argc, char *argv[])
     dc.RegisterField("curl_u_exact",    &curl_u_exact);
 
     dc.RegisterField("grad_phi",   &grad_phi);
+    dc.RegisterField("grad_phi_h1",   &grad_phi_h1);
     dc.RegisterField("grad_phi_exact",   &grad_phi_exact_h1);
     dc.RegisterField("curl_grad_phi_hdiv", &curl_grad_phi);
 
@@ -977,6 +1008,59 @@ void project_H1_to_L2(ParGridFunction &result,              // in L2 space (outp
    else
    {
       std::unique_ptr<HypreParMatrix> Mpar(M_L2.ParallelAssemble());
+      HypreDiagScale J(*Mpar);
+      HyprePCG pcg(*Mpar);
+      pcg.SetTol(1e-12);
+      pcg.SetMaxIter(300);
+      pcg.SetPrintLevel(0);
+      pcg.SetPreconditioner(J);
+      pcg.Mult(B, X);
+   }
+
+   result = 0.0;
+   result.SetFromTrueDofs(X);
+}
+
+void project_L2_to_H1(ParGridFunction &result,              // in L2 space (output)
+                      ParGridFunction &u_l2,                // in H1 vector space (input)
+                      ParFiniteElementSpace *fes_h1,        // L2^d target (vdim = mesh dim)
+                      bool pa)
+{
+   // 1) L2^d mass matrix on the target space
+   ParBilinearForm M_h1(fes_h1);
+   if (pa) { M_h1.SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+   M_h1.AddDomainIntegrator(new VectorMassIntegrator());  // correct for L2/H1 vector spaces
+   M_h1.Assemble();
+   if (!pa) { M_h1.Finalize(); }
+
+   // 2) RHS b = ∫ u_h1 · v_l2  (build it as a LinearForm on the L2 space)
+   VectorGridFunctionCoefficient ucoeff(&u_l2);
+   ParLinearForm b(fes_h1);
+   b.AddDomainIntegrator(new VectorDomainLFIntegrator(ucoeff)); // no mixed operator needed
+   b.Assemble();
+
+   // 3) Solve M_L2 X = B
+   Vector B(fes_h1->GetTrueVSize()), X(fes_h1->GetTrueVSize());
+   b.ParallelAssemble(B);
+   X = 0.0;
+
+   if (pa)
+   {
+      Array<int> ess;                      // none for pure L2 projection
+      OperatorPtr Mop;
+      M_h1.FormSystemMatrix(ess, Mop);     // PA path OK for VectorMassIntegrator on L2
+      OperatorJacobiSmoother J(M_h1, ess); // simple diagonal smoother works well for mass
+      CGSolver cg(fes_h1->GetComm());
+      cg.SetRelTol(1e-12);
+      cg.SetMaxIter(300);
+      cg.SetPrintLevel(0);
+      cg.SetOperator(*Mop);
+      cg.SetPreconditioner(J);
+      cg.Mult(B, X);
+   }
+   else
+   {
+      std::unique_ptr<HypreParMatrix> Mpar(M_h1.ParallelAssemble());
       HypreDiagScale J(*Mpar);
       HyprePCG pcg(*Mpar);
       pcg.SetTol(1e-12);
