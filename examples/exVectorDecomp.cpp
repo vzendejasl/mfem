@@ -150,6 +150,19 @@ int main(int argc, char *argv[])
    dim = mesh->Dimension();
    int sdim = mesh->SpaceDimension();
 
+   // VectorFunctionCoefficient translate_set_mesh(mesh->Dimension(), [&](const Vector &x_in, Vector &x_out){
+
+   //    x_out[0] = x_in[0]*0.5; // Translate x-coordinate
+   //    x_out[1] = x_in[1]*x_in[1]*2.0; // Translate y-coordinate
+   //    if (mesh->Dimension() == 3)
+   //    {
+   //       x_out[2] = x_in[2]*0.75; // Translate z-coordinate
+   //    }
+   // });
+
+   // // Apply translation to the mesh
+   // mesh->Transform(translate_set_mesh);
+
    // 5. Refine the serial mesh on all processors to increase the resolution. In
    //    this example we do 'ref_levels' of uniform refinement. We choose
    //    'ref_levels' to be the largest number that gives a final mesh with no
@@ -369,6 +382,17 @@ int main(int argc, char *argv[])
    ParGridFunction grad_phi_h1(h1_fespace_vector);
    grad_phi_h1.ProjectDiscCoefficient(grad_phi_l2_coeff);
 
+
+   // Sanity Checks
+   ParGridFunction u_l2(l2_fespace_vector);
+   project_H1_to_L2(u_l2, u_h1, l2_fespace_vector, pa);
+   VectorGridFunctionCoefficient u_l2_coeff(&u_l2);
+
+   ParGridFunction vel_error(l2_fespace_vector);
+   vel_error = grad_phi_l2;
+   vel_error += curl_Ah_l2;
+   vel_error -= u_l2;
+
    // Define ceofficients for comparison for later
    VectorFunctionCoefficient A_coeff(sdim, A_exact);
 
@@ -393,6 +417,7 @@ int main(int argc, char *argv[])
       double grad_phi_error_h1 = grad_phi_h1.ComputeL2Error(grad_phi_coeff);
       double curl_Ah_l2_error = curl_Ah.ComputeL2Error(curl_A_exact_coeff);
       double curl_Ah_h1_error = curl_Ah_h1.ComputeL2Error(curl_A_exact_coeff);
+      double total_vel_error = vel_error.ComputeL2Error(zero);
    
 
       if (myid == 0)
@@ -407,6 +432,7 @@ int main(int argc, char *argv[])
          cout << "curl(grad phi) L2 error (should be ~0): " << curl_grad_phi_computed_error << endl;
          cout << "grad_phi L2 norm: " << grad_phi_error << endl;
          cout << "grad_phi H1 L2 norm: " << grad_phi_error_h1 << endl;
+         cout << "vel error from reconstruction: " << total_vel_error << endl;
       }
    }
 
