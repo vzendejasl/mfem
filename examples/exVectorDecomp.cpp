@@ -5,6 +5,9 @@
 using namespace std;
 using namespace mfem;
 
+// Example run
+// mpirun -n 8 ./exVectorDecomp -n 16 -o 2 -rs 1e-8 -pa
+
 // Exact solution, E, and r.h.s., f. See below for implementation.
 void A_exact(const Vector &x, Vector &A);
 void curl_A_exact(const Vector &x, Vector &Acurl);
@@ -33,94 +36,14 @@ private:
     std::unique_ptr<HypreDiagScale> hypre_prec;
     std::unique_ptr<HyprePCG> hypre_solver;
     OperatorPtr mass_op;
+
+    void SetUpOperator();
     
 public:
     H1ToL2OrHdivProjector(ParFiniteElementSpace *test_space, 
-                       bool partial_assembly) 
-        : test_fes(test_space), pa(partial_assembly)
-    {
-        SetupOperator();
-    }
-    
-private:
-    void SetupOperator()
-    {
-        // Create mass matrix on ND space (this is the expensive part)
-        mass_form = std::make_unique<ParBilinearForm>(test_fes);
-        if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+                       bool partial_assembly); 
 
-        if (test_fes->GetVDim() == 1){
-            mass_form->AddDomainIntegrator(new MassIntegrator());
-        } else {
-            mass_form->AddDomainIntegrator(new VectorMassIntegrator());
-        }
-
-        mass_form->Assemble();
-        if (!pa) { mass_form->Finalize(); }
-        
-        // Setup solver for the mass matrix
-        if (pa)
-        {
-            Array<int> ess_tdof_list; // empty for L2 projection
-            mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
-            
-            jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
-            cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
-            cg_solver->SetRelTol(1e-12);
-            cg_solver->SetMaxIter(500);
-            cg_solver->SetPrintLevel(0);
-            cg_solver->SetOperator(*mass_op);
-            cg_solver->SetPreconditioner(*jacobi_prec);
-        }
-        else
-        {
-            mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
-            hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
-            hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
-            hypre_solver->SetTol(1e-12);
-            hypre_solver->SetMaxIter(500);
-            hypre_solver->SetPrintLevel(0);
-            hypre_solver->SetPreconditioner(*hypre_prec);
-        }
-    }
-    
-public:
-    // Apply the projection operator: result = Project(u_h1)
-    void Apply(ParGridFunction &result, const ParGridFunction &u_h1) const
-    {
-        // STEP 1: Build RHS for THIS specific input function
-        // b_i = (u_h1, w_i) where w_i are basis functions in ND space
-        ParLinearForm b(test_fes);
-
-        if (test_fes->GetVDim() == 1){
-            GridFunctionCoefficient ucoeff(&u_h1);
-            b.AddDomainIntegrator(new DomainLFIntegrator(ucoeff));
-        } else {
-            VectorGridFunctionCoefficient ucoeff(&u_h1);
-            b.AddDomainIntegrator(new VectorDomainLFIntegrator(ucoeff));
-        }
-
-        b.Assemble();
-        
-        Vector B(test_fes->GetTrueVSize()), X(test_fes->GetTrueVSize());
-        b.ParallelAssemble(B);  // This B depends on u_h1!
-        X = 0.0;
-        
-        // STEP 2: Solve M * X = B using pre-factorized M
-        // The expensive matrix setup was done once in SetupOperator()
-        // Now we just solve with the new RHS
-        if (pa)
-        {
-            cg_solver->Mult(B, X);  // Solve M*X = B
-        }
-        else
-        {
-            hypre_solver->Mult(B, X);  // Solve M*X = B
-        }
-        
-        result = 0.0;
-        result.SetFromTrueDofs(X);
-    }
+    void Apply(ParGridFunction &result, const ParGridFunction &u_h1) const;
 };
 
 class H1ToHdivOrHcurlProjector
@@ -137,81 +60,14 @@ private:
     std::unique_ptr<HypreDiagScale> hypre_prec;
     std::unique_ptr<HyprePCG> hypre_solver;
     OperatorPtr mass_op;
+
+    void SetUpOperator();
     
 public:
-    H1ToHdivOrHcurlProjector(ParFiniteElementSpace *test_space, 
-                       bool partial_assembly) 
-        : test_fes(test_space), pa(partial_assembly)
-    {
-        SetupOperator();
-    }
-    
-private:
-    void SetupOperator()
-    {
-        // Create mass matrix on ND space (this is the expensive part)
-        mass_form = std::make_unique<ParBilinearForm>(test_fes);
-        if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-        mass_form->AddDomainIntegrator(new VectorFEMassIntegrator());
-        mass_form->Assemble();
-        if (!pa) { mass_form->Finalize(); }
-        
-        // Setup solver for the mass matrix
-        if (pa)
-        {
-            Array<int> ess_tdof_list; // empty for L2 projection
-            mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
-            
-            jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
-            cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
-            cg_solver->SetRelTol(1e-12);
-            cg_solver->SetMaxIter(500);
-            cg_solver->SetPrintLevel(0);
-            cg_solver->SetOperator(*mass_op);
-            cg_solver->SetPreconditioner(*jacobi_prec);
-        }
-        else
-        {
-            mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
-            hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
-            hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
-            hypre_solver->SetTol(1e-12);
-            hypre_solver->SetMaxIter(500);
-            hypre_solver->SetPrintLevel(0);
-            hypre_solver->SetPreconditioner(*hypre_prec);
-        }
-    }
-    
-public:
-    // Apply the projection operator: result = Project(u_h1)
-    void Apply(ParGridFunction &result, const ParGridFunction &u_h1) const
-    {
-        // STEP 1: Build RHS for THIS specific input function
-        // b_i = (u_h1, w_i) where w_i are basis functions in ND space
-        VectorGridFunctionCoefficient ucoeff(&u_h1);
-        ParLinearForm b(test_fes);
-        b.AddDomainIntegrator(new VectorFEDomainLFIntegrator(ucoeff));
-        b.Assemble();
-        
-        Vector B(test_fes->GetTrueVSize()), X(test_fes->GetTrueVSize());
-        b.ParallelAssemble(B);  // This B depends on u_h1!
-        X = 0.0;
-        
-        // STEP 2: Solve M * X = B using pre-factorized M
-        // The expensive matrix setup was done once in SetupOperator()
-        // Now we just solve with the new RHS
-        if (pa)
-        {
-            cg_solver->Mult(B, X);  // Solve M*X = B
-        }
-        else
-        {
-            hypre_solver->Mult(B, X);  // Solve M*X = B
-        }
-        
-        result = 0.0;
-        result.SetFromTrueDofs(X);
-    }
+   H1ToHdivOrHcurlProjector(ParFiniteElementSpace *test_space, 
+                      bool partial_assembly); 
+
+    void Apply(ParGridFunction &result, const ParGridFunction &u_h1) const;
 };
 
 class HcurlHdivProjector 
@@ -232,87 +88,13 @@ private:
     std::unique_ptr<HyprePCG> hypre_solver;
     OperatorPtr mass_op;
     
+    void SetUpOperator();
 public:
     HcurlHdivProjector(ParFiniteElementSpace *trial_space, 
                        ParFiniteElementSpace *test_space, 
-                       bool partial_assembly) 
-        : trial_fes(trial_space), test_fes(test_space), pa(partial_assembly)
-    {
-        SetupOperator();
-    }
-    
-private:
-    void SetupOperator()
-    {
-        mass_form = std::make_unique<ParBilinearForm>(test_fes);
-        if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-        mass_form->AddDomainIntegrator(new VectorFEMassIntegrator());
-        mass_form->Assemble();
-        if (!pa) { mass_form->Finalize(); }
+                       bool partial_assembly);
 
-        mixed_form = std::make_unique<ParMixedBilinearForm>(trial_fes, test_fes);
-        if (pa) { mixed_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-        mixed_form->AddDomainIntegrator(new VectorFEMassIntegrator());
-        mixed_form->Assemble();
-        if (!pa) { mixed_form->Finalize(); }
-        
-        // Setup solver for the mass matrix
-        if (pa)
-        {
-            Array<int> ess_tdof_list; // empty for L2 projection
-            mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
-
-            jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
-            cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
-            cg_solver->SetRelTol(1e-12);
-            cg_solver->SetMaxIter(500);
-            cg_solver->SetPrintLevel(0);
-            cg_solver->SetOperator(*mass_op);
-            cg_solver->SetPreconditioner(*jacobi_prec);
-        }
-        else
-        {
-            mixed_matrix = std::unique_ptr<HypreParMatrix>(mixed_form->ParallelAssemble());
-            mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
-            hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
-            hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
-            hypre_solver->SetTol(1e-12);
-            hypre_solver->SetMaxIter(500);
-            hypre_solver->SetPrintLevel(0);
-            hypre_solver->SetPreconditioner(*hypre_prec);
-        }
-    }
-    
-public:
-    // Apply the projection operator: result = Project(u_h1)
-    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
-    {
-        Vector B(test_fes->GetTrueVSize());
-        Vector X(test_fes->GetTrueVSize());
-
-        if (pa)
-        {
-           ParLinearForm b(test_fes); // used as a vector
-           mixed_form->Mult(gftrial, b); // process-local multiplication
-           b.ParallelAssemble(B);
-        }
-        else
-        {
-
-           Vector P(trial_fes->GetTrueVSize());
-           gftrial.GetTrueDofs(P);
-           mixed_matrix->Mult(P,B);
-        }
-
-        X = 0.0;
-        if(pa)
-        {
-         cg_solver->Mult(B,X);
-        }else{
-         hypre_solver->Mult(B,X);
-        }
-        result.SetFromTrueDofs(X);
-    }
+    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const;
 };
 
 class ComputeDivergenceHdivToL2
@@ -333,87 +115,13 @@ private:
     std::unique_ptr<HyprePCG> hypre_solver;
     OperatorPtr mass_op;
     
+    void SetUpOperator();
 public:
     ComputeDivergenceHdivToL2(ParFiniteElementSpace *trial_space, 
                        ParFiniteElementSpace *test_space, 
-                       bool partial_assembly) 
-        : trial_fes(trial_space), test_fes(test_space), pa(partial_assembly)
-    {
-        SetupOperator();
-    }
+                       bool partial_assembly);
     
-private:
-    void SetupOperator()
-    {
-        mass_form = std::make_unique<ParBilinearForm>(test_fes);
-        if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-        mass_form->AddDomainIntegrator(new MassIntegrator());
-        mass_form->Assemble();
-        if (!pa) { mass_form->Finalize(); }
-
-        mixed_form = std::make_unique<ParMixedBilinearForm>(trial_fes, test_fes);
-        if (pa) { mixed_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-        mixed_form->AddDomainIntegrator(new VectorFEDivergenceIntegrator());
-        mixed_form->Assemble();
-        if (!pa) { mixed_form->Finalize(); }
-        
-        // Setup solver for the mass matrix
-        if (pa)
-        {
-            Array<int> ess_tdof_list; // empty for L2 projection
-            mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
-
-            jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
-            cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
-            cg_solver->SetRelTol(1e-12);
-            cg_solver->SetMaxIter(500);
-            cg_solver->SetPrintLevel(0);
-            cg_solver->SetOperator(*mass_op);
-            cg_solver->SetPreconditioner(*jacobi_prec);
-        }
-        else
-        {
-            mixed_matrix = std::unique_ptr<HypreParMatrix>(mixed_form->ParallelAssemble());
-            mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
-            hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
-            hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
-            hypre_solver->SetTol(1e-12);
-            hypre_solver->SetMaxIter(500);
-            hypre_solver->SetPrintLevel(0);
-            hypre_solver->SetPreconditioner(*hypre_prec);
-        }
-    }
-    
-public:
-    // Apply the projection operator: result = Project(u_h1)
-    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
-    {
-        Vector B(test_fes->GetTrueVSize());
-        Vector X(test_fes->GetTrueVSize());
-
-        if (pa)
-        {
-           ParLinearForm b(test_fes); // used as a vector
-           mixed_form->Mult(gftrial, b); // process-local multiplication
-           b.ParallelAssemble(B);
-        }
-        else
-        {
-
-           Vector P(trial_fes->GetTrueVSize());
-           gftrial.GetTrueDofs(P);
-           mixed_matrix->Mult(P,B);
-        }
-
-        X = 0.0;
-        if(pa)
-        {
-         cg_solver->Mult(B,X);
-        }else{
-         hypre_solver->Mult(B,X);
-        }
-        result.SetFromTrueDofs(X);
-    }
+    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const;
 };
 
 class ComputeCurlHcurlToHdiv
@@ -434,87 +142,14 @@ private:
     std::unique_ptr<HyprePCG> hypre_solver;
     OperatorPtr mass_op;
     
+    void SetUpOperator();
+
 public:
     ComputeCurlHcurlToHdiv(ParFiniteElementSpace *trial_space, 
                        ParFiniteElementSpace *test_space, 
-                       bool partial_assembly) 
-        : trial_fes(trial_space), test_fes(test_space), pa(partial_assembly)
-    {
-        SetupOperator();
-    }
+                       bool partial_assembly); 
     
-private:
-    void SetupOperator()
-    {
-        mass_form = std::make_unique<ParBilinearForm>(test_fes);
-        if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-        mass_form->AddDomainIntegrator(new VectorFEMassIntegrator());
-        mass_form->Assemble();
-        if (!pa) { mass_form->Finalize(); }
-
-        mixed_form = std::make_unique<ParMixedBilinearForm>(trial_fes, test_fes);
-        if (pa) { mixed_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-        mixed_form->AddDomainIntegrator(new MixedVectorCurlIntegrator());
-        mixed_form->Assemble();
-        if (!pa) { mixed_form->Finalize(); }
-        
-        // Setup solver for the mass matrix
-        if (pa)
-        {
-            Array<int> ess_tdof_list; // empty for L2 projection
-            mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
-
-            jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
-            cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
-            cg_solver->SetRelTol(1e-12);
-            cg_solver->SetMaxIter(500);
-            cg_solver->SetPrintLevel(0);
-            cg_solver->SetOperator(*mass_op);
-            cg_solver->SetPreconditioner(*jacobi_prec);
-        }
-        else
-        {
-            mixed_matrix = std::unique_ptr<HypreParMatrix>(mixed_form->ParallelAssemble());
-            mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
-            hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
-            hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
-            hypre_solver->SetTol(1e-12);
-            hypre_solver->SetMaxIter(500);
-            hypre_solver->SetPrintLevel(0);
-            hypre_solver->SetPreconditioner(*hypre_prec);
-        }
-    }
-    
-public:
-    // Apply the projection operator: result = Project(u_h1)
-    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
-    {
-        Vector B(test_fes->GetTrueVSize());
-        Vector X(test_fes->GetTrueVSize());
-
-        if (pa)
-        {
-           ParLinearForm b(test_fes); // used as a vector
-           mixed_form->Mult(gftrial, b); // process-local multiplication
-           b.ParallelAssemble(B);
-        }
-        else
-        {
-
-           Vector P(trial_fes->GetTrueVSize());
-           gftrial.GetTrueDofs(P);
-           mixed_matrix->Mult(P,B);
-        }
-
-        X = 0.0;
-        if(pa)
-        {
-         cg_solver->Mult(B,X);
-        }else{
-         hypre_solver->Mult(B,X);
-        }
-        result.SetFromTrueDofs(X);
-    }
+    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const;
 };
 
 class ComputeGradientH1ScalarToHcurl
@@ -534,88 +169,15 @@ private:
     std::unique_ptr<HypreDiagScale> hypre_prec;
     std::unique_ptr<HyprePCG> hypre_solver;
     OperatorPtr mass_op;
+        
+    void SetUpOperator();
     
 public:
     ComputeGradientH1ScalarToHcurl(ParFiniteElementSpace *trial_space, 
                        ParFiniteElementSpace *test_space, 
-                       bool partial_assembly) 
-        : trial_fes(trial_space), test_fes(test_space), pa(partial_assembly)
-    {
-        SetupOperator();
-    }
+                       bool partial_assembly);
     
-private:
-    void SetupOperator()
-    {
-        mass_form = std::make_unique<ParBilinearForm>(test_fes);
-        if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-        mass_form->AddDomainIntegrator(new VectorFEMassIntegrator());
-        mass_form->Assemble();
-        if (!pa) { mass_form->Finalize(); }
-
-        mixed_form = std::make_unique<ParMixedBilinearForm>(trial_fes, test_fes);
-        if (pa) { mixed_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-        mixed_form->AddDomainIntegrator(new MixedVectorGradientIntegrator());
-        mixed_form->Assemble();
-        if (!pa) { mixed_form->Finalize(); }
-        
-        // Setup solver for the mass matrix
-        if (pa)
-        {
-            Array<int> ess_tdof_list; // empty for L2 projection
-            mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
-
-            jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
-            cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
-            cg_solver->SetRelTol(1e-12);
-            cg_solver->SetMaxIter(500);
-            cg_solver->SetPrintLevel(0);
-            cg_solver->SetOperator(*mass_op);
-            cg_solver->SetPreconditioner(*jacobi_prec);
-        }
-        else
-        {
-            mixed_matrix = std::unique_ptr<HypreParMatrix>(mixed_form->ParallelAssemble());
-            mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
-            hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
-            hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
-            hypre_solver->SetTol(1e-12);
-            hypre_solver->SetMaxIter(500);
-            hypre_solver->SetPrintLevel(0);
-            hypre_solver->SetPreconditioner(*hypre_prec);
-        }
-    }
-    
-public:
-    // Apply the projection operator: result = Project(u_h1)
-    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
-    {
-        Vector B(test_fes->GetTrueVSize());
-        Vector X(test_fes->GetTrueVSize());
-
-        if (pa)
-        {
-           ParLinearForm b(test_fes); // used as a vector
-           mixed_form->Mult(gftrial, b); // process-local multiplication
-           b.ParallelAssemble(B);
-        }
-        else
-        {
-
-           Vector P(trial_fes->GetTrueVSize());
-           gftrial.GetTrueDofs(P);
-           mixed_matrix->Mult(P,B);
-        }
-
-        X = 0.0;
-        if(pa)
-        {
-         cg_solver->Mult(B,X);
-        }else{
-         hypre_solver->Mult(B,X);
-        }
-        result.SetFromTrueDofs(X);
-    }
+    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const;
 };
 
 struct ProjectorOps {
@@ -681,7 +243,7 @@ int main(int argc, char *argv[])
    const char *device_config = "cpu";
    bool visualization = true;
    double length = 1.0;
-   int num_el = 8;
+   int num_el = 4;
    delta_const = 1e-4;
 #ifdef MFEM_USE_AMGX
    bool useAmgX = false;
@@ -834,63 +396,6 @@ int main(int argc, char *argv[])
 
    ParGridFunction curl_Ah_l2(l2_fespace_vector);
    ops.projectorH1ToL2.Apply(curl_Ah_l2, curl_Ah_h1);
-
-   // Use ProjectDiscCoefficient for averaging-based projection from L2 to H1
-   // Note that this approach destroys the divergence free property of the 
-   // vector potential. Intead perform an L2 projection.
-
-   // Create coefficients from the L2 grid functions
-   // VectorGridFunctionCoefficient curl_Ah_l2_coeff(&curl_Ah_l2);
-   // curl_Ah_h1.ProjectDiscCoefficient(curl_Ah_l2_coeff);
-
-   // ParGridFunction curl_Ah_hcurl(nd_fespace);
-   
-   // ParGridFunction curl_Ah_hdiv(rt_fespace);
-
-   // ParGridFunction div_curl_Ah_l2(l2_fespace_scalar);
-
-   /*
-   // This did not consergve the divergence free and curl free of the Helmholtz-Hoddge Decomposition
-   // I suspsect it might be related to the ProjectDiscCoeff call that might be breaking things since 
-   // it is an averaging operator
-   // Update: if you solve for the projection of L2 to H1 you do recover the desired curl and divergence
-   // free properties of the field. The averaging destroyes this property.
-
-   // Define u in L2
-   ParGridFunction u_l2(l2_fespace_vector);
-   u_l2 = 0.0;
-
-   // Project curl Ah to L2 space
-   ParGridFunction grad_phi_l2(l2_fespace_vector);
-   grad_phi_l2 = 0.0;
-
-   ParGridFunction curl_Ah_l2(l2_fespace_vector);
-   grad_phi_l2 = u_l2;
-   grad_phi_l2 -= curl_Ah_l2;
-
-   // Project to grad phi_l2 and curl_Ah_l2 to H1
-   ParGridFunction grad_phi_h1(h1_fespace_vector);
-   ParGridFunction curl_Ah_h1(h1_fespace_vector);
-   
-   // Create coefficients from the L2 grid functions
-   VectorGridFunctionCoefficient grad_phi_l2_coeff(&grad_phi_l2);
-   VectorGridFunctionCoefficient curl_Ah_l2_coeff(&curl_Ah_l2);
-   
-   // Use ProjectDiscCoefficient for averaging-based projection from L2 to H1
-   grad_phi_h1.ProjectDiscCoefficient(grad_phi_l2_coeff);
-   curl_Ah_h1.ProjectDiscCoefficient(curl_Ah_l2_coeff);
-
-   ParGridFunction curl_Ah_hcurl_l2_project(nd_fespace);
-
-   grad_phi_hcurl = 0.0;
-   // When grad phi exact is used here, the curl holds fine.
-
-   ParGridFunction curl_grad_phi_hdiv(rt_fespace);
-   curl_grad_phi_hdiv = 0.0;
-   compute_Curl_Hcurl_to_Hdiv(curl_grad_phi_hdiv, grad_phi_hcurl, nd_fespace,rt_fespace,pa);
-
-   */
-
 
    // Solve for scalar potential
 
@@ -1194,15 +699,12 @@ void solve_vector_potential( const ProjectorOps& ops,
    FiniteElementCollection *nd_fec = new ND_FECollection(order, dim);   // H(curl)
    FiniteElementCollection *rt_fec = new RT_FECollection(order-1, dim); // H(div)
    FiniteElementCollection *l2_fec = new L2_FECollection(order-1, dim);
-   FiniteElementCollection *h1_fec = new H1_FECollection(order, dim);
 
-   ParFiniteElementSpace *l2_fespace_scalar = new ParFiniteElementSpace(pmesh, l2_fec);
    ParFiniteElementSpace *l2_fespace_vector = new ParFiniteElementSpace(pmesh, l2_fec, dim);
+   ParFiniteElementSpace *l2_fespace_scalar = new ParFiniteElementSpace(pmesh, l2_fec);
 
    ParFiniteElementSpace *nd_fespace = new ParFiniteElementSpace(pmesh, nd_fec);
    ParFiniteElementSpace *rt_fespace = new ParFiniteElementSpace(pmesh, rt_fec);
-   ParFiniteElementSpace *h1_fespace_scalar = new ParFiniteElementSpace(pmesh, h1_fec);
-   ParFiniteElementSpace *h1_fespace_vector = new ParFiniteElementSpace(pmesh, h1_fec, dim);
 
 
    // 2. Peform the needed projections
@@ -1286,7 +788,7 @@ void solve_vector_potential( const ProjectorOps& ops,
    if (pa)
    {
 #ifdef MFEM_USE_AMGX
-      MatrixFreeAMS ams(*a, *A, *fespace, muinv, sigma, NULL, ess_bdr, useAmgX);
+      MatrixFreeAMS ams(*a, *A, *nd_fespace, muinv, sigma, NULL, ess_bdr, useAmgX);
 #else
       MatrixFreeAMS ams(*a, *A, *nd_fespace, muinv, sigma, NULL, ess_bdr);
 
@@ -1390,13 +892,9 @@ void solve_vector_potential( const ProjectorOps& ops,
 
    delete nd_fespace;
    delete rt_fespace;
-   delete h1_fespace_vector;
-   delete h1_fespace_scalar;
    delete l2_fespace_vector;
-   delete l2_fespace_scalar;
    delete nd_fec;
    delete rt_fec;
-   delete h1_fec;
    delete l2_fec;
 }
 
@@ -1418,7 +916,6 @@ void solve_scalar_potential( const ProjectorOps& ops,
    ParFiniteElementSpace *nd_fespace = new ParFiniteElementSpace(pmesh, nd_fec);
    ParFiniteElementSpace *rt_fespace = new ParFiniteElementSpace(pmesh, rt_fec);
    ParFiniteElementSpace *h1_fespace_scalar = new ParFiniteElementSpace(pmesh, h1_fec);
-   ParFiniteElementSpace *h1_fespace_vector = new ParFiniteElementSpace(pmesh, h1_fec, dim);
 
 
    // 1. Project u from H1 to Hdiv
@@ -1568,7 +1065,6 @@ void solve_scalar_potential( const ProjectorOps& ops,
    // 18. Free the used memory.
    delete nd_fespace;
    delete rt_fespace;
-   delete h1_fespace_vector;
    delete h1_fespace_scalar;
    delete l2_fespace_vector;
    delete l2_fespace_scalar;
@@ -1576,4 +1072,460 @@ void solve_scalar_potential( const ProjectorOps& ops,
    delete rt_fec;
    delete h1_fec;
    delete l2_fec;
+}
+
+H1ToL2OrHdivProjector::H1ToL2OrHdivProjector(ParFiniteElementSpace *test_space, 
+                   bool partial_assembly) 
+    : test_fes(test_space), pa(partial_assembly)
+{
+    SetUpOperator();
+}
+
+void H1ToL2OrHdivProjector::SetUpOperator()
+{
+    // Create mass matrix on ND space (this is the expensive part)
+    mass_form = std::make_unique<ParBilinearForm>(test_fes);
+    if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+
+    if (test_fes->GetVDim() == 1){
+        mass_form->AddDomainIntegrator(new MassIntegrator());
+    } else {
+        mass_form->AddDomainIntegrator(new VectorMassIntegrator());
+    }
+
+    mass_form->Assemble();
+    if (!pa) { mass_form->Finalize(); }
+    
+    // Setup solver for the mass matrix
+    if (pa)
+    {
+        Array<int> ess_tdof_list; // empty for L2 projection
+        mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
+        
+        jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
+        cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
+        cg_solver->SetRelTol(1e-12);
+        cg_solver->SetMaxIter(500);
+        cg_solver->SetPrintLevel(0);
+        cg_solver->SetOperator(*mass_op);
+        cg_solver->SetPreconditioner(*jacobi_prec);
+    }
+    else
+    {
+        mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
+        hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
+        hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
+        hypre_solver->SetTol(1e-12);
+        hypre_solver->SetMaxIter(500);
+        hypre_solver->SetPrintLevel(0);
+        hypre_solver->SetPreconditioner(*hypre_prec);
+    }
+}
+
+void H1ToL2OrHdivProjector::Apply(ParGridFunction &result, const ParGridFunction &u_h1) const
+{
+    ParLinearForm b(test_fes);
+
+    if (test_fes->GetVDim() == 1){
+        GridFunctionCoefficient ucoeff(&u_h1);
+        b.AddDomainIntegrator(new DomainLFIntegrator(ucoeff));
+    } else {
+        VectorGridFunctionCoefficient ucoeff(&u_h1);
+        b.AddDomainIntegrator(new VectorDomainLFIntegrator(ucoeff));
+    }
+
+    b.Assemble();
+    
+    Vector B(test_fes->GetTrueVSize()), X(test_fes->GetTrueVSize());
+    b.ParallelAssemble(B);
+    X = 0.0;
+    
+    if (pa)
+    {
+        cg_solver->Mult(B, X);
+    }
+    else
+    {
+        hypre_solver->Mult(B, X);
+    }
+    
+    result = 0.0;
+    result.SetFromTrueDofs(X);
+}
+
+ H1ToHdivOrHcurlProjector::H1ToHdivOrHcurlProjector(ParFiniteElementSpace *test_space, 
+                       bool partial_assembly) 
+        : test_fes(test_space), pa(partial_assembly)
+ {
+    SetUpOperator();
+ }
+
+ void H1ToHdivOrHcurlProjector::SetUpOperator()
+{
+    // Create mass matrix on ND space (this is the expensive part)
+    mass_form = std::make_unique<ParBilinearForm>(test_fes);
+    if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+    mass_form->AddDomainIntegrator(new VectorFEMassIntegrator());
+    mass_form->Assemble();
+    if (!pa) { mass_form->Finalize(); }
+    
+    // Setup solver for the mass matrix
+    if (pa)
+    {
+        Array<int> ess_tdof_list; // empty for L2 projection
+        mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
+        
+        jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
+        cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
+        cg_solver->SetRelTol(1e-12);
+        cg_solver->SetMaxIter(500);
+        cg_solver->SetPrintLevel(0);
+        cg_solver->SetOperator(*mass_op);
+        cg_solver->SetPreconditioner(*jacobi_prec);
+    }
+    else
+    {
+        mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
+        hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
+        hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
+        hypre_solver->SetTol(1e-12);
+        hypre_solver->SetMaxIter(500);
+        hypre_solver->SetPrintLevel(0);
+        hypre_solver->SetPreconditioner(*hypre_prec);
+    }
+}
+
+void H1ToHdivOrHcurlProjector::Apply(ParGridFunction &result, const ParGridFunction &u_h1) const
+{
+    VectorGridFunctionCoefficient ucoeff(&u_h1);
+    ParLinearForm b(test_fes);
+    b.AddDomainIntegrator(new VectorFEDomainLFIntegrator(ucoeff));
+    b.Assemble();
+    
+    Vector B(test_fes->GetTrueVSize()), X(test_fes->GetTrueVSize());
+    b.ParallelAssemble(B);  // This B depends on u_h1!
+    X = 0.0;
+    
+    if (pa)
+    {
+        cg_solver->Mult(B, X);  // Solve M*X = B
+    }
+    else
+    {
+        hypre_solver->Mult(B, X);  // Solve M*X = B
+    }
+    
+    result = 0.0;
+    result.SetFromTrueDofs(X);
+}
+
+ HcurlHdivProjector::HcurlHdivProjector(ParFiniteElementSpace *trial_space, 
+                       ParFiniteElementSpace *test_space, 
+                       bool partial_assembly) 
+        : trial_fes(trial_space), test_fes(test_space), pa(partial_assembly)
+ {
+     SetUpOperator();
+ }
+
+ void HcurlHdivProjector::SetUpOperator()
+ {
+     mass_form = std::make_unique<ParBilinearForm>(test_fes);
+     if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+     mass_form->AddDomainIntegrator(new VectorFEMassIntegrator());
+     mass_form->Assemble();
+     if (!pa) { mass_form->Finalize(); }
+
+     mixed_form = std::make_unique<ParMixedBilinearForm>(trial_fes, test_fes);
+     if (pa) { mixed_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+     mixed_form->AddDomainIntegrator(new VectorFEMassIntegrator());
+     mixed_form->Assemble();
+     if (!pa) { mixed_form->Finalize(); }
+     
+     // Setup solver for the mass matrix
+     if (pa)
+     {
+         Array<int> ess_tdof_list; // empty for L2 projection
+         mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
+
+         jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
+         cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
+         cg_solver->SetRelTol(1e-12);
+         cg_solver->SetMaxIter(500);
+         cg_solver->SetPrintLevel(0);
+         cg_solver->SetOperator(*mass_op);
+         cg_solver->SetPreconditioner(*jacobi_prec);
+     }
+     else
+     {
+         mixed_matrix = std::unique_ptr<HypreParMatrix>(mixed_form->ParallelAssemble());
+         mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
+         hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
+         hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
+         hypre_solver->SetTol(1e-12);
+         hypre_solver->SetMaxIter(500);
+         hypre_solver->SetPrintLevel(0);
+         hypre_solver->SetPreconditioner(*hypre_prec);
+     }
+ }
+
+void HcurlHdivProjector::Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
+{
+    Vector B(test_fes->GetTrueVSize());
+    Vector X(test_fes->GetTrueVSize());
+
+    if (pa)
+    {
+       ParLinearForm b(test_fes); // used as a vector
+       mixed_form->Mult(gftrial, b); // process-local multiplication
+       b.ParallelAssemble(B);
+    }
+    else
+    {
+
+       Vector P(trial_fes->GetTrueVSize());
+       gftrial.GetTrueDofs(P);
+       mixed_matrix->Mult(P,B);
+    }
+
+    X = 0.0;
+    if(pa)
+    {
+     cg_solver->Mult(B,X);
+    }else{
+     hypre_solver->Mult(B,X);
+    }
+    result.SetFromTrueDofs(X);
+}
+
+ComputeDivergenceHdivToL2::ComputeDivergenceHdivToL2(ParFiniteElementSpace *trial_space, 
+                      ParFiniteElementSpace *test_space, 
+                      bool partial_assembly) 
+       : trial_fes(trial_space), test_fes(test_space), pa(partial_assembly)
+{
+    SetUpOperator();
+}
+
+void ComputeDivergenceHdivToL2::SetUpOperator()
+{
+    mass_form = std::make_unique<ParBilinearForm>(test_fes);
+    if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+    mass_form->AddDomainIntegrator(new MassIntegrator());
+    mass_form->Assemble();
+    if (!pa) { mass_form->Finalize(); }
+
+    mixed_form = std::make_unique<ParMixedBilinearForm>(trial_fes, test_fes);
+    if (pa) { mixed_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+    mixed_form->AddDomainIntegrator(new VectorFEDivergenceIntegrator());
+    mixed_form->Assemble();
+    if (!pa) { mixed_form->Finalize(); }
+    
+    // Setup solver for the mass matrix
+    if (pa)
+    {
+        Array<int> ess_tdof_list; // empty for L2 projection
+        mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
+
+        jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
+        cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
+        cg_solver->SetRelTol(1e-12);
+        cg_solver->SetMaxIter(500);
+        cg_solver->SetPrintLevel(0);
+        cg_solver->SetOperator(*mass_op);
+        cg_solver->SetPreconditioner(*jacobi_prec);
+    }
+    else
+    {
+        mixed_matrix = std::unique_ptr<HypreParMatrix>(mixed_form->ParallelAssemble());
+        mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
+        hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
+        hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
+        hypre_solver->SetTol(1e-12);
+        hypre_solver->SetMaxIter(500);
+        hypre_solver->SetPrintLevel(0);
+        hypre_solver->SetPreconditioner(*hypre_prec);
+    }
+}
+void ComputeDivergenceHdivToL2::Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
+{
+    Vector B(test_fes->GetTrueVSize());
+    Vector X(test_fes->GetTrueVSize());
+
+    if (pa)
+    {
+       ParLinearForm b(test_fes); // used as a vector
+       mixed_form->Mult(gftrial, b); // process-local multiplication
+       b.ParallelAssemble(B);
+    }
+    else
+    {
+
+       Vector P(trial_fes->GetTrueVSize());
+       gftrial.GetTrueDofs(P);
+       mixed_matrix->Mult(P,B);
+    }
+
+    X = 0.0;
+    if(pa)
+    {
+     cg_solver->Mult(B,X);
+    }else{
+     hypre_solver->Mult(B,X);
+    }
+    result.SetFromTrueDofs(X);
+}
+
+ComputeCurlHcurlToHdiv::ComputeCurlHcurlToHdiv(ParFiniteElementSpace *trial_space, 
+                       ParFiniteElementSpace *test_space, 
+                       bool partial_assembly) 
+        : trial_fes(trial_space), test_fes(test_space), pa(partial_assembly)
+{
+    SetUpOperator();
+}
+
+void ComputeCurlHcurlToHdiv::SetUpOperator()
+{
+    mass_form = std::make_unique<ParBilinearForm>(test_fes);
+    if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+    mass_form->AddDomainIntegrator(new VectorFEMassIntegrator());
+    mass_form->Assemble();
+    if (!pa) { mass_form->Finalize(); }
+
+    mixed_form = std::make_unique<ParMixedBilinearForm>(trial_fes, test_fes);
+    if (pa) { mixed_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+    mixed_form->AddDomainIntegrator(new MixedVectorCurlIntegrator());
+    mixed_form->Assemble();
+    if (!pa) { mixed_form->Finalize(); }
+    
+    // Setup solver for the mass matrix
+    if (pa)
+    {
+        Array<int> ess_tdof_list; // empty for L2 projection
+        mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
+
+        jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
+        cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
+        cg_solver->SetRelTol(1e-12);
+        cg_solver->SetMaxIter(500);
+        cg_solver->SetPrintLevel(0);
+        cg_solver->SetOperator(*mass_op);
+        cg_solver->SetPreconditioner(*jacobi_prec);
+    }
+    else
+    {
+        mixed_matrix = std::unique_ptr<HypreParMatrix>(mixed_form->ParallelAssemble());
+        mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
+        hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
+        hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
+        hypre_solver->SetTol(1e-12);
+        hypre_solver->SetMaxIter(500);
+        hypre_solver->SetPrintLevel(0);
+        hypre_solver->SetPreconditioner(*hypre_prec);
+    }
+}
+    
+void ComputeCurlHcurlToHdiv::Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
+{
+    Vector B(test_fes->GetTrueVSize());
+    Vector X(test_fes->GetTrueVSize());
+
+    if (pa)
+    {
+       ParLinearForm b(test_fes); // used as a vector
+       mixed_form->Mult(gftrial, b); // process-local multiplication
+       b.ParallelAssemble(B);
+    }
+    else
+    {
+
+       Vector P(trial_fes->GetTrueVSize());
+       gftrial.GetTrueDofs(P);
+       mixed_matrix->Mult(P,B);
+    }
+
+    X = 0.0;
+    if(pa)
+    {
+     cg_solver->Mult(B,X);
+    }else{
+     hypre_solver->Mult(B,X);
+    }
+    result.SetFromTrueDofs(X);
+}
+
+ComputeGradientH1ScalarToHcurl::ComputeGradientH1ScalarToHcurl(ParFiniteElementSpace *trial_space, 
+                       ParFiniteElementSpace *test_space, 
+                       bool partial_assembly) 
+        : trial_fes(trial_space), test_fes(test_space), pa(partial_assembly)
+{
+    SetUpOperator();
+}
+    
+void ComputeGradientH1ScalarToHcurl::SetUpOperator()
+{
+    mass_form = std::make_unique<ParBilinearForm>(test_fes);
+    if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+    mass_form->AddDomainIntegrator(new VectorFEMassIntegrator());
+    mass_form->Assemble();
+    if (!pa) { mass_form->Finalize(); }
+
+    mixed_form = std::make_unique<ParMixedBilinearForm>(trial_fes, test_fes);
+    if (pa) { mixed_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+    mixed_form->AddDomainIntegrator(new MixedVectorGradientIntegrator());
+    mixed_form->Assemble();
+    if (!pa) { mixed_form->Finalize(); }
+    
+    // Setup solver for the mass matrix
+    if (pa)
+    {
+        Array<int> ess_tdof_list; // empty for L2 projection
+        mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
+
+        jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
+        cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
+        cg_solver->SetRelTol(1e-12);
+        cg_solver->SetMaxIter(500);
+        cg_solver->SetPrintLevel(0);
+        cg_solver->SetOperator(*mass_op);
+        cg_solver->SetPreconditioner(*jacobi_prec);
+    }
+    else
+    {
+        mixed_matrix = std::unique_ptr<HypreParMatrix>(mixed_form->ParallelAssemble());
+        mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
+        hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
+        hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
+        hypre_solver->SetTol(1e-12);
+        hypre_solver->SetMaxIter(500);
+        hypre_solver->SetPrintLevel(0);
+        hypre_solver->SetPreconditioner(*hypre_prec);
+    }
+}
+    
+void ComputeGradientH1ScalarToHcurl::Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
+{
+    Vector B(test_fes->GetTrueVSize());
+    Vector X(test_fes->GetTrueVSize());
+
+    if (pa)
+    {
+       ParLinearForm b(test_fes); // used as a vector
+       mixed_form->Mult(gftrial, b); // process-local multiplication
+       b.ParallelAssemble(B);
+    }
+    else
+    {
+
+       Vector P(trial_fes->GetTrueVSize());
+       gftrial.GetTrueDofs(P);
+       mixed_matrix->Mult(P,B);
+    }
+
+    X = 0.0;
+    if(pa)
+    {
+     cg_solver->Mult(B,X);
+    }else{
+     hypre_solver->Mult(B,X);
+    }
+    result.SetFromTrueDofs(X);
 }
