@@ -12,22 +12,12 @@ void w_exact(const Vector &x, Vector &f);
 void u_exact(const Vector &x, Vector &A);
 void grad_phi_exact(const Vector &x, Vector &u);
 
-
-void solve_scalar_potential_direct(ParGridFunction &phi,
-                                  ParGridFunction &div_u_h1,      // divergence already in H1 scalar space
-                                  ParFiniteElementSpace *h1_fes_scalar,
-                                  bool pa);
-
-void solve_vector_potential_direct(ParGridFunction &Ah,
-                                    ParGridFunction &curl_u_hcurl,
-                                    ParFiniteElementSpace *nd_fespace,
-                                    ParMesh *pemsh, bool pa);
-
-
 real_t freq = 1.0, kappa;
 real_t delta_const = 1e-4;
 bool static_cond = false;
 int dim;
+int sdim;
+int order;
 
 class H1ToL2OrHdivProjector
 {
@@ -96,7 +86,7 @@ private:
     
 public:
     // Apply the projection operator: result = Project(u_h1)
-    void Apply(ParGridFunction &result, const ParGridFunction &u_h1)
+    void Apply(ParGridFunction &result, const ParGridFunction &u_h1) const
     {
         // STEP 1: Build RHS for THIS specific input function
         // b_i = (u_h1, w_i) where w_i are basis functions in ND space
@@ -194,7 +184,7 @@ private:
     
 public:
     // Apply the projection operator: result = Project(u_h1)
-    void Apply(ParGridFunction &result, const ParGridFunction &u_h1)
+    void Apply(ParGridFunction &result, const ParGridFunction &u_h1) const
     {
         // STEP 1: Build RHS for THIS specific input function
         // b_i = (u_h1, w_i) where w_i are basis functions in ND space
@@ -295,7 +285,7 @@ private:
     
 public:
     // Apply the projection operator: result = Project(u_h1)
-    void Apply(ParGridFunction &result, const ParGridFunction &gftrial)
+    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
     {
         Vector B(test_fes->GetTrueVSize());
         Vector X(test_fes->GetTrueVSize());
@@ -396,7 +386,7 @@ private:
     
 public:
     // Apply the projection operator: result = Project(u_h1)
-    void Apply(ParGridFunction &result, const ParGridFunction &gftrial)
+    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
     {
         Vector B(test_fes->GetTrueVSize());
         Vector X(test_fes->GetTrueVSize());
@@ -497,7 +487,7 @@ private:
     
 public:
     // Apply the projection operator: result = Project(u_h1)
-    void Apply(ParGridFunction &result, const ParGridFunction &gftrial)
+    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
     {
         Vector B(test_fes->GetTrueVSize());
         Vector X(test_fes->GetTrueVSize());
@@ -598,7 +588,7 @@ private:
     
 public:
     // Apply the projection operator: result = Project(u_h1)
-    void Apply(ParGridFunction &result, const ParGridFunction &gftrial)
+    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
     {
         Vector B(test_fes->GetTrueVSize());
         Vector X(test_fes->GetTrueVSize());
@@ -628,6 +618,54 @@ public:
     }
 };
 
+struct ProjectorOps {
+
+   H1ToHdivOrHcurlProjector projectorH1ToHdiv;
+   H1ToL2OrHdivProjector projectorL2ToH1Scalar;
+   ComputeGradientH1ScalarToHcurl projectorComputeGradientH1ScalarToHcurl;
+   H1ToL2OrHdivProjector projectorH1ToL2;
+   H1ToHdivOrHcurlProjector projectorH1ToHcurl;
+   HcurlHdivProjector projectorHcurlToHdiv;
+   HcurlHdivProjector projectorHdivToHcurl;
+   ComputeDivergenceHdivToL2 projectorDivHdivToL2;
+   ComputeCurlHcurlToHdiv projectorCurlHcurlToHdiv;
+   H1ToL2OrHdivProjector projectorHdivToL2;
+   H1ToL2OrHdivProjector projectorL2ToH1;
+
+   ProjectorOps(ParFiniteElementSpace *h1_fespace_vector,
+                ParFiniteElementSpace *h1_fespace_scalar,
+                ParFiniteElementSpace *nd_fespace,
+                ParFiniteElementSpace *rt_fespace,
+                ParFiniteElementSpace *l2_fespace_vector, 
+                ParFiniteElementSpace *l2_fespace_scalar, 
+                bool pa)
+
+   : projectorH1ToHdiv(rt_fespace, pa),
+     projectorL2ToH1Scalar(h1_fespace_scalar, pa),
+     projectorComputeGradientH1ScalarToHcurl(h1_fespace_scalar, nd_fespace, pa),
+     projectorH1ToL2(l2_fespace_vector, pa),
+     projectorH1ToHcurl(nd_fespace, pa),
+     projectorHcurlToHdiv(rt_fespace, nd_fespace, pa),
+     projectorHdivToHcurl(nd_fespace, rt_fespace, pa),
+     projectorDivHdivToL2(rt_fespace,l2_fespace_scalar, pa),
+     projectorCurlHcurlToHdiv(nd_fespace, rt_fespace, pa),
+     projectorHdivToL2(l2_fespace_vector, pa),
+     projectorL2ToH1(h1_fespace_vector, pa)
+     {
+
+     }
+};
+
+void solve_scalar_potential( const ProjectorOps& ops,
+                             const ParGridFunction &u_h1,
+                             ParGridFunction &grad_phi_h1,
+                             ParMesh *pmesh, bool pa);
+
+void solve_vector_potential( const ProjectorOps& ops,
+                             const ParGridFunction &u_h1,
+                             ParGridFunction &curl_Ah_h1,
+                             ParMesh *pmesh, bool pa);
+
 int main(int argc, char *argv[])
 {
    // 1. Initialize MPI and HYPRE.
@@ -637,7 +675,7 @@ int main(int argc, char *argv[])
    Hypre::Init();
 
    // 2. Parse command-line options.
-   int order = 1;
+   order = 1;
    static_cond = false;
    bool pa = false;
    const char *device_config = "cpu";
@@ -712,7 +750,7 @@ int main(int argc, char *argv[])
 
    Mesh *mesh = new Mesh(Mesh::MakePeriodic(init_mesh, init_mesh.CreatePeriodicVertexMapping(translations)));
    dim = mesh->Dimension();
-   int sdim = mesh->SpaceDimension();
+   sdim = mesh->SpaceDimension();
 
    // VectorFunctionCoefficient translate_set_mesh(mesh->Dimension(), [&](const Vector &x_in, Vector &x_out){
 
@@ -748,8 +786,7 @@ int main(int argc, char *argv[])
 
    // 7. Define a parallel finite element space on the parallel mesh. Here we
    //    use the Nedelec finite elements of the specified order.
-   FiniteElementCollection *fec    = new ND_FECollection(order, dim);
-   FiniteElementCollection *nd_fec = new ND_FECollection(order, dim);   // H(curl)
+   FiniteElementCollection *nd_fec    = new ND_FECollection(order, dim);
    FiniteElementCollection *rt_fec = new RT_FECollection(order-1, dim); // H(div)
    FiniteElementCollection *l2_fec = new L2_FECollection(order-1, dim);
    FiniteElementCollection *h1_fec = new H1_FECollection(order, dim);
@@ -759,9 +796,19 @@ int main(int argc, char *argv[])
 
    ParFiniteElementSpace *nd_fespace = new ParFiniteElementSpace(pmesh, nd_fec);
    ParFiniteElementSpace *rt_fespace = new ParFiniteElementSpace(pmesh, rt_fec);
-   ParFiniteElementSpace *fespace = new ParFiniteElementSpace(pmesh, fec);
+
    ParFiniteElementSpace *h1_fespace_scalar = new ParFiniteElementSpace(pmesh, h1_fec);
    ParFiniteElementSpace *h1_fespace_vector = new ParFiniteElementSpace(pmesh, h1_fec, dim);
+
+   ProjectorOps ops(h1_fespace_vector,
+                    h1_fespace_scalar,
+                    nd_fespace,
+                    rt_fespace,
+                    l2_fespace_vector, 
+                    l2_fespace_scalar, 
+                    pa);
+
+
 
    HYPRE_BigInt size = nd_fespace->GlobalTrueVSize();
    if (myid == 0)
@@ -769,13 +816,11 @@ int main(int argc, char *argv[])
       cout << "Number of finite element unknowns: " << size << endl;
    }
 
-
    // \nabla \times Ah in H(div)
-   VectorFunctionCoefficient curl_A_exact_coeff(sdim, curl_A_exact);
-   ParGridFunction curl_Ah_exact(rt_fespace);
+   VectorFunctionCoefficient curl_Ah_exact_coeff(sdim, curl_A_exact);
    ParGridFunction curl_Ah_exact_h1(h1_fespace_vector);
-   curl_Ah_exact.ProjectCoefficient(curl_A_exact_coeff);
-   curl_Ah_exact_h1.ProjectCoefficient(curl_A_exact_coeff);
+
+   curl_Ah_exact_h1.ProjectCoefficient(curl_Ah_exact_coeff);
 
    VectorFunctionCoefficient u_coeff(sdim, u_exact);
 
@@ -784,92 +829,11 @@ int main(int argc, char *argv[])
    ParGridFunction u_h1(h1_fespace_vector);
    u_h1.ProjectCoefficient(u_coeff);
 
-   // 2. Peform the needed projections
-   // Project u in H1 to Hcurl
-   ParGridFunction u_hcurl(nd_fespace);
-
-    H1ToHdivOrHcurlProjector projectorH1ToHcurl(nd_fespace, pa);
-    projectorH1ToHcurl.Apply(u_hcurl, u_h1);
-
-   // Compute the curl of u
-   ParGridFunction curl_u(rt_fespace);
-   curl_u = 0.0;
-
-   // We can also solve a linear system to move form one space to another
-   ComputeCurlHcurlToHdiv projectorCurlHcurlToHdiv(nd_fespace, rt_fespace, pa);
-   projectorCurlHcurlToHdiv.Apply(curl_u, u_hcurl);
-
-
-   // The test space which is being projected to is
-   // H(curl) from the trial space H(div)
-   // Note that the trial space needs to not be empyt ie.
-   // be projected to
-
-   ParGridFunction curl_u_hcurl(nd_fespace);
-
-   HcurlHdivProjector projectorHcurlToHdiv(rt_fespace, nd_fespace, pa);
-   projectorHcurlToHdiv.Apply(curl_u_hcurl, curl_u);
-
-   // Project the exact space for comparison later
-   VectorFunctionCoefficient curl_u_coeff_exact(dim, w_exact);
-   ParGridFunction curl_u_exact(nd_fespace);
-   curl_u_exact.ProjectCoefficient(curl_u_coeff_exact);
-
-   // 2a. Compute error of curl operations
-   real_t l2_err_same_space     = curl_u_exact.ComputeL2Error(curl_u_coeff_exact);
-   real_t l2_err_sys     = curl_u_hcurl.ComputeL2Error(curl_u_coeff_exact);
-   real_t hcurl_err  = u_hcurl.ComputeHCurlError(&u_coeff, &curl_u_coeff_exact);
-   
-   // 2) Only rank 0 prints:
-   if (myid == 0)
-   {
-      cout << "\nTwo ways of measuring the same error:\n";
-      cout << "  curl L2 same space      = " << l2_err_same_space    << "\n";
-      cout << "  H(curl) norm error = " << hcurl_err << "\n";
-      cout << "  H(curl) norm error lin sys = " << l2_err_sys << "\n\n";
-   }
-
-
-   // 3. Solve for the vector potential
-   ParGridFunction Ah(nd_fespace);
-   solve_vector_potential_direct(Ah, curl_u_hcurl, nd_fespace, pmesh, pa);
-
-   // Compute the curl of the vector potential which is the divergence 
-   // free part of the velocity field
-
-   // Compute curl of Ah in H(div)
-   ParGridFunction curl_Ah(rt_fespace);
-   projectorCurlHcurlToHdiv.Apply(curl_Ah, Ah);
-
-   // 4. Verification part to make sure field is divergence free
-
-   // Verification of divergence free field
-   // The test space which is being projected to is
-   // H(div) from the trial space H(curl)
-   ParGridFunction Ah_hdiv(rt_fespace);
-   HcurlHdivProjector projectorHdivToHcurl(nd_fespace, rt_fespace, pa);
-   projectorHdivToHcurl.Apply(Ah_hdiv, Ah);
-
-   // Set \nabla \cdot (\nabla \times Ah) to be in L2
-   // Compute \nabla \cdot (\nabla \times Ah) in H(div)
-   ParGridFunction div_curl_Ah(l2_fespace_scalar);
-   ParGridFunction div_Ah(l2_fespace_scalar);
-
-   ComputeDivergenceHdivToL2 projectorDivHdivToL2(rt_fespace,l2_fespace_scalar, pa);
-   projectorDivHdivToL2.Apply(div_curl_Ah, curl_Ah);
-   projectorDivHdivToL2.Apply(div_Ah, Ah_hdiv);
-
-   // 5. Move curl of vector potential to H1 for visualization for later
-   ParGridFunction curl_Ah_l2(l2_fespace_vector);
-
-   H1ToL2OrHdivProjector projectorHdivToL2(l2_fespace_vector, pa);
-   projectorHdivToL2.Apply(curl_Ah_l2, curl_Ah);
-
-   // Project from L2 to H1 by solving linear system
    ParGridFunction curl_Ah_h1(h1_fespace_vector);
+   solve_vector_potential(ops, u_h1, curl_Ah_h1, pmesh, pa);
 
-   H1ToL2OrHdivProjector projectorL2ToH1(h1_fespace_vector, pa);
-   projectorL2ToH1.Apply(curl_Ah_h1, curl_Ah_l2);
+   ParGridFunction curl_Ah_l2(l2_fespace_vector);
+   ops.projectorH1ToL2.Apply(curl_Ah_l2, curl_Ah_h1);
 
    // Use ProjectDiscCoefficient for averaging-based projection from L2 to H1
    // Note that this approach destroys the divergence free property of the 
@@ -884,8 +848,6 @@ int main(int argc, char *argv[])
    // ParGridFunction curl_Ah_hdiv(rt_fespace);
 
    // ParGridFunction div_curl_Ah_l2(l2_fespace_scalar);
-
-
 
    /*
    // This did not consergve the divergence free and curl free of the Helmholtz-Hoddge Decomposition
@@ -932,43 +894,12 @@ int main(int argc, char *argv[])
 
    // Solve for scalar potential
 
-   // 1. Project u from H1 to Hdiv
-   ParGridFunction u_hdiv(rt_fespace);
-   H1ToHdivOrHcurlProjector projectorH1ToHdiv(rt_fespace, pa);
-   projectorH1ToHdiv.Apply(u_hdiv, u_h1);
-   
-   // 2. Divergence of u in L2 space
-   ParGridFunction div_u_l2(l2_fespace_scalar);
-   projectorDivHdivToL2.Apply(div_u_l2, u_hdiv);
-   
-   // 2. Project div u from L2 to H1 for decomposition
-   ParGridFunction div_u_h1(h1_fespace_scalar);
-   H1ToL2OrHdivProjector projectorL2ToH1Scalar(h1_fespace_scalar, pa);
-   projectorL2ToH1Scalar.Apply(div_u_h1, div_u_l2);
-   
    // 4. Solve Poisson problem \nabla^2 \phi = div(u)
-   ParGridFunction phi_scalar(h1_fespace_scalar);
-   solve_scalar_potential_direct(phi_scalar, div_u_h1, h1_fespace_scalar, pa);
-
-   // 5. Compute compressive part of velocify field
-   ParGridFunction grad_phi(nd_fespace);
-   ComputeGradientH1ScalarToHcurl projectorComputeGradientH1ScalarToHcurl(h1_fespace_scalar, nd_fespace, pa);
-   projectorComputeGradientH1ScalarToHcurl.Apply(grad_phi, phi_scalar);
-   
-   // 6. Compute curl of grad_phi for verification for later
-   ParGridFunction curl_grad_phi(rt_fespace);
-   projectorCurlHcurlToHdiv.Apply(curl_grad_phi, grad_phi);
-
-   // 7. Project grad phi from from Hcurl to H1
-   ParGridFunction grad_phi_hdiv(rt_fespace);
-   projectorHdivToHcurl.Apply(grad_phi_hdiv,grad_phi);
+   ParGridFunction grad_phi_h1(h1_fespace_vector);
+   solve_scalar_potential(ops, u_h1, grad_phi_h1, pmesh, pa);
 
    ParGridFunction grad_phi_l2(l2_fespace_vector);
-
-   projectorHdivToL2.Apply(grad_phi_l2, grad_phi_hdiv);
-
-   ParGridFunction grad_phi_h1(h1_fespace_vector);
-   projectorL2ToH1.Apply(grad_phi_h1, grad_phi_l2);
+   ops.projectorH1ToL2.Apply(grad_phi_l2, grad_phi_h1);
 
    // Use ProjectDiscCoefficient for averaging-based projection from L2 to H1
    // Note that this approach destroys the curl free free property of the 
@@ -978,11 +909,7 @@ int main(int argc, char *argv[])
 
    // Sanity Checks
    ParGridFunction u_l2(l2_fespace_vector);
-
-   H1ToL2OrHdivProjector projectorH1ToL2(l2_fespace_vector, pa);
-   projectorH1ToL2.Apply(u_l2, u_h1);
-
-   VectorGridFunctionCoefficient u_l2_coeff(&u_l2);
+   ops.projectorH1ToL2.Apply(u_l2, u_h1);
 
    ParGridFunction vel_error(l2_fespace_vector);
    vel_error = grad_phi_l2;
@@ -990,15 +917,12 @@ int main(int argc, char *argv[])
    vel_error -= u_l2;
 
    // Define ceofficients for comparison for later
-   VectorFunctionCoefficient A_coeff(sdim, A_exact);
-
    VectorFunctionCoefficient grad_phi_coeff(sdim, grad_phi_exact); // nabla \phi
    ParGridFunction grad_phi_exact_h1(h1_fespace_vector);
    grad_phi_exact_h1.ProjectCoefficient(grad_phi_coeff);
 
    // 15. Compute and print the L^2 norm of the error.
    {
-      real_t error = Ah.ComputeL2Error(A_coeff);
 
       ConstantCoefficient zero(0.0);
 
@@ -1006,37 +930,26 @@ int main(int argc, char *argv[])
       zero_v = 0.0;
       VectorConstantCoefficient zero_vec(zero_v);
 
-      double curl_grad_phi_computed_error = curl_grad_phi.ComputeL2Error(zero_vec);
       // double curl_grad_phi_computed_error_project = curl_grad_phi_hdiv.ComputeL2Error(zero_vec);
-      double div_curl_A_error = div_curl_Ah.ComputeL2Error(zero);
       // double div_curl_A_error_l2 = div_curl_Ah_l2.ComputeL2Error(zero);
-      double div_A_error = div_Ah.ComputeL2Error(zero);
-      double grad_phi_error = grad_phi.ComputeL2Error(grad_phi_coeff);
       double grad_phi_error_h1 = grad_phi_h1.ComputeL2Error(grad_phi_coeff);
-      double curl_Ah_l2_error = curl_Ah.ComputeL2Error(curl_A_exact_coeff);
-      double curl_Ah_h1_error = curl_Ah_h1.ComputeL2Error(curl_A_exact_coeff);
+      double curl_Ah_h1_error = curl_Ah_h1.ComputeL2Error(curl_Ah_exact_coeff);
       double total_vel_error = vel_error.ComputeL2Error(zero);
    
 
       if (myid == 0)
       {
-         cout << "\n|| A_h - A ||_{L^2} = " << error << '\n' << endl;
-         cout << "div(curl A) L2 norm (should be ~0): " << div_curl_A_error << endl;
          // cout << "div(curl A) H1 L2 norm (should be ~0): " << div_curl_A_error_l2 << endl;
-         cout << "div(A) L2 norm (should be ~0): " << div_A_error << endl;
-
-         cout << "curl Ah L2 norm: " << curl_Ah_l2_error << endl;
          cout << "curl Ah H1 L2 norm: " << curl_Ah_h1_error << endl;
 
-         cout << "curl(grad phi) L2 error (should be ~0): " << curl_grad_phi_computed_error << endl;
          // cout << "curl(grad phi) project L2 error (should be ~0): " << curl_grad_phi_computed_error_project << endl;
-         cout << "grad_phi L2 norm: " << grad_phi_error << endl;
          cout << "grad_phi H1 L2 norm: " << grad_phi_error_h1 << endl;
          cout << "vel error from reconstruction: " << total_vel_error << endl;
       }
    }
 
 
+   /*
    {
    // mesh and solution (already correct)
    ostringstream mesh_name, sol_name;
@@ -1071,51 +984,32 @@ int main(int argc, char *argv[])
    curl_ex_ofs.precision(8);
    curl_u_exact.Save(curl_ex_ofs);
 
-   }
-
-    ParGridFunction Agf_exact(nd_fespace);
-    Agf_exact.ProjectCoefficient(A_coeff);
+   }*/
 
     VisItDataCollection dc("VelocityDecomposition", pmesh);
     dc.SetFormat(DataCollection::PARALLEL_FORMAT);
     dc.SetCycle(0);
     dc.SetTime(0.0);
     
-    dc.RegisterField("Ah", &Ah);
-    dc.RegisterField("Ah_exact", &Agf_exact);
-
-    dc.RegisterField("curl_Ah_exact", &curl_Ah_exact);
-    dc.RegisterField("curl_Ah", &curl_Ah);
     dc.RegisterField("curl_Ah_h1", &curl_Ah_h1);
     dc.RegisterField("curl_Ah_exact_h1", &curl_Ah_exact_h1);
-    dc.RegisterField("div_curl_Ah_l2", &div_curl_Ah);
 
-    dc.RegisterField("curl_u_hdiv", &curl_u);
-    dc.RegisterField("curl_u_exact",    &curl_u_exact);
-
-    dc.RegisterField("grad_phi",   &grad_phi);
     dc.RegisterField("grad_phi_h1",   &grad_phi_h1);
     dc.RegisterField("grad_phi_exact",   &grad_phi_exact_h1);
-    dc.RegisterField("curl_grad_phi_hdiv", &curl_grad_phi);
 
     dc.Save();
 
-   // 17. Send the solution by socket to a GLVis server.
-   if (visualization)
-   {
-      char vishost[] = "localhost";
-      int  visport   = 19916;
-      socketstream sol_sock(vishost, visport);
-      sol_sock << "parallel " << num_procs << " " << myid << "\n";
-      sol_sock.precision(8);
-      sol_sock << "solution\n" << *pmesh << Ah << flush;
-   }
 
    delete nd_fespace;
    delete rt_fespace;
-   delete fec;
+   delete h1_fespace_vector;
+   delete h1_fespace_scalar;
+   delete l2_fespace_vector;
+   delete l2_fespace_scalar;
    delete nd_fec;
    delete rt_fec;
+   delete h1_fec;
+   delete l2_fec;
    delete pmesh;
 
    return 0;
@@ -1290,12 +1184,54 @@ void solve_scalar_potential_direct(ParGridFunction &phi,
    }
 }
 
-
-void solve_vector_potential_direct(ParGridFunction &Ah,
-                                    ParGridFunction &curl_u_hcurl,
-                                    ParFiniteElementSpace *nd_fespace,
-                                    ParMesh *pmesh, bool pa)
+void solve_vector_potential( const ProjectorOps& ops,
+                             const ParGridFunction &u_h1,
+                             ParGridFunction &curl_Ah_h1,
+                             ParMesh *pmesh, bool pa)
 {
+   int myid = Mpi::WorldRank();
+
+   FiniteElementCollection *nd_fec = new ND_FECollection(order, dim);   // H(curl)
+   FiniteElementCollection *rt_fec = new RT_FECollection(order-1, dim); // H(div)
+   FiniteElementCollection *l2_fec = new L2_FECollection(order-1, dim);
+   FiniteElementCollection *h1_fec = new H1_FECollection(order, dim);
+
+   ParFiniteElementSpace *l2_fespace_scalar = new ParFiniteElementSpace(pmesh, l2_fec);
+   ParFiniteElementSpace *l2_fespace_vector = new ParFiniteElementSpace(pmesh, l2_fec, dim);
+
+   ParFiniteElementSpace *nd_fespace = new ParFiniteElementSpace(pmesh, nd_fec);
+   ParFiniteElementSpace *rt_fespace = new ParFiniteElementSpace(pmesh, rt_fec);
+   ParFiniteElementSpace *h1_fespace_scalar = new ParFiniteElementSpace(pmesh, h1_fec);
+   ParFiniteElementSpace *h1_fespace_vector = new ParFiniteElementSpace(pmesh, h1_fec, dim);
+
+
+   // 2. Peform the needed projections
+   // Project u in H1 to Hcurl
+   ParGridFunction u_hcurl(nd_fespace);
+
+   ops.projectorH1ToHcurl.Apply(u_hcurl, u_h1);
+
+   // Compute the curl of u
+   ParGridFunction curl_u(rt_fespace);
+   curl_u = 0.0;
+
+   // We can also solve a linear system to move form one space to another
+   ops.projectorCurlHcurlToHdiv.Apply(curl_u, u_hcurl);
+
+   // The test space which is being projected to is
+   // H(curl) from the trial space H(div)
+   // Note that the trial space needs to not be empyt ie.
+   // be projected to
+
+   ParGridFunction curl_u_hcurl(nd_fespace);
+
+   ops.projectorHcurlToHdiv.Apply(curl_u_hcurl, curl_u);
+
+   // Project the exact space for comparison later
+   VectorFunctionCoefficient curl_u_coeff_exact(dim, w_exact);
+   ParGridFunction curl_u_exact(nd_fespace);
+   curl_u_exact.ProjectCoefficient(curl_u_coeff_exact);
+
    //    boundary dofs. In this example, the boundary conditions are defined
    //    by marking all the boundary attributes from the mesh as essential
    //    (Dirichlet) and converting them to a list of true dofs.
@@ -1323,7 +1259,6 @@ void solve_vector_potential_direct(ParGridFunction &Ah,
    //     when eliminating the non-homogeneous boundary condition to modify the
    //     r.h.s. vector b.
    ParGridFunction x(nd_fespace);
-   // x.ProjectCoefficient(A_coeff);
    x = 0.0;
 
    // 11. Set up the parallel bilinear form corresponding to the EM diffusion
@@ -1385,11 +1320,260 @@ void solve_vector_potential_direct(ParGridFunction &Ah,
    // 14. Recover the parallel grid function corresponding to X. This is the
    //     local finite element solution on each processor.
    a->RecoverFEMSolution(X, *b, x);
+
+   // 3. Solve for the vector potential
+   ParGridFunction Ah(nd_fespace);
    Ah = x;
+
+   // Compute the curl of the vector potential which is the divergence 
+   // free part of the velocity field
+
+   // Compute curl of Ah in H(div)
+   ParGridFunction curl_Ah(rt_fespace);
+   ops.projectorCurlHcurlToHdiv.Apply(curl_Ah, Ah);
+
+   // 4. Verification part to make sure field is divergence free
+
+   // Verification of divergence free field
+   // The test space which is being projected to is
+   // H(div) from the trial space H(curl)
+   ParGridFunction Ah_hdiv(rt_fespace);
+   ops.projectorHdivToHcurl.Apply(Ah_hdiv, Ah);
+
+   // Set \nabla \cdot (\nabla \times Ah) to be in L2
+   // Compute \nabla \cdot (\nabla \times Ah) in H(div)
+   ParGridFunction div_curl_Ah(l2_fespace_scalar);
+   ParGridFunction div_Ah(l2_fespace_scalar);
+
+   ops.projectorDivHdivToL2.Apply(div_curl_Ah, curl_Ah);
+   ops.projectorDivHdivToL2.Apply(div_Ah, Ah_hdiv);
+
+   // 5. Move curl of vector potential to H1 for visualization for later
+   ParGridFunction curl_Ah_l2(l2_fespace_vector);
+   ops.projectorHdivToL2.Apply(curl_Ah_l2, curl_Ah);
+
+   // Project from L2 to H1 by solving linear system
+   ops.projectorL2ToH1.Apply(curl_Ah_h1, curl_Ah_l2);
+
+   VectorFunctionCoefficient A_coeff(sdim, A_exact);
+   VectorFunctionCoefficient curl_Ah_exact_coeff(sdim, curl_A_exact);
+
+   {
+      ConstantCoefficient zero(0.0);
+      Vector zero_v(dim);
+      zero_v = 0.0;
+      VectorConstantCoefficient zero_vec(zero_v);
+
+      double div_curl_A_error = div_curl_Ah.ComputeL2Error(zero);
+      double div_A_error = div_Ah.ComputeL2Error(zero);
+      double curl_Ah_h1_error = curl_Ah_h1.ComputeL2Error(curl_Ah_exact_coeff);
+      double curl_Ah_error = curl_Ah.ComputeL2Error(curl_Ah_exact_coeff);
+      double error = Ah.ComputeL2Error(A_coeff);
+   
+
+      if (myid == 0)
+      {
+         cout << "\n|| A_h - A ||_{L^2} = " << error << '\n' << endl;
+         cout << "div(curl A) L2 norm (should be ~0): " << div_curl_A_error << endl;
+         cout << "div(A) L2 norm (should be ~0): " << div_A_error << endl;
+         cout << "curl Ah H1 L2 norm: " << curl_Ah_h1_error << endl;
+         cout << "curl Ah L2 norm: " << curl_Ah_error << endl;
+      }
+   }
+
 
    // 18. Free the used memory.
    delete a;
    delete sigma;
    delete muinv;
    delete b;
+
+   delete nd_fespace;
+   delete rt_fespace;
+   delete h1_fespace_vector;
+   delete h1_fespace_scalar;
+   delete l2_fespace_vector;
+   delete l2_fespace_scalar;
+   delete nd_fec;
+   delete rt_fec;
+   delete h1_fec;
+   delete l2_fec;
+}
+
+void solve_scalar_potential( const ProjectorOps& ops,
+                             const ParGridFunction &u_h1,
+                             ParGridFunction &grad_phi_h1,
+                             ParMesh *pmesh, bool pa)
+{
+   int myid = Mpi::WorldRank();
+
+   FiniteElementCollection *nd_fec = new ND_FECollection(order, dim);   // H(curl)
+   FiniteElementCollection *rt_fec = new RT_FECollection(order-1, dim); // H(div)
+   FiniteElementCollection *l2_fec = new L2_FECollection(order-1, dim);
+   FiniteElementCollection *h1_fec = new H1_FECollection(order, dim);
+
+   ParFiniteElementSpace *l2_fespace_scalar = new ParFiniteElementSpace(pmesh, l2_fec);
+   ParFiniteElementSpace *l2_fespace_vector = new ParFiniteElementSpace(pmesh, l2_fec, dim);
+
+   ParFiniteElementSpace *nd_fespace = new ParFiniteElementSpace(pmesh, nd_fec);
+   ParFiniteElementSpace *rt_fespace = new ParFiniteElementSpace(pmesh, rt_fec);
+   ParFiniteElementSpace *h1_fespace_scalar = new ParFiniteElementSpace(pmesh, h1_fec);
+   ParFiniteElementSpace *h1_fespace_vector = new ParFiniteElementSpace(pmesh, h1_fec, dim);
+
+
+   // 1. Project u from H1 to Hdiv
+   ParGridFunction u_hdiv(rt_fespace);
+   ops.projectorH1ToHdiv.Apply(u_hdiv, u_h1);
+   
+   // 2. Divergence of u in L2 space
+   ParGridFunction div_u_l2(l2_fespace_scalar);
+   ops.projectorDivHdivToL2.Apply(div_u_l2, u_hdiv);
+   
+   // 2. Project div u from L2 to H1 for decomposition
+   ParGridFunction div_u_h1(h1_fespace_scalar);
+   ops.projectorL2ToH1Scalar.Apply(div_u_h1, div_u_l2);
+   
+   // 4. Solve Poisson problem \nabla^2 \phi = div(u)
+   
+   // Set up Laplacian operator in H1 space
+   ParBilinearForm laplacian(h1_fespace_scalar);
+   if (pa) { laplacian.SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+   laplacian.AddDomainIntegrator(new DiffusionIntegrator());
+   laplacian.Assemble();
+   if (!pa) { laplacian.Finalize(); }
+   
+   // Set up RHS using div_u_h1 (both already in same H1 space)
+   GridFunctionCoefficient div_u_coeff(&div_u_h1);
+   ParLinearForm rhs(h1_fespace_scalar);
+   rhs.AddDomainIntegrator(new DomainLFIntegrator(div_u_coeff));
+   rhs.Assemble();
+   
+   Vector RHS(h1_fespace_scalar->GetTrueVSize());
+   Vector PHI(h1_fespace_scalar->GetTrueVSize());
+   rhs.ParallelAssemble(RHS);
+   RHS *= -1.0;
+   PHI = 0.0;
+   
+   // Use OrthoSolver to handle null space (constant functions)
+   Array<int> empty_ess_tdof;  // No essential BC for periodic problem
+   
+   if (pa)
+   {
+      OperatorPtr laplacian_op;
+      laplacian.FormSystemMatrix(empty_ess_tdof, laplacian_op);
+      
+      // Create preconditioner
+      OperatorJacobiSmoother jac(laplacian, empty_ess_tdof);
+      
+      // Set up base solver
+      CGSolver base_solver(h1_fespace_scalar->GetComm());
+      base_solver.SetRelTol(1e-12);
+      base_solver.SetMaxIter(1000);
+      base_solver.SetPrintLevel(0);  // Reduce output since OrthoSolver will print
+      base_solver.SetOperator(*laplacian_op);
+      base_solver.SetPreconditioner(jac);
+      
+      // Create OrthoSolver to handle null space
+      OrthoSolver ortho_solver(h1_fespace_scalar->GetComm());
+      ortho_solver.SetSolver(base_solver);
+      ortho_solver.SetOperator(*laplacian_op);
+      
+      if (myid == 0) 
+      {
+         cout << "Using OrthoSolver for direct Poisson problem with null space" << endl;
+      }
+      
+      ortho_solver.Mult(RHS, PHI);
+   }
+   else
+   {
+      std::unique_ptr<HypreParMatrix> A(laplacian.ParallelAssemble());
+      
+      // Create base preconditioner  
+      HypreBoomerAMG amg(*A);
+      amg.SetPrintLevel(0);
+      
+      // Set up base solver
+      HyprePCG base_solver(*A);
+      base_solver.SetTol(1e-12);
+      base_solver.SetMaxIter(1000);
+      base_solver.SetPrintLevel(0);  // Reduce output
+      base_solver.SetPreconditioner(amg);
+      
+      // Create OrthoSolver to handle null space
+      OrthoSolver ortho_solver(h1_fespace_scalar->GetComm());
+      ortho_solver.SetSolver(base_solver);
+      ortho_solver.SetOperator(*A);
+      
+      if (myid == 0) 
+      {
+         cout << "Using OrthoSolver for direct Poisson problem with null space" << endl;
+      }
+      
+      ortho_solver.Mult(RHS, PHI);
+   }
+   
+   // Set the solution
+   ParGridFunction phi_scalar(h1_fespace_scalar);
+   phi_scalar = 0.0;
+   
+   phi_scalar.SetFromTrueDofs(PHI);
+
+   if (myid == 0)
+   {
+      cout << "Solved direct Poisson problem -∇²φ = div(u) for scalar potential" << endl;
+   }
+
+   // 5. Compute compressive part of velocify field
+   ParGridFunction grad_phi(nd_fespace);
+   ops.projectorComputeGradientH1ScalarToHcurl.Apply(grad_phi, phi_scalar);
+   
+   // 6. Compute curl of grad_phi for verification for later
+   ParGridFunction curl_grad_phi(rt_fespace);
+   ops.projectorCurlHcurlToHdiv.Apply(curl_grad_phi, grad_phi);
+
+   // 7. Project grad phi from from Hcurl to H1
+   ParGridFunction grad_phi_hdiv(rt_fespace);
+   ops.projectorHdivToHcurl.Apply(grad_phi_hdiv,grad_phi);
+
+   ParGridFunction grad_phi_l2(l2_fespace_vector);
+
+   ops.projectorHdivToL2.Apply(grad_phi_l2, grad_phi_hdiv);
+
+   ops.projectorL2ToH1.Apply(grad_phi_h1, grad_phi_l2);
+
+   VectorFunctionCoefficient grad_phi_coeff(sdim, grad_phi_exact); // nabla \phi
+
+   {
+
+      ConstantCoefficient zero(0.0);
+
+      Vector zero_v(dim);
+      zero_v = 0.0;
+      VectorConstantCoefficient zero_vec(zero_v);
+
+      double curl_grad_phi_computed_error = curl_grad_phi.ComputeL2Error(zero_vec);
+      double grad_phi_error = grad_phi.ComputeL2Error(grad_phi_coeff);
+      double grad_phi_error_h1 = grad_phi_h1.ComputeL2Error(grad_phi_coeff);
+   
+
+      if (myid == 0)
+      {
+         cout << "curl(grad phi) L2 error (should be ~0): " << curl_grad_phi_computed_error << endl;
+         cout << "grad_phi L2 norm: " << grad_phi_error << endl;
+         cout << "grad_phi H1 L2 norm: " << grad_phi_error_h1 << endl;
+      }
+   }
+
+   // 18. Free the used memory.
+   delete nd_fespace;
+   delete rt_fespace;
+   delete h1_fespace_vector;
+   delete h1_fespace_scalar;
+   delete l2_fespace_vector;
+   delete l2_fespace_scalar;
+   delete nd_fec;
+   delete rt_fec;
+   delete h1_fec;
+   delete l2_fec;
 }
