@@ -19,6 +19,20 @@ bool static_cond = false;
 int dim;
 int sdim;
 
+FiniteElementCollection *nd_fec = nullptr;
+FiniteElementCollection *rt_fec = nullptr;
+FiniteElementCollection *l2_fec = nullptr;
+FiniteElementCollection *h1_fec = nullptr;
+
+ParFiniteElementSpace *l2_fespace_scalar = nullptr; 
+ParFiniteElementSpace *l2_fespace_vector = nullptr;
+
+ParFiniteElementSpace *nd_fespace = nullptr;
+ParFiniteElementSpace *rt_fespace = nullptr;
+
+ParFiniteElementSpace *h1_fespace_scalar = nullptr;
+ParFiniteElementSpace *h1_fespace_vector = nullptr;
+
 class H1ToL2OrHdivProjector
 {
 private:
@@ -409,19 +423,19 @@ void ComputeError(int num_pts, int order,
 
    delete init_mesh;
 
-   FiniteElementCollection *nd_fec    = new ND_FECollection(order, dim);
-   FiniteElementCollection *rt_fec = new RT_FECollection(order-1, dim); // H(div)
-   FiniteElementCollection *l2_fec = new L2_FECollection(order-1, dim);
-   FiniteElementCollection *h1_fec = new H1_FECollection(order, dim);
+   nd_fec = new ND_FECollection(order, dim);
+   rt_fec = new RT_FECollection(order-1, dim); // H(div)
+   l2_fec = new L2_FECollection(order-1, dim);
+   h1_fec = new H1_FECollection(order, dim);
 
-   ParFiniteElementSpace *l2_fespace_scalar = new ParFiniteElementSpace(pmesh, l2_fec);
-   ParFiniteElementSpace *l2_fespace_vector = new ParFiniteElementSpace(pmesh, l2_fec, dim);
+   l2_fespace_scalar = new ParFiniteElementSpace(pmesh, l2_fec);
+   l2_fespace_vector = new ParFiniteElementSpace(pmesh, l2_fec, dim);
 
-   ParFiniteElementSpace *nd_fespace = new ParFiniteElementSpace(pmesh, nd_fec);
-   ParFiniteElementSpace *rt_fespace = new ParFiniteElementSpace(pmesh, rt_fec);
+   nd_fespace = new ParFiniteElementSpace(pmesh, nd_fec);
+   rt_fespace = new ParFiniteElementSpace(pmesh, rt_fec);
 
-   ParFiniteElementSpace *h1_fespace_scalar = new ParFiniteElementSpace(pmesh, h1_fec);
-   ParFiniteElementSpace *h1_fespace_vector = new ParFiniteElementSpace(pmesh, h1_fec, dim);
+   h1_fespace_scalar = new ParFiniteElementSpace(pmesh, h1_fec);
+   h1_fespace_vector = new ParFiniteElementSpace(pmesh, h1_fec, dim);
 
    ProjectorOps ops(h1_fespace_vector,
                     h1_fespace_scalar,
@@ -582,25 +596,25 @@ void w_exact(const Vector &x, Vector &f)
 
 void u_exact(const Vector &x, Vector &A)
 {
-   // real_t xi = 2*M_PI*x(0);
-   // real_t yi = 2*M_PI*x(1);
-   // real_t zi = 2*M_PI*x(2);
+   real_t xi = 2*M_PI*x(0);
+   real_t yi = 2*M_PI*x(1);
+   real_t zi = 2*M_PI*x(2);
  
-   // A(0) = sin(xi) * cos(yi) * cos(zi);
-   // A(1) = -cos(xi) * sin(yi) * cos(zi);
-   // A(2) = 0.0;
-   if (dim == 3)
-   {
-      A(0) = sin(2*M_PI*x(0)) + sin(4*M_PI*x(1)) + sin(6*M_PI*x(2));
-      A(1) = sin(6*M_PI*x(0)) + sin(2*M_PI*x(1)) + sin(4*M_PI*x(2));
-      A(2) = sin(4*M_PI*x(0)) + sin(6*M_PI*x(1)) + sin(2*M_PI*x(2));
-   }
-    else
-    {
-        A(0) = sin(kappa * x(1));
-        A(1) = sin(kappa * x(0));
-        if (x.Size() == 3) { A(2) = 0.0; }
-    }    
+   A(0) = sin(xi) * cos(yi) * cos(zi);
+   A(1) = -cos(xi) * sin(yi) * cos(zi);
+   A(2) = 0.0;
+   // if (dim == 3)
+   // {
+   //    A(0) = sin(2*M_PI*x(0)) + sin(4*M_PI*x(1)) + sin(6*M_PI*x(2));
+   //    A(1) = sin(6*M_PI*x(0)) + sin(2*M_PI*x(1)) + sin(4*M_PI*x(2));
+   //    A(2) = sin(4*M_PI*x(0)) + sin(6*M_PI*x(1)) + sin(2*M_PI*x(2));
+   // }
+   //  else
+   //  {
+   //      A(0) = sin(kappa * x(1));
+   //      A(1) = sin(kappa * x(0));
+   //      if (x.Size() == 3) { A(2) = 0.0; }
+   //  }    
 }
 
 
@@ -722,17 +736,6 @@ void solve_vector_potential( const ProjectorOps& ops,
                              ParMesh *pmesh, bool pa)
 {
    int myid = Mpi::WorldRank();
-
-   FiniteElementCollection *nd_fec = new ND_FECollection(order, dim);   // H(curl)
-   FiniteElementCollection *rt_fec = new RT_FECollection(order-1, dim); // H(div)
-   FiniteElementCollection *l2_fec = new L2_FECollection(order-1, dim);
-
-   ParFiniteElementSpace *l2_fespace_vector = new ParFiniteElementSpace(pmesh, l2_fec, dim);
-   ParFiniteElementSpace *l2_fespace_scalar = new ParFiniteElementSpace(pmesh, l2_fec);
-
-   ParFiniteElementSpace *nd_fespace = new ParFiniteElementSpace(pmesh, nd_fec);
-   ParFiniteElementSpace *rt_fespace = new ParFiniteElementSpace(pmesh, rt_fec);
-
 
    // 2. Peform the needed projections
    // Project u in H1 to Hcurl
@@ -918,12 +921,6 @@ void solve_vector_potential( const ProjectorOps& ops,
    delete muinv;
    delete b;
 
-   delete nd_fespace;
-   delete rt_fespace;
-   delete l2_fespace_vector;
-   delete nd_fec;
-   delete rt_fec;
-   delete l2_fec;
 }
 
 void solve_scalar_potential( const ProjectorOps& ops,
@@ -933,19 +930,6 @@ void solve_scalar_potential( const ProjectorOps& ops,
                              ParMesh *pmesh, bool pa)
 {
    int myid = Mpi::WorldRank();
-
-   FiniteElementCollection *nd_fec = new ND_FECollection(order, dim);   // H(curl)
-   FiniteElementCollection *rt_fec = new RT_FECollection(order-1, dim); // H(div)
-   FiniteElementCollection *l2_fec = new L2_FECollection(order-1, dim);
-   FiniteElementCollection *h1_fec = new H1_FECollection(order, dim);
-
-   ParFiniteElementSpace *l2_fespace_scalar = new ParFiniteElementSpace(pmesh, l2_fec);
-   ParFiniteElementSpace *l2_fespace_vector = new ParFiniteElementSpace(pmesh, l2_fec, dim);
-
-   ParFiniteElementSpace *nd_fespace = new ParFiniteElementSpace(pmesh, nd_fec);
-   ParFiniteElementSpace *rt_fespace = new ParFiniteElementSpace(pmesh, rt_fec);
-   ParFiniteElementSpace *h1_fespace_scalar = new ParFiniteElementSpace(pmesh, h1_fec);
-
 
    // 1. Project u from H1 to Hdiv
    ParGridFunction u_hdiv(rt_fespace);
@@ -1081,15 +1065,6 @@ void solve_scalar_potential( const ProjectorOps& ops,
    }
 
    // 18. Free the used memory.
-   delete nd_fespace;
-   delete rt_fespace;
-   delete h1_fespace_scalar;
-   delete l2_fespace_vector;
-   delete l2_fespace_scalar;
-   delete nd_fec;
-   delete rt_fec;
-   delete h1_fec;
-   delete l2_fec;
 }
 
 H1ToL2OrHdivProjector::H1ToL2OrHdivProjector(ParFiniteElementSpace *test_space, 

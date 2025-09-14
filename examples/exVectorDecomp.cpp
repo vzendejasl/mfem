@@ -22,6 +22,20 @@ int dim;
 int sdim;
 int order;
 
+FiniteElementCollection *nd_fec = nullptr;
+FiniteElementCollection *rt_fec = nullptr;
+FiniteElementCollection *l2_fec = nullptr;
+FiniteElementCollection *h1_fec = nullptr;
+
+ParFiniteElementSpace *l2_fespace_scalar = nullptr; 
+ParFiniteElementSpace *l2_fespace_vector = nullptr;
+
+ParFiniteElementSpace *nd_fespace = nullptr;
+ParFiniteElementSpace *rt_fespace = nullptr;
+
+ParFiniteElementSpace *h1_fespace_scalar = nullptr;
+ParFiniteElementSpace *h1_fespace_vector = nullptr;
+
 class H1ToL2OrHdivProjector
 {
 private:
@@ -346,21 +360,19 @@ int main(int argc, char *argv[])
       }
    }
 
-   // 7. Define a parallel finite element space on the parallel mesh. Here we
-   //    use the Nedelec finite elements of the specified order.
-   FiniteElementCollection *nd_fec    = new ND_FECollection(order, dim);
-   FiniteElementCollection *rt_fec = new RT_FECollection(order-1, dim); // H(div)
-   FiniteElementCollection *l2_fec = new L2_FECollection(order-1, dim);
-   FiniteElementCollection *h1_fec = new H1_FECollection(order, dim);
+   nd_fec = new ND_FECollection(order, dim);
+   rt_fec = new RT_FECollection(order-1, dim); // H(div)
+   l2_fec = new L2_FECollection(order-1, dim);
+   h1_fec = new H1_FECollection(order, dim);
 
-   ParFiniteElementSpace *l2_fespace_scalar = new ParFiniteElementSpace(pmesh, l2_fec);
-   ParFiniteElementSpace *l2_fespace_vector = new ParFiniteElementSpace(pmesh, l2_fec, dim);
+   l2_fespace_scalar = new ParFiniteElementSpace(pmesh, l2_fec);
+   l2_fespace_vector = new ParFiniteElementSpace(pmesh, l2_fec, dim);
 
-   ParFiniteElementSpace *nd_fespace = new ParFiniteElementSpace(pmesh, nd_fec);
-   ParFiniteElementSpace *rt_fespace = new ParFiniteElementSpace(pmesh, rt_fec);
+   nd_fespace = new ParFiniteElementSpace(pmesh, nd_fec);
+   rt_fespace = new ParFiniteElementSpace(pmesh, rt_fec);
 
-   ParFiniteElementSpace *h1_fespace_scalar = new ParFiniteElementSpace(pmesh, h1_fec);
-   ParFiniteElementSpace *h1_fespace_vector = new ParFiniteElementSpace(pmesh, h1_fec, dim);
+   h1_fespace_scalar = new ParFiniteElementSpace(pmesh, h1_fec);
+   h1_fespace_vector = new ParFiniteElementSpace(pmesh, h1_fec, dim);
 
    ProjectorOps ops(h1_fespace_vector,
                     h1_fespace_scalar,
@@ -421,6 +433,13 @@ int main(int argc, char *argv[])
    vel_error += curl_Ah_l2;
    vel_error -= u_l2;
 
+   // Subtract grad phi from u -- do we get a better curl Ah field?
+   curl_Ah_l2 = u_l2;
+   curl_Ah_l2 -= grad_phi_l2;
+
+   ParGridFunction curl_Ah_h1_from_grad_phi(h1_fespace_vector);
+   ops.projectorL2ToH1.Apply(curl_Ah_h1_from_grad_phi, curl_Ah_l2);
+
    // Define ceofficients for comparison for later
    VectorFunctionCoefficient grad_phi_coeff(sdim, grad_phi_exact); // nabla \phi
    ParGridFunction grad_phi_exact_h1(h1_fespace_vector);
@@ -439,6 +458,7 @@ int main(int argc, char *argv[])
       // double div_curl_A_error_l2 = div_curl_Ah_l2.ComputeL2Error(zero);
       double grad_phi_error_h1 = grad_phi_h1.ComputeL2Error(grad_phi_coeff);
       double curl_Ah_h1_error = curl_Ah_h1.ComputeL2Error(curl_Ah_exact_coeff);
+      double curl_Ah_h1_error_from_grad_phi = curl_Ah_h1_from_grad_phi.ComputeL2Error(curl_Ah_exact_coeff);
       double total_vel_error = vel_error.ComputeL2Error(zero);
    
 
@@ -446,6 +466,7 @@ int main(int argc, char *argv[])
       {
          // cout << "div(curl A) H1 L2 norm (should be ~0): " << div_curl_A_error_l2 << endl;
          cout << "curl Ah H1 L2 norm: " << curl_Ah_h1_error << endl;
+         cout << "curl Ah H1 L2 from grad phi norm: " << curl_Ah_h1_error_from_grad_phi << endl;
 
          // cout << "curl(grad phi) project L2 error (should be ~0): " << curl_grad_phi_computed_error_project << endl;
          cout << "grad_phi H1 L2 norm: " << grad_phi_error_h1 << endl;
@@ -491,12 +512,15 @@ int main(int argc, char *argv[])
 
    }*/
 
-    VisItDataCollection dc("VelocityDecomposition", pmesh);
+    VisItDataCollection dc("VelocityDecomposition/output_visit", pmesh);
     dc.SetFormat(DataCollection::PARALLEL_FORMAT);
     dc.SetCycle(0);
     dc.SetTime(0.0);
+    dc.SetPrecision(16);
     
+    dc.RegisterField("velocity_total_h1", &u_h1);
     dc.RegisterField("curl_Ah_h1", &curl_Ah_h1);
+    dc.RegisterField("curl_Ah_h1_from_grad_phi", &curl_Ah_h1_from_grad_phi);
     dc.RegisterField("curl_Ah_exact_h1", &curl_Ah_exact_h1);
 
     dc.RegisterField("grad_phi_h1",   &grad_phi_h1);
@@ -545,25 +569,25 @@ void w_exact(const Vector &x, Vector &f)
 
 void u_exact(const Vector &x, Vector &A)
 {
-   // real_t xi = 2*M_PI*x(0);
-   // real_t yi = 2*M_PI*x(1);
-   // real_t zi = 2*M_PI*x(2);
+   real_t xi = 2*M_PI*x(0);
+   real_t yi = 2*M_PI*x(1);
+   real_t zi = 2*M_PI*x(2);
  
-   // A(0) = sin(xi) * cos(yi) * cos(zi);
-   // A(1) = -cos(xi) * sin(yi) * cos(zi);
-   // A(2) = 0.0;
-   if (dim == 3)
-   {
-      A(0) = sin(2*M_PI*x(0)) + sin(4*M_PI*x(1)) + sin(6*M_PI*x(2));
-      A(1) = sin(6*M_PI*x(0)) + sin(2*M_PI*x(1)) + sin(4*M_PI*x(2));
-      A(2) = sin(4*M_PI*x(0)) + sin(6*M_PI*x(1)) + sin(2*M_PI*x(2));
-   }
-    else
-    {
-        A(0) = sin(kappa * x(1));
-        A(1) = sin(kappa * x(0));
-        if (x.Size() == 3) { A(2) = 0.0; }
-    }    
+   A(0) = sin(xi) * cos(yi) * cos(zi);
+   A(1) = -cos(xi) * sin(yi) * cos(zi);
+   A(2) = 0.0;
+   // if (dim == 3)
+   // {
+   //    A(0) = sin(2*M_PI*x(0)) + sin(4*M_PI*x(1)) + sin(6*M_PI*x(2));
+   //    A(1) = sin(6*M_PI*x(0)) + sin(2*M_PI*x(1)) + sin(4*M_PI*x(2));
+   //    A(2) = sin(4*M_PI*x(0)) + sin(6*M_PI*x(1)) + sin(2*M_PI*x(2));
+   // }
+   //  else
+   //  {
+   //      A(0) = sin(kappa * x(1));
+   //      A(1) = sin(kappa * x(0));
+   //      if (x.Size() == 3) { A(2) = 0.0; }
+   //  }    
 }
 
 
@@ -591,103 +615,6 @@ void curl_A_exact(const Vector &x, Vector &Acurl)
    }
 }
 
-// Solve Poisson problem: -∇²φ = div_u_h1 where div_u_h1 is already in H1 space
-// Uses OrthoSolver to handle null space in periodic domains
-void solve_scalar_potential_direct(ParGridFunction &phi,
-                                  ParGridFunction &div_u_h1,      // divergence already in H1 scalar space
-                                  ParFiniteElementSpace *h1_fes_scalar,
-                                  bool pa)
-{
-   int myid = Mpi::WorldRank();
-   
-   // Set up Laplacian operator in H1 space
-   ParBilinearForm laplacian(h1_fes_scalar);
-   if (pa) { laplacian.SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-   laplacian.AddDomainIntegrator(new DiffusionIntegrator());
-   laplacian.Assemble();
-   if (!pa) { laplacian.Finalize(); }
-   
-   // Set up RHS using div_u_h1 (both already in same H1 space)
-   GridFunctionCoefficient div_u_coeff(&div_u_h1);
-   ParLinearForm rhs(h1_fes_scalar);
-   rhs.AddDomainIntegrator(new DomainLFIntegrator(div_u_coeff));
-   rhs.Assemble();
-   
-   Vector RHS(h1_fes_scalar->GetTrueVSize());
-   Vector PHI(h1_fes_scalar->GetTrueVSize());
-   rhs.ParallelAssemble(RHS);
-   RHS *= -1.0;
-   PHI = 0.0;
-   
-   // Use OrthoSolver to handle null space (constant functions)
-   Array<int> empty_ess_tdof;  // No essential BC for periodic problem
-   
-   if (pa)
-   {
-      OperatorPtr laplacian_op;
-      laplacian.FormSystemMatrix(empty_ess_tdof, laplacian_op);
-      
-      // Create preconditioner
-      OperatorJacobiSmoother jac(laplacian, empty_ess_tdof);
-      
-      // Set up base solver
-      CGSolver base_solver(h1_fes_scalar->GetComm());
-      base_solver.SetRelTol(1e-12);
-      base_solver.SetMaxIter(1000);
-      base_solver.SetPrintLevel(0);  // Reduce output since OrthoSolver will print
-      base_solver.SetOperator(*laplacian_op);
-      base_solver.SetPreconditioner(jac);
-      
-      // Create OrthoSolver to handle null space
-      OrthoSolver ortho_solver(h1_fes_scalar->GetComm());
-      ortho_solver.SetSolver(base_solver);
-      ortho_solver.SetOperator(*laplacian_op);
-      
-      if (myid == 0) 
-      {
-         cout << "Using OrthoSolver for direct Poisson problem with null space" << endl;
-      }
-      
-      ortho_solver.Mult(RHS, PHI);
-   }
-   else
-   {
-      std::unique_ptr<HypreParMatrix> A(laplacian.ParallelAssemble());
-      
-      // Create base preconditioner  
-      HypreBoomerAMG amg(*A);
-      amg.SetPrintLevel(0);
-      
-      // Set up base solver
-      HyprePCG base_solver(*A);
-      base_solver.SetTol(1e-12);
-      base_solver.SetMaxIter(1000);
-      base_solver.SetPrintLevel(0);  // Reduce output
-      base_solver.SetPreconditioner(amg);
-      
-      // Create OrthoSolver to handle null space
-      OrthoSolver ortho_solver(h1_fes_scalar->GetComm());
-      ortho_solver.SetSolver(base_solver);
-      ortho_solver.SetOperator(*A);
-      
-      if (myid == 0) 
-      {
-         cout << "Using OrthoSolver for direct Poisson problem with null space" << endl;
-      }
-      
-      ortho_solver.Mult(RHS, PHI);
-   }
-   
-   // Set the solution
-   phi = 0.0;
-   
-   phi.SetFromTrueDofs(PHI);
-
-   if (myid == 0)
-   {
-      cout << "Solved direct Poisson problem -∇²φ = div(u) for scalar potential" << endl;
-   }
-}
 
 void solve_vector_potential( const ProjectorOps& ops,
                              const ParGridFunction &u_h1,
@@ -695,17 +622,6 @@ void solve_vector_potential( const ProjectorOps& ops,
                              ParMesh *pmesh, bool pa)
 {
    int myid = Mpi::WorldRank();
-
-   FiniteElementCollection *nd_fec = new ND_FECollection(order, dim);   // H(curl)
-   FiniteElementCollection *rt_fec = new RT_FECollection(order-1, dim); // H(div)
-   FiniteElementCollection *l2_fec = new L2_FECollection(order-1, dim);
-
-   ParFiniteElementSpace *l2_fespace_vector = new ParFiniteElementSpace(pmesh, l2_fec, dim);
-   ParFiniteElementSpace *l2_fespace_scalar = new ParFiniteElementSpace(pmesh, l2_fec);
-
-   ParFiniteElementSpace *nd_fespace = new ParFiniteElementSpace(pmesh, nd_fec);
-   ParFiniteElementSpace *rt_fespace = new ParFiniteElementSpace(pmesh, rt_fec);
-
 
    // 2. Peform the needed projections
    // Project u in H1 to Hcurl
@@ -890,12 +806,6 @@ void solve_vector_potential( const ProjectorOps& ops,
    delete muinv;
    delete b;
 
-   delete nd_fespace;
-   delete rt_fespace;
-   delete l2_fespace_vector;
-   delete nd_fec;
-   delete rt_fec;
-   delete l2_fec;
 }
 
 void solve_scalar_potential( const ProjectorOps& ops,
@@ -904,19 +814,6 @@ void solve_scalar_potential( const ProjectorOps& ops,
                              ParMesh *pmesh, bool pa)
 {
    int myid = Mpi::WorldRank();
-
-   FiniteElementCollection *nd_fec = new ND_FECollection(order, dim);   // H(curl)
-   FiniteElementCollection *rt_fec = new RT_FECollection(order-1, dim); // H(div)
-   FiniteElementCollection *l2_fec = new L2_FECollection(order-1, dim);
-   FiniteElementCollection *h1_fec = new H1_FECollection(order, dim);
-
-   ParFiniteElementSpace *l2_fespace_scalar = new ParFiniteElementSpace(pmesh, l2_fec);
-   ParFiniteElementSpace *l2_fespace_vector = new ParFiniteElementSpace(pmesh, l2_fec, dim);
-
-   ParFiniteElementSpace *nd_fespace = new ParFiniteElementSpace(pmesh, nd_fec);
-   ParFiniteElementSpace *rt_fespace = new ParFiniteElementSpace(pmesh, rt_fec);
-   ParFiniteElementSpace *h1_fespace_scalar = new ParFiniteElementSpace(pmesh, h1_fec);
-
 
    // 1. Project u from H1 to Hdiv
    ParGridFunction u_hdiv(rt_fespace);
@@ -1063,15 +960,6 @@ void solve_scalar_potential( const ProjectorOps& ops,
    }
 
    // 18. Free the used memory.
-   delete nd_fespace;
-   delete rt_fespace;
-   delete h1_fespace_scalar;
-   delete l2_fespace_vector;
-   delete l2_fespace_scalar;
-   delete nd_fec;
-   delete rt_fec;
-   delete h1_fec;
-   delete l2_fec;
 }
 
 H1ToL2OrHdivProjector::H1ToL2OrHdivProjector(ParFiniteElementSpace *test_space, 
