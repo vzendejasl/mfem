@@ -31,6 +31,8 @@
 using namespace mfem;
 using namespace navier;
 
+real_t delta_const = 1e-8;
+bool static_cond = false;
 struct s_NavierContext
 {
    int element_subdivisions = 0;
@@ -60,24 +62,8 @@ struct s_NavierContext
 
 } ctx;
 
-void project_Hdiv_to_L2(ParGridFunction &result,
-                        ParGridFunction &u_hdiv,
-                        ParFiniteElementSpace *test_fes,   // vector L2(DG) target
-                        bool pa);
-void compute_Curl_Hcurl_to_Hdiv(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  
-                        ParGridFunction &gftest, ParFiniteElementSpace *test_fes, bool pa);
 
-void project_Hcurl_Hdiv(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  ParGridFunction &gftest, ParFiniteElementSpace *test_fes, bool pa);
-void project_H1_to_Hcurl(ParGridFunction &result, 
-   ParGridFunction &gftrial, 
-   ParFiniteElementSpace *trial_fes,  
-   ParFiniteElementSpace *test_fes, bool pa);
 
-void project_H1_to_L2(ParGridFunction &result,          // in L2 space (output)
-                      ParGridFunction &u_h1,            // in H1 vector space (input)
-                      ParFiniteElementSpace *fes_h1,    // H1 trial space
-                      ParFiniteElementSpace *fes_l2,    // L2 test/target space
-                      bool pa);
 
 bool GetVisit(const s_NavierContext* ctx) { return ctx->visit; }
 bool GetConduit(const s_NavierContext* ctx) { return ctx->conduit; }
@@ -792,260 +778,6 @@ void ComputeVorticalPart( NavierSolver *solver,
 
 }
 
-void VelocityDecomposition(
-                          ParGridFunction &u,
-                          ParGridFunction &curl_Ah,
-                          ParGridFunction &grad_phi,
-                          ParMesh *pmesh, int order, bool pa, real_t delta_const)
-{
-
-   int dim = pmesh->Dimension();
-   int sdim = pmesh->SpaceDimension();
-   FiniteElementCollection *fec    = new ND_FECollection(order, dim);
-   FiniteElementCollection *nd_fec = new ND_FECollection(order, dim);   // H(curl)
-   FiniteElementCollection *rt_fec = new RT_FECollection(order-1, dim); // H(div)
-   FiniteElementCollection *l2_fec = new L2_FECollection(order-1, dim);
-   FiniteElementCollection *h1_fec = new H1_FECollection(order, dim);
-
-   ParFiniteElementSpace *l2_fespace_scalar = new ParFiniteElementSpace(pmesh, l2_fec);
-   ParFiniteElementSpace *l2_fespace_vector = new ParFiniteElementSpace(pmesh, l2_fec, dim);
-
-   ParFiniteElementSpace *nd_fespace = new ParFiniteElementSpace(pmesh, nd_fec);
-   ParFiniteElementSpace *rt_fespace = new ParFiniteElementSpace(pmesh, rt_fec);
-   ParFiniteElementSpace *fespace = new ParFiniteElementSpace(pmesh, fec);
-   ParFiniteElementSpace *h1_fespace_scalar = new ParFiniteElementSpace(pmesh, h1_fec);
-   ParFiniteElementSpace *h1_fespace_vector = new ParFiniteElementSpace(pmesh, h1_fec, dim);
-
-
-   ParGridFunction u_l2(l2_fespace_vector);
-   ParGridFunction u_hcurl_l2_project(nd_fespace);
-   ParGridFunction curl_u_hdiv(rt_fespace);
-   ParGridFunction curl_u_hcurl_l2_project(nd_fespace);
-   ParGridFunction temp_hdiv_test(rt_fespace);
-   ParGridFunction temp_hcurl_test(nd_fespace);
-
-   // ParDiscreteLinearOperator H1_to_L2_op(h1_fespace_vector, l2_fespace_vector);
-   // H1_to_L2_op.AddDomainInterpolator(new IdentityInterpolator);
-   // H1_to_L2_op.Assemble();
-   // H1_to_L2_op.Finalize();
-   // H1_to_L2_op.Mult(u, u_l2);
-
-   // Reference approach (simpler):
-   VectorGridFunctionCoefficient u_coeff(&u);
-   u_l2.ProjectCoefficient(u_coeff);
-
-   // Use this:
-   // project_H1_to_L2(u_l2, u, h1_fespace_vector, l2_fespace_vector, pa);
-
-   u_hcurl_l2_project = 0.0;
-   curl_u_hdiv = 0.0;
-   curl_u_hcurl_l2_project = 0.0;
-   temp_hdiv_test = 0.0;
-   temp_hcurl_test = 0.0;
-   u_hcurl_l2_project = 0.0;
-   
-   // 1. Project u to Hcurl
-   project_H1_to_Hcurl(u_hcurl_l2_project, u, h1_fespace_vector, nd_fespace, pa);
-
-   // 2. Compute the curl of u which will now be in H(div)
-   compute_Curl_Hcurl_to_Hdiv(curl_u_hdiv, u_hcurl_l2_project, nd_fespace, temp_hdiv_test, rt_fespace, pa);
-
-   // 3. Project u H(div) to u H(curl), this will the rhs of the solver
-   project_Hcurl_Hdiv(curl_u_hcurl_l2_project, curl_u_hdiv, rt_fespace, 
-      u_hcurl_l2_project, nd_fespace, pa);
-
-   // 8. Determine the list of true (i.e. parallel conforming) essential //    boundary dofs. In this example, the boundary conditions are defined
-   //    by marking all the boundary attributes from the mesh as essential
-   //    (Dirichlet) and converting them to a list of true dofs.
-   Array<int> ess_tdof_list;
-   Array<int> ess_bdr;
-
-   if (pmesh->bdr_attributes.Size())
-   {
-      ess_bdr.SetSize(pmesh->bdr_attributes.Max());
-      ess_bdr = 0;
-      // nd_fespace->GetEssentialTrueDofs(ess_bdr, ess_tdof_list);
-   }
-
-   // 9. Set up the parallel linear form b(.) which corresponds to the
-   //    right-hand side of the FEM linear system, which in this case is
-   //    (f,phi_i) where f is given by the function f_exact and phi_i are the
-   //    basis functions in the finite element fespace.
-   VectorGridFunctionCoefficient f(&curl_u_hcurl_l2_project);
-   ParLinearForm *b = new ParLinearForm(nd_fespace);
-   b->AddDomainIntegrator(new VectorFEDomainLFIntegrator(f));
-   b->Assemble();
-
-   // 10. Define the solution vector x as a parallel finite element grid function
-   //     corresponding to fespace. Initialize x by projecting the exact
-   //     solution. Note that only values from the boundary edges will be used
-   //     when eliminating the non-homogeneous boundary condition to modify the
-   //     r.h.s. vector b.
-   ParGridFunction x(nd_fespace);
-   x = 0.0;
-
-   // 11. Set up the parallel bilinear form corresponding to the EM diffusion
-   //     operator curl muinv curl + sigma I, by adding the curl-curl and the
-   //     mass domain integrators.
-   Coefficient *muinv = new ConstantCoefficient(1.0);
-   Coefficient *sigma = new ConstantCoefficient(delta_const);
-   ParBilinearForm *a = new ParBilinearForm(nd_fespace);
-   if (pa) { a->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-   a->AddDomainIntegrator(new CurlCurlIntegrator(*muinv));
-   a->AddDomainIntegrator(new VectorFEMassIntegrator(*sigma));
-
-   // 12. Assemble the parallel bilinear form and the corresponding linear
-   //     system, applying any necessary transformations such as: parallel
-   //     assembly, eliminating boundary conditions, applying conforming
-   //     constraints for non-conforming AMR, static condensation, etc.
-   a->Assemble();
-
-   OperatorPtr A;
-   Vector B, X;
-   a->FormLinearSystem(ess_tdof_list, x, *b, A, X, B);
-
-   // 13. Solve the system AX=B using PCG with an AMS preconditioner.
-   if (pa)
-   {
-#ifdef MFEM_USE_AMGX
-      MatrixFreeAMS ams(*a, *A, *fespace, muinv, sigma, NULL, ess_bdr, useAmgX);
-#else
-      MatrixFreeAMS ams(*a, *A, *nd_fespace, muinv, sigma, NULL, ess_bdr);
-#endif
-      CGSolver cg(MPI_COMM_WORLD);
-      cg.SetRelTol(1e-12);
-      cg.SetMaxIter(1000);
-      cg.SetPrintLevel(1);
-      cg.SetOperator(*A);
-      cg.SetPreconditioner(ams);
-      cg.Mult(B, X);
-   }
-   else
-   {
-      if (Mpi::Root())
-      {
-         std::cout << "Size of linear system: "
-              << A.As<HypreParMatrix>()->GetGlobalNumRows() << std::endl;
-      }
-
-      ParFiniteElementSpace *prec_ndfespace =
-         (a->StaticCondensationIsEnabled() ? a->SCParFESpace() : nd_fespace);
-      HypreAMS ams(*A.As<HypreParMatrix>(), prec_ndfespace);
-      // ams.SetSingularProblem();
-      HyprePCG pcg(*A.As<HypreParMatrix>());
-      pcg.SetTol(1e-12);
-      pcg.SetMaxIter(500);
-      pcg.SetPrintLevel(2);
-      pcg.SetPreconditioner(ams);
-      pcg.Mult(B, X);
-   }
-
-   // 14. Recover the parallel grid function corresponding to X. This is the
-   //     local finite element solution on each processor.
-   a->RecoverFEMSolution(X, *b, x);
-
-   // The test space which is being projected to is
-   // H(div) from the trial space H(curl)
-   ParGridFunction Ah_hdiv(rt_fespace);
-   ParGridFunction Ah_hcurl(nd_fespace);
-   // I think this is redundant
-   Ah_hcurl = x;
-   project_Hcurl_Hdiv(Ah_hdiv, x, nd_fespace, Ah_hdiv, rt_fespace, pa);
-
-   // Compute curl of Ah in H(div)
-   ParGridFunction curl_Ah_hdiv(rt_fespace);
-   compute_Curl_Hcurl_to_Hdiv(curl_Ah_hdiv, x, nd_fespace, temp_hdiv_test, rt_fespace, pa);
-
-   ParGridFunction curl_Ah_l2(l2_fespace_vector);
-   project_Hdiv_to_L2(curl_Ah_l2, curl_Ah_hdiv,l2_fespace_vector,pa);
-
-   ParGridFunction grad_phi_l2(l2_fespace_vector);
-   grad_phi_l2 = u_l2;
-   grad_phi_l2 -= curl_Ah_l2;
-
-   // Create coefficients from the L2 grid functions
-   VectorGridFunctionCoefficient grad_phi_l2_coeff(&grad_phi_l2);
-   VectorGridFunctionCoefficient curl_Ah_l2_coeff(&curl_Ah_l2);
-
-   // Project to grad phi_l2 and curl_Ah_l2 to H1
-   ParGridFunction grad_phi_h1(h1_fespace_vector);
-   ParGridFunction curl_Ah_h1(h1_fespace_vector);
-   
-   // Use ProjectDiscCoefficient for averaging-based projection from L2 to H1
-   grad_phi_h1.ProjectDiscCoefficient(grad_phi_l2_coeff);
-   curl_Ah_h1.ProjectDiscCoefficient(curl_Ah_l2_coeff);
-
-   curl_Ah = curl_Ah_h1;
-   grad_phi = grad_phi_h1;
-
-   // Set \nabla \cdot (\nabla \times Ah) to be in L2
-   ParGridFunction div_curl_Ah(l2_fespace_scalar);
-   ParDiscreteLinearOperator div_op(rt_fespace, l2_fespace_scalar);
-   div_op.AddDomainInterpolator(new DivergenceInterpolator);
-   div_op.Assemble();
-   div_op.Finalize();
-
-   // Compute \nabla \cdot (\nabla \times Ah) in H(div)
-   ParGridFunction div_curl_Ah_l2(l2_fespace_scalar);
-   div_op.Mult(curl_Ah_hdiv, div_curl_Ah_l2);
-
-   ParGridFunction div_Ah_l2(l2_fespace_scalar);
-   div_op.Mult(Ah_hdiv, div_Ah_l2);
-
-   {
-      ConstantCoefficient zero(0.0);
-      double div_curl_A_error = div_curl_Ah_l2.ComputeL2Error(zero);
-      double div_A_error = div_Ah_l2.ComputeL2Error(zero);
-
-      if (Mpi::Root())
-      {
-         std::cout << "div(curl A) L2 norm: " << div_curl_A_error << std::endl;
-         std::cout << "div(A) L2 norm: " << div_A_error << std::endl;
-      }
-   }
-
-   ParGridFunction u_reconstructed(l2_fespace_vector);
-   u_reconstructed = curl_Ah_l2;
-   u_reconstructed += grad_phi_l2;
-   
-   double reconstruction_error = u_reconstructed.ComputeL2Error(u_coeff);
-   if (Mpi::Root()){
-       std::cout << "Reconstruction error: " << reconstruction_error << std::endl;
-   }
-
-   DataCollection *dc = NULL;
-   std::string visit_dir = std::string("Decomposition_VisitData_") 
-                                               + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
-                                               + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
-                                               + "RefLv" + std::to_string(
-                                                   ctx.element_subdivisions 
-                                                 + ctx.element_subdivisions_parallel) 
-                                               + "P" + std::to_string(ctx.order)
-                                               + "/output_visit";
-
-   dc = new VisItDataCollection(MPI_COMM_WORLD,visit_dir, pmesh);
-   int precision = 16;
-   dc->SetPrecision(precision);
-   dc->SetCycle(0);
-   dc->SetTime(0);
-   dc->SetFormat(DataCollection::PARALLEL_FORMAT);
-   dc->RegisterField("u", &u);
-   dc->RegisterField("u_l2", &u_l2);
-   dc->RegisterField("u_hcurl", &u_hcurl_l2_project);
-   dc->RegisterField("curl_u_hdiv", &curl_u_hdiv);
-   dc->RegisterField("curl_u_hcurl", &curl_u_hcurl_l2_project);
-   dc->RegisterField("Ah", &x);
-   dc->RegisterField("Ah_hdiv", &Ah_hdiv);
-   dc->RegisterField("curl_Ah_hdiv", &curl_Ah_hdiv);
-   dc->RegisterField("curl_Ah_l2", &curl_Ah_l2);
-   dc->RegisterField("curl_Ah_h1", &curl_Ah_h1);
-   dc->RegisterField("grad_phi_l2", &grad_phi_l2);
-   dc->RegisterField("grad_phi_h1", &grad_phi_h1);
-   dc->Save();
-
-
-}
-
 // Computes \eta = 2*\nu*(\nabla u + trans(\nabla u))^2
 void ComputeDissipation(ParGridFunction &u, ParGridFunction &d)
 {
@@ -1154,6 +886,226 @@ void VerifyPeriodicMesh(Mesh *mesh);
 void SamplePoints(ParGridFunction *sol, ParMesh *pmesh, int step, double time, const std::string &suffix);
 
 void ComputeElementCenterValuesScalar(ParGridFunction *sol, ParMesh *pmesh,int step, double time);
+
+FiniteElementCollection *nd_fec = nullptr;
+FiniteElementCollection *rt_fec = nullptr;
+FiniteElementCollection *l2_fec = nullptr;
+FiniteElementCollection *h1_fec = nullptr;
+
+ParFiniteElementSpace *l2_fespace_scalar = nullptr; 
+ParFiniteElementSpace *l2_fespace_vector = nullptr;
+
+ParFiniteElementSpace *nd_fespace = nullptr;
+ParFiniteElementSpace *rt_fespace = nullptr;
+
+ParFiniteElementSpace *h1_fespace_scalar = nullptr;
+ParFiniteElementSpace *h1_fespace_vector = nullptr;
+
+class H1ToL2OrHdivProjector
+{
+private:
+    ParFiniteElementSpace *test_fes;
+    bool pa;
+    
+    // Store the mass matrix and solver for reuse
+    std::unique_ptr<ParBilinearForm> mass_form;
+    std::unique_ptr<CGSolver> cg_solver;
+    std::unique_ptr<OperatorJacobiSmoother> jacobi_prec;
+    std::unique_ptr<HypreParMatrix> mass_matrix;
+    std::unique_ptr<HypreDiagScale> hypre_prec;
+    std::unique_ptr<HyprePCG> hypre_solver;
+    OperatorPtr mass_op;
+
+    void SetUpOperator();
+    
+public:
+    H1ToL2OrHdivProjector(ParFiniteElementSpace *test_space, 
+                       bool partial_assembly); 
+
+    void Apply(ParGridFunction &result, const ParGridFunction &u_h1) const;
+};
+
+class H1ToHdivOrHcurlProjector
+{
+private:
+    ParFiniteElementSpace *test_fes;
+    bool pa;
+    
+    // Store the mass matrix and solver for reuse
+    std::unique_ptr<ParBilinearForm> mass_form;
+    std::unique_ptr<CGSolver> cg_solver;
+    std::unique_ptr<OperatorJacobiSmoother> jacobi_prec;
+    std::unique_ptr<HypreParMatrix> mass_matrix;
+    std::unique_ptr<HypreDiagScale> hypre_prec;
+    std::unique_ptr<HyprePCG> hypre_solver;
+    OperatorPtr mass_op;
+
+    void SetUpOperator();
+    
+public:
+   H1ToHdivOrHcurlProjector(ParFiniteElementSpace *test_space, 
+                      bool partial_assembly); 
+
+    void Apply(ParGridFunction &result, const ParGridFunction &u_h1) const;
+};
+
+class HcurlHdivProjector 
+{
+private:
+    ParFiniteElementSpace *trial_fes;
+    ParFiniteElementSpace *test_fes;
+    bool pa;
+    
+    // Store the mass matrix and solver for reuse
+    std::unique_ptr<ParBilinearForm> mass_form;
+    std::unique_ptr<ParMixedBilinearForm> mixed_form;
+    std::unique_ptr<CGSolver> cg_solver;
+    std::unique_ptr<OperatorJacobiSmoother> jacobi_prec;
+    std::unique_ptr<HypreParMatrix> mass_matrix;
+    std::unique_ptr<HypreParMatrix> mixed_matrix;
+    std::unique_ptr<HypreDiagScale> hypre_prec;
+    std::unique_ptr<HyprePCG> hypre_solver;
+    OperatorPtr mass_op;
+    
+    void SetUpOperator();
+public:
+    HcurlHdivProjector(ParFiniteElementSpace *trial_space, 
+                       ParFiniteElementSpace *test_space, 
+                       bool partial_assembly);
+
+    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const;
+};
+
+class ComputeDivergenceHdivToL2
+{
+private:
+    ParFiniteElementSpace *trial_fes;
+    ParFiniteElementSpace *test_fes;
+    bool pa;
+    
+    // Store the mass matrix and solver for reuse
+    std::unique_ptr<ParBilinearForm> mass_form;
+    std::unique_ptr<ParMixedBilinearForm> mixed_form;
+    std::unique_ptr<CGSolver> cg_solver;
+    std::unique_ptr<OperatorJacobiSmoother> jacobi_prec;
+    std::unique_ptr<HypreParMatrix> mass_matrix;
+    std::unique_ptr<HypreParMatrix> mixed_matrix;
+    std::unique_ptr<HypreDiagScale> hypre_prec;
+    std::unique_ptr<HyprePCG> hypre_solver;
+    OperatorPtr mass_op;
+    
+    void SetUpOperator();
+public:
+    ComputeDivergenceHdivToL2(ParFiniteElementSpace *trial_space, 
+                       ParFiniteElementSpace *test_space, 
+                       bool partial_assembly);
+    
+    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const;
+};
+
+class ComputeCurlHcurlToHdiv
+{
+private:
+    ParFiniteElementSpace *trial_fes;
+    ParFiniteElementSpace *test_fes;
+    bool pa;
+    
+    // Store the mass matrix and solver for reuse
+    std::unique_ptr<ParBilinearForm> mass_form;
+    std::unique_ptr<ParMixedBilinearForm> mixed_form;
+    std::unique_ptr<CGSolver> cg_solver;
+    std::unique_ptr<OperatorJacobiSmoother> jacobi_prec;
+    std::unique_ptr<HypreParMatrix> mass_matrix;
+    std::unique_ptr<HypreParMatrix> mixed_matrix;
+    std::unique_ptr<HypreDiagScale> hypre_prec;
+    std::unique_ptr<HyprePCG> hypre_solver;
+    OperatorPtr mass_op;
+    
+    void SetUpOperator();
+
+public:
+    ComputeCurlHcurlToHdiv(ParFiniteElementSpace *trial_space, 
+                       ParFiniteElementSpace *test_space, 
+                       bool partial_assembly); 
+    
+    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const;
+};
+
+class ComputeGradientH1ScalarToHcurl
+{
+private:
+    ParFiniteElementSpace *trial_fes;
+    ParFiniteElementSpace *test_fes;
+    bool pa;
+    
+    // Store the mass matrix and solver for reuse
+    std::unique_ptr<ParBilinearForm> mass_form;
+    std::unique_ptr<ParMixedBilinearForm> mixed_form;
+    std::unique_ptr<CGSolver> cg_solver;
+    std::unique_ptr<OperatorJacobiSmoother> jacobi_prec;
+    std::unique_ptr<HypreParMatrix> mass_matrix;
+    std::unique_ptr<HypreParMatrix> mixed_matrix;
+    std::unique_ptr<HypreDiagScale> hypre_prec;
+    std::unique_ptr<HyprePCG> hypre_solver;
+    OperatorPtr mass_op;
+        
+    void SetUpOperator();
+    
+public:
+    ComputeGradientH1ScalarToHcurl(ParFiniteElementSpace *trial_space, 
+                       ParFiniteElementSpace *test_space, 
+                       bool partial_assembly);
+    
+    void Apply(ParGridFunction &result, const ParGridFunction &gftrial) const;
+};
+
+struct ProjectorOps {
+
+   H1ToHdivOrHcurlProjector projectorH1ToHdiv;
+   H1ToL2OrHdivProjector projectorL2ToH1Scalar;
+   ComputeGradientH1ScalarToHcurl projectorComputeGradientH1ScalarToHcurl;
+   H1ToL2OrHdivProjector projectorH1ToL2;
+   H1ToHdivOrHcurlProjector projectorH1ToHcurl;
+   HcurlHdivProjector projectorHcurlToHdiv;
+   HcurlHdivProjector projectorHdivToHcurl;
+   ComputeDivergenceHdivToL2 projectorDivHdivToL2;
+   ComputeCurlHcurlToHdiv projectorCurlHcurlToHdiv;
+   H1ToL2OrHdivProjector projectorHdivToL2;
+   H1ToL2OrHdivProjector projectorL2ToH1;
+
+   ProjectorOps(ParFiniteElementSpace *h1_fespace_vector,
+                ParFiniteElementSpace *h1_fespace_scalar,
+                ParFiniteElementSpace *nd_fespace,
+                ParFiniteElementSpace *rt_fespace,
+                ParFiniteElementSpace *l2_fespace_vector, 
+                ParFiniteElementSpace *l2_fespace_scalar, 
+                bool pa)
+
+   : projectorH1ToHdiv(rt_fespace, pa),
+     projectorL2ToH1Scalar(h1_fespace_scalar, pa),
+     projectorComputeGradientH1ScalarToHcurl(h1_fespace_scalar, nd_fespace, pa),
+     projectorH1ToL2(l2_fespace_vector, pa),
+     projectorH1ToHcurl(nd_fespace, pa),
+     projectorHcurlToHdiv(rt_fespace, nd_fespace, pa),
+     projectorHdivToHcurl(nd_fespace, rt_fespace, pa),
+     projectorDivHdivToL2(rt_fespace,l2_fespace_scalar, pa),
+     projectorCurlHcurlToHdiv(nd_fespace, rt_fespace, pa),
+     projectorHdivToL2(l2_fespace_vector, pa),
+     projectorL2ToH1(h1_fespace_vector, pa)
+     {
+
+     }
+};
+
+void solve_scalar_potential( const ProjectorOps& ops,
+                             const ParGridFunction &u_h1,
+                             ParGridFunction &grad_phi_h1,
+                             ParMesh *pmesh, bool pa);
+
+void solve_vector_potential( const ProjectorOps& ops,
+                             const ParGridFunction &u_h1,
+                             ParGridFunction &curl_Ah_h1,
+                             ParMesh *pmesh, bool pa);
 
 
 int main(int argc, char *argv[])
@@ -1350,6 +1302,31 @@ int main(int argc, char *argv[])
 
       mesh = new Mesh(Mesh::MakePeriodic(*init_mesh, init_mesh->CreatePeriodicVertexMapping(translations)));
 
+      // VectorFunctionCoefficient translate_set_mesh(mesh->Dimension(), [&](const Vector &x_in, Vector &x_out){
+
+      //    x_out[0] = x_in[0]*0.5; // Translate x-coordinate
+      //    x_out[1] = x_in[1]*x_in[1]*2.0; // Translate y-coordinate
+      //    if (mesh->Dimension() == 3)
+      //    {
+      //       x_out[2] = x_in[2]*0.75; // Translate z-coordinate
+      //    }
+      // });
+
+      // // Smooth wave-like perturbations
+      // VectorFunctionCoefficient wave_perturb(mesh->Dimension(), [&](const Vector &x_in, Vector &x_out){
+      //     double amplitude = 0.1; // Small amplitude
+      //     double frequency = 4.0;  // Number of waves across domain
+      //     
+      //     x_out[0] = x_in[0] + amplitude * sin(frequency * M_PI * x_in[1]);
+      //     x_out[1] = x_in[1] + amplitude * sin(frequency * M_PI * x_in[0]);
+      //     if (mesh->Dimension() == 3) {
+      //         x_out[2] = x_in[2] + amplitude * sin(frequency * M_PI * (x_in[0] + x_in[1]));
+      //     }
+      // });
+
+      // // // Apply translation to the mesh
+      // mesh->Transform(wave_perturb);
+
       if (Mpi::Root())
       {
          VerifyPeriodicMesh(mesh);
@@ -1366,16 +1343,16 @@ int main(int argc, char *argv[])
            x_out[2] = x_in[2] + shift; // Translate z-coordinate
          } });
 
-      // Define a translation function for the mesh nodes
-      VectorFunctionCoefficient scale(mesh->Dimension(), [&](const Vector &x_in, Vector &x_out)
-                                          {
-         double scale = 1.0;
+      // // Define a translation function for the mesh nodes
+      // VectorFunctionCoefficient scale(mesh->Dimension(), [&](const Vector &x_in, Vector &x_out)
+      //                                     {
+      //    double scale = 1.0;
 
-         x_out[0] = x_in[0]/scale ; // Translate x-coordinate
-         x_out[1] = x_in[1]/scale ; // Translate y-coordinate
-         if (mesh->Dimension() == 3){
-           x_out[2] = x_in[2]/scale; // Translate z-coordinate
-         } });
+      //    x_out[0] = x_in[0]/scale ; // Translate x-coordinate
+      //    x_out[1] = x_in[1]/scale ; // Translate y-coordinate
+      //    if (mesh->Dimension() == 3){
+      //      x_out[2] = x_in[2]/scale; // Translate z-coordinate
+      //    } });
 
       // mesh->Transform(translate);
       // mesh->Transform(scale);
@@ -1445,25 +1422,16 @@ int main(int argc, char *argv[])
       mfem::out << "Number of elements: " << nel << std::endl;
    }
 
+   int dim = pmesh->Dimension();
+
    ParFiniteElementSpace *velocity_fespace = u_gf->ParFESpace();
    ParFiniteElementSpace *pressure_fespace = p_gf->ParFESpace();
-   
+
    // Initialize w_gf and q_gf using the finite element spaces
    ParGridFunction w_gf(velocity_fespace);
    ParGridFunction q_gf(pressure_fespace);
    ParGridFunction d_gf(pressure_fespace);
    ParGridFunction ke_gf(pressure_fespace);
-
-
-   ParGridFunction curl_Ah(velocity_fespace);
-   ParGridFunction grad_phi(velocity_fespace);
-
-   // VelocityDecomposition(*u_gf, curl_Ah, grad_phi,pmesh,ctx.order,ctx.pa,ctx.delta_const);
-   // SamplePoints( u_gf, pmesh,0, 0, "Velocity", &ctx);
-   // ParGridFunction divu_gf(pressure_fespace);
-
-   // ParGridFunction u_comp(velocity_fespace);
-   // ParGridFunction u_vort(velocity_fespace);
 
    flowsolver->ComputeCurl3D(*u_gf, w_gf);
    ComputeQCriterion(*u_gf, q_gf);
@@ -1471,6 +1439,87 @@ int main(int argc, char *argv[])
 
    // ComputeDivergence3D(*u_gf, divu_gf);
    // ComputeVorticalPart(flowsolver, *u_gf, w_gf, u_vort);
+
+   /*
+   nd_fec = new ND_FECollection(ctx.order, dim);
+   rt_fec = new RT_FECollection(ctx.order-1, dim); // H(div)
+   l2_fec = new L2_FECollection(ctx.order-1, dim);
+   h1_fec = new H1_FECollection(ctx.order, dim);
+
+   l2_fespace_scalar = new ParFiniteElementSpace(pmesh, l2_fec);
+   l2_fespace_vector = new ParFiniteElementSpace(pmesh, l2_fec, dim);
+
+   nd_fespace = new ParFiniteElementSpace(pmesh, nd_fec);
+   rt_fespace = new ParFiniteElementSpace(pmesh, rt_fec);
+
+   h1_fespace_scalar = new ParFiniteElementSpace(pmesh, h1_fec);
+   h1_fespace_vector = new ParFiniteElementSpace(pmesh, h1_fec, dim);
+
+   ProjectorOps ops(h1_fespace_vector,
+                    h1_fespace_scalar,
+                    nd_fespace,
+                    rt_fespace,
+                    l2_fespace_vector, 
+                    l2_fespace_scalar, 
+                    ctx.pa);
+
+
+
+   // \nabla \times Ah in H(div)
+   // 1. Define velocity spaces
+   ParGridFunction curl_Ah_h1(h1_fespace_vector);
+   solve_vector_potential(ops, *u_gf, curl_Ah_h1, pmesh, ctx.pa);
+
+   ParGridFunction curl_Ah_l2(l2_fespace_vector);
+   ops.projectorH1ToL2.Apply(curl_Ah_l2, curl_Ah_h1);
+
+   // Solve for scalar potential
+
+   // 4. Solve Poisson problem \nabla^2 \phi = div(u)
+   ParGridFunction grad_phi_h1(h1_fespace_vector);
+   solve_scalar_potential(ops, *u_gf, grad_phi_h1, pmesh, ctx.pa);
+
+   ParGridFunction grad_phi_l2(l2_fespace_vector);
+   ops.projectorH1ToL2.Apply(grad_phi_l2, grad_phi_h1);
+
+   // Sanity Checks
+   ParGridFunction u_l2(l2_fespace_vector);
+   ops.projectorH1ToL2.Apply(u_l2, *u_gf);
+
+   ParGridFunction vel_error(l2_fespace_vector);
+   vel_error = grad_phi_l2;
+   vel_error += curl_Ah_l2;
+   vel_error -= u_l2;
+
+   // Subtract grad phi from u -- do we get a better curl Ah field?
+   curl_Ah_l2 = u_l2;
+   curl_Ah_l2 -= grad_phi_l2;
+
+   ParGridFunction curl_Ah_h1_from_grad_phi(h1_fespace_vector);
+   ops.projectorL2ToH1.Apply(curl_Ah_h1_from_grad_phi, curl_Ah_l2);
+
+   // 15. Compute and print the L^2 norm of the error.
+   {
+
+      ConstantCoefficient zero(0.0);
+
+      Vector zero_v(dim);
+      zero_v = 0.0;
+      VectorConstantCoefficient zero_vec(zero_v);
+
+      // double curl_grad_phi_computed_error_project = curl_grad_phi_hdiv.ComputeL2Error(zero_vec);
+      // double div_curl_A_error_l2 = div_curl_Ah_l2.ComputeL2Error(zero);
+      double total_vel_error = vel_error.ComputeL2Error(zero);
+   
+
+      if (myid == 0)
+      {
+         // cout << "curl(grad phi) project L2 error (should be ~0): " << curl_grad_phi_computed_error_project << endl;
+         std::cout << "vel error from reconstruction: " << total_vel_error << std::endl;
+      }
+   }
+
+   */
 
    QuantitiesOfInterest kin_energy(pmesh);
    real_t ke = kin_energy.ComputeKineticEnergy(*u_gf, ke_gf);
@@ -1533,8 +1582,9 @@ int main(int argc, char *argv[])
       dc->RegisterField("pressure", p_gf);
       dc->RegisterField("vorticity", &w_gf);
       dc->RegisterField("qcriterion", &q_gf);
-      dc->RegisterField("grad_phi", &grad_phi);
-      dc->RegisterField("curl_Ah", &curl_Ah);
+      // dc->RegisterField("curl_Ah", &curl_Ah_h1);
+      // dc->RegisterField("curl_Ah_from_grad_phi", &curl_Ah_h1_from_grad_phi);
+      // dc->RegisterField("grad_phi", &grad_phi_h1);
       // dc->RegisterField("dissipation", &d_gf);
       // dc->RegisterField("divu", &divu_gf);
       // dc->RegisterField("ke", &ke_gf);
@@ -1793,10 +1843,51 @@ int main(int argc, char *argv[])
          {
             ComputeQCriterion(*u_gf, q_gf);
             flowsolver->ComputeCurl3D(*u_gf, w_gf);
-            // VelocityDecomposition(*u_gf,curl_Ah,grad_phi,pmesh,ctx.order,ctx.pa,ctx.delta_const);
 
-            // ComputeDivergence3D(*u_gf, divu_gf);
-            // ComputeVorticalPart(flowsolver, *u_gf, w_gf, u_vort);
+            /*
+            // Vector decomposition
+            solve_vector_potential(ops, *u_gf, curl_Ah_h1, pmesh, ctx.pa);
+            ops.projectorH1ToL2.Apply(curl_Ah_l2, curl_Ah_h1);
+
+            solve_scalar_potential(ops, *u_gf, grad_phi_h1, pmesh, ctx.pa);
+
+            ops.projectorH1ToL2.Apply(grad_phi_l2, grad_phi_h1);
+
+            ops.projectorH1ToL2.Apply(u_l2, *u_gf);
+
+            vel_error = grad_phi_l2;
+            vel_error += curl_Ah_l2;
+            vel_error -= u_l2;
+
+            // Subtract grad phi from u -- do we get a better curl Ah field?
+            curl_Ah_l2 = u_l2;
+            curl_Ah_l2 -= grad_phi_l2;
+
+            ops.projectorL2ToH1.Apply(curl_Ah_h1_from_grad_phi, curl_Ah_l2);
+
+            // 15. Compute and print the L^2 norm of the error.
+            {
+
+               ConstantCoefficient zero(0.0);
+
+               Vector zero_v(dim);
+               zero_v = 0.0;
+               VectorConstantCoefficient zero_vec(zero_v);
+
+               // double curl_grad_phi_computed_error_project = curl_grad_phi_hdiv.ComputeL2Error(zero_vec);
+               // double div_curl_A_error_l2 = div_curl_Ah_l2.ComputeL2Error(zero);
+               double total_vel_error = vel_error.ComputeL2Error(zero);
+   
+
+               if (myid == 0)
+               {
+                  // cout << "curl(grad phi) project L2 error (should be ~0): " << curl_grad_phi_computed_error_project << endl;
+                  std::cout << "vel error from reconstruction: " << total_vel_error << std::endl;
+               }
+            }
+            */
+
+
 
             if (ctx.paraview)
             {
@@ -1917,7 +2008,7 @@ int main(int argc, char *argv[])
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
            printf("%.5E %.5E %.5E %.5E %.5E %.5E %.5E\n", t, ctx.dt, u_inf, p_inf, ke, enstrophy, cfl);
-           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e\n", t, static_cast<real_t>(step), ke, enstrophy);
+           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e\n", t, static_cast<real_t>(step + global_cycle), ke, enstrophy);
            fprintf(f_turb, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
                        t, static_cast<real_t>(global_cycle + step), max_diss, avg_diss, kolmLenScl, 
                        avg_lambda, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
@@ -1955,6 +2046,17 @@ int main(int argc, char *argv[])
    delete flowsolver;
    delete pmesh;
    delete mesh;
+
+   // delete nd_fespace;
+   // delete rt_fespace;
+   // delete h1_fespace_vector;
+   // delete h1_fespace_scalar;
+   // delete l2_fespace_vector;
+   // delete l2_fespace_scalar;
+   // delete nd_fec;
+   // delete rt_fec;
+   // delete h1_fec;
+   // delete l2_fec;
 
    return 0;
 }
@@ -2299,345 +2401,772 @@ void ComputeElementCenterValuesScalar(ParGridFunction* sol, ParMesh* pmesh, int 
     }
 }
 
-
-
-// The test space is what you are projecting to and the trial space is where you are projecting from
-void project_Hcurl_Hdiv(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  
-                        ParGridFunction &gftest, ParFiniteElementSpace *test_fes, bool pa)
+void solve_vector_potential( const ProjectorOps& ops,
+                             const ParGridFunction &u_h1,
+                             ParGridFunction &curl_Ah_h1,
+                             ParMesh *pmesh, bool pa)
 {
-   ParBilinearForm *a = new ParBilinearForm(test_fes);
+   int myid = Mpi::WorldRank();
+
+   int dim = pmesh->Dimension();
+
+   // 2. Peform the needed projections
+   // Project u in H1 to Hcurl
+   ParGridFunction u_hcurl(nd_fespace);
+
+   ops.projectorH1ToHcurl.Apply(u_hcurl, u_h1);
+
+   // Compute the curl of u
+   ParGridFunction curl_u(rt_fespace);
+   curl_u = 0.0;
+
+   // We can also solve a linear system to move form one space to another
+   ops.projectorCurlHcurlToHdiv.Apply(curl_u, u_hcurl);
+
+   // The test space which is being projected to is
+   // H(curl) from the trial space H(div)
+   // Note that the trial space needs to not be empyt ie.
+   // be projected to
+
+   ParGridFunction curl_u_hcurl(nd_fespace);
+
+   ops.projectorHcurlToHdiv.Apply(curl_u_hcurl, curl_u);
+
+   //    boundary dofs. In this example, the boundary conditions are defined
+   //    by marking all the boundary attributes from the mesh as essential
+   //    (Dirichlet) and converting them to a list of true dofs.
+   Array<int> ess_tdof_list;
+   Array<int> ess_bdr;
+
+   if (pmesh->bdr_attributes.Size())
+   {
+      ess_bdr.SetSize(pmesh->bdr_attributes.Max());
+      ess_bdr = 0;
+   }
+
+   // 9. Set up the parallel linear form b(.) which corresponds to the
+   //    right-hand side of the FEM linear system, which in this case is
+   //    (f,phi_i) where f is given by the function f_exact and phi_i are the
+   //    basis functions in the finite element fespace.
+   VectorGridFunctionCoefficient f(&curl_u_hcurl);
+   ParLinearForm *b = new ParLinearForm(nd_fespace);
+   b->AddDomainIntegrator(new VectorFEDomainLFIntegrator(f));
+   b->Assemble();
+
+   // 10. Define the solution vector x as a parallel finite element grid function
+   //     corresponding to fespace. Initialize x by projecting the exact
+   //     solution. Note that only values from the boundary edges will be used
+   //     when eliminating the non-homogeneous boundary condition to modify the
+   //     r.h.s. vector b.
+   ParGridFunction x(nd_fespace);
+   x = 0.0;
+
+   // 11. Set up the parallel bilinear form corresponding to the EM diffusion
+   //     operator curl muinv curl + sigma I, by adding the curl-curl and the
+   //     mass domain integrators.
+   Coefficient *muinv = new ConstantCoefficient(1.0);
+   Coefficient *sigma = new ConstantCoefficient(delta_const);
+   ParBilinearForm *a = new ParBilinearForm(nd_fespace);
    if (pa) { a->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-   a->AddDomainIntegrator(new VectorFEMassIntegrator());
-   ParMixedBilinearForm *a_mixed = new ParMixedBilinearForm(trial_fes, test_fes);
-   if (pa) {a_mixed->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-   a_mixed->AddDomainIntegrator(new VectorFEMassIntegrator());
+   a->AddDomainIntegrator(new CurlCurlIntegrator(*muinv));
+   a->AddDomainIntegrator(new VectorFEMassIntegrator(*sigma));
 
-   // a_mixed->AddDomainIntegrator(new MixedVectorMassIntegrator());  // More explicit
-
+   // 12. Assemble the parallel bilinear form and the corresponding linear
+   //     system, applying any necessary transformations such as: parallel
+   //     assembly, eliminating boundary conditions, applying conforming
+   //     constraints for non-conforming AMR, static condensation, etc.
+   if (static_cond) { a->EnableStaticCondensation(); }
    a->Assemble();
-   if(!pa){a->Finalize();}
 
-   a_mixed->Assemble();
-   if(!pa){a_mixed->Finalize();}
+   OperatorPtr A;
+   Vector B, X;
+   a->FormLinearSystem(ess_tdof_list, x, *b, A, X, B);
 
-   Vector B(test_fes->GetTrueVSize());
-   Vector X(test_fes->GetTrueVSize());
-
+   // 13. Solve the system AX=B using PCG with an AMS preconditioner.
    if (pa)
    {
-      ParLinearForm b(test_fes); // used as a vector
-      a_mixed->Mult(gftrial, b); // process-local multiplication
-      b.ParallelAssemble(B);
-   }
-   else
-   {
-      HypreParMatrix *mixed = a_mixed->ParallelAssemble();
+#ifdef MFEM_USE_AMGX
+      MatrixFreeAMS ams(*a, *A, *nd_fespace, muinv, sigma, NULL, ess_bdr, useAmgX);
+#else
+      MatrixFreeAMS ams(*a, *A, *nd_fespace, muinv, sigma, NULL, ess_bdr);
 
-      Vector P(trial_fes->GetTrueVSize());
-      gftrial.GetTrueDofs(P);
-
-      mixed->Mult(P,B);
-
-      delete mixed;
-   }
-
-    // 11. Define and apply a parallel PCG solver for AX=B with Jacobi
-   //     preconditioner.
-   if (pa)
-   {
-      Array<int> ess_tdof_list; // empty
-
-      OperatorPtr A;
-      a->FormSystemMatrix(ess_tdof_list, A);
-
-      OperatorJacobiSmoother Jacobi(*a, ess_tdof_list);
-
+      // std::unique_ptr<Solver> solver;
+      // solver.reset(new LORSolver<HypreBoomerAMG>(*a, ess_tdof_list));
+      // solver.reset(new OperatorJacobiSmoother(*a, ess_tdof_list));
+#endif
       CGSolver cg(MPI_COMM_WORLD);
       cg.SetRelTol(1e-12);
       cg.SetMaxIter(1000);
-      cg.SetPrintLevel(1);
-      cg.SetOperator(*A);
-      cg.SetPreconditioner(Jacobi);
-      X = 0.0;
-      cg.Mult(B, X);
-   }
-   else
-   {
-      HypreParMatrix *Amat = a->ParallelAssemble();
-      HypreDiagScale Jacobi(*Amat);
-      HyprePCG pcg(*Amat);
-      pcg.SetTol(1e-12);
-      pcg.SetMaxIter(1000);
-      pcg.SetPrintLevel(2);
-      pcg.SetPreconditioner(Jacobi);
-      X = 0.0;
-      pcg.Mult(B, X);
-
-      delete Amat;
-   }
-
-   result.SetFromTrueDofs(X);
-}
-
-// The test space is what you are projecting to and the trial space is where you are projecting from
-void compute_Curl_Hcurl_to_Hdiv(ParGridFunction &result, ParGridFunction &gftrial, ParFiniteElementSpace *trial_fes,  
-                        ParGridFunction &gftest, ParFiniteElementSpace *test_fes, bool pa)
-{
-   ParBilinearForm *a = new ParBilinearForm(test_fes);
-   if (pa) { a->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-   a->AddDomainIntegrator(new VectorFEMassIntegrator());
-   ParMixedBilinearForm *a_mixed = new ParMixedBilinearForm(trial_fes, test_fes);
-   if (pa) {a_mixed->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-   a_mixed->AddDomainIntegrator(new MixedVectorCurlIntegrator());
-
-   a->Assemble();
-   if(!pa){a->Finalize();}
-
-   a_mixed->Assemble();
-   if(!pa){a_mixed->Finalize();}
-
-   Vector B(test_fes->GetTrueVSize());
-   Vector X(test_fes->GetTrueVSize());
-
-   if (pa)
-   {
-      ParLinearForm b(test_fes); // used as a vector
-      a_mixed->Mult(gftrial, b); // process-local multiplication
-      b.ParallelAssemble(B);
-   }
-   else
-   {
-      HypreParMatrix *mixed = a_mixed->ParallelAssemble();
-
-      Vector P(trial_fes->GetTrueVSize());
-      gftrial.GetTrueDofs(P);
-
-      mixed->Mult(P,B);
-
-      delete mixed;
-   }
-
-    // 11. Define and apply a parallel PCG solver for AX=B with Jacobi
-   //     preconditioner.
-   if (pa)
-   {
-      Array<int> ess_tdof_list; // empty
-
-      OperatorPtr A;
-      a->FormSystemMatrix(ess_tdof_list, A);
-
-      OperatorJacobiSmoother Jacobi(*a, ess_tdof_list);
-
-      CGSolver cg(MPI_COMM_WORLD);
-      cg.SetRelTol(1e-12);
-      cg.SetMaxIter(1000);
-      cg.SetPrintLevel(1);
-      cg.SetOperator(*A);
-      cg.SetPreconditioner(Jacobi);
-      X = 0.0;
-      cg.Mult(B, X);
-   }
-   else
-   {
-      HypreParMatrix *Amat = a->ParallelAssemble();
-      HypreDiagScale Jacobi(*Amat);
-      HyprePCG pcg(*Amat);
-      pcg.SetTol(1e-12);
-      pcg.SetMaxIter(1000);
-      pcg.SetPrintLevel(2);
-      pcg.SetPreconditioner(Jacobi);
-      X = 0.0;
-      pcg.Mult(B, X);
-
-      delete Amat;
-   }
-
-   result.SetFromTrueDofs(X);
-}
-
-// Project H(div) field (u_hdiv) into vector L2(DG) (result) in the true L2 sense: M y = b.
-// test_fes must be a vector L2/DG space with vdim = mesh dim.
-void project_Hdiv_to_L2(ParGridFunction &result,
-                        ParGridFunction &u_hdiv,
-                        ParFiniteElementSpace *test_fes,   // vector L2 target
-                        bool pa)
-{
-   // 1) L2 mass operator on target
-   ParBilinearForm a(test_fes);
-   if (pa) { a.SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-   a.AddDomainIntegrator(new VectorMassIntegrator());
-   a.Assemble();
-   if (!pa) { a.Finalize(); }
-
-   // 2) RHS: b_i = (u_hdiv, phi_i)
-   VectorGridFunctionCoefficient ucoeff(&u_hdiv);
-   ParLinearForm b(test_fes);
-   b.AddDomainIntegrator(new VectorDomainLFIntegrator(ucoeff));
-   b.Assemble();
-
-   // true-dof vectors
-   Vector B(test_fes->GetTrueVSize());
-   Vector X(test_fes->GetTrueVSize());
-   b.ParallelAssemble(B);
-   X = 0.0;
-
-   if (pa)
-   {
-      Array<int> ess_tdof_list;
-      OperatorPtr Aop;
-      a.FormSystemMatrix(ess_tdof_list, Aop);
-
-      OperatorJacobiSmoother Jacobi(a, ess_tdof_list); 
-      CGSolver cg(test_fes->GetComm());
-      cg.SetRelTol(1e-12);
-      cg.SetMaxIter(200);
       cg.SetPrintLevel(0);
-      cg.SetOperator(*Aop);
-      cg.SetPreconditioner(Jacobi);
+      cg.SetOperator(*A);
+      cg.SetPreconditioner(ams);
+      // cg.SetPreconditioner(*solver);
       cg.Mult(B, X);
    }
    else
    {
-      // Fully assembled Hypre path
-      std::unique_ptr<HypreParMatrix> A(a.ParallelAssemble());
-      HypreDiagScale Jacobi(*A);
-      HyprePCG pcg(*A);
-      pcg.SetTol(1e-12);
-      pcg.SetMaxIter(200);
-      pcg.SetPrintLevel(2);
-      pcg.SetPreconditioner(Jacobi);
-      pcg.Mult(B, X);
-   }
-
-   // 3) Scatter to result in L2(DG)
-   result = 0.0;
-   result.SetFromTrueDofs(X);
-}
-
-// Project H1 (vector) → H(curl) (ND) in L2-sense.
-void project_H1_to_Hcurl(ParGridFunction &result,          // in ND space (output)
-                         ParGridFunction &u_h1,            // in H1 vector space (input)
-                         ParFiniteElementSpace *fes_h1,    // not used, but keep for symmetry
-                         ParFiniteElementSpace *fes_nd,    // ND test/target
-                         bool pa)
-{
-   // Mass matrix on the ND space
-   ParBilinearForm M(fes_nd);
-   if (pa) { M.SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-   M.AddDomainIntegrator(new VectorFEMassIntegrator()); // <- ND/RT mass
-   M.Assemble();
-   if (!pa) { M.Finalize(); }
-
-   // RHS: b_i = (u_h1, w_i) with w_i in ND
-   VectorGridFunctionCoefficient ucoeff(&u_h1);
-   ParLinearForm b(fes_nd);
-   b.AddDomainIntegrator(new VectorFEDomainLFIntegrator(ucoeff)); // <- ND/RT RHS
-   b.Assemble();
-
-   Vector B(fes_nd->GetTrueVSize()), X(fes_nd->GetTrueVSize());
-   b.ParallelAssemble(B);
-   X = 0.0;
-
-   if (pa)
-   {
-      Array<int> ess_tdof_list; // none for pure L2 projection
-      OperatorPtr Mop;
-      M.FormSystemMatrix(ess_tdof_list, Mop);
-      OperatorJacobiSmoother Jacobi(M, ess_tdof_list);
-      CGSolver cg(fes_nd->GetComm());
-      cg.SetRelTol(1e-12);
-      cg.SetMaxIter(500);
-      cg.SetPrintLevel(0);
-      cg.SetOperator(*Mop);
-      cg.SetPreconditioner(Jacobi);
-      cg.Mult(B, X);
-   }
-   else
-   {
-      std::unique_ptr<HypreParMatrix> Mpar(M.ParallelAssemble());
-      HypreDiagScale Jacobi(*Mpar);
-      HyprePCG pcg(*Mpar);
+      ParFiniteElementSpace *prec_ndfespace =
+         (a->StaticCondensationIsEnabled() ? a->SCParFESpace() : nd_fespace);
+      HypreAMS ams(*A.As<HypreParMatrix>(), prec_ndfespace);
+      // ams.SetSingularProblem();
+      HyprePCG pcg(*A.As<HypreParMatrix>());
       pcg.SetTol(1e-12);
       pcg.SetMaxIter(500);
-      pcg.SetPrintLevel(2);
-      pcg.SetPreconditioner(Jacobi);
+      pcg.SetPrintLevel(0);
+      pcg.SetPreconditioner(ams);
       pcg.Mult(B, X);
    }
 
-   result = 0.0;
-   result.SetFromTrueDofs(X);
+   // 14. Recover the parallel grid function corresponding to X. This is the
+   //     local finite element solution on each processor.
+   a->RecoverFEMSolution(X, *b, x);
+
+   // 3. Solve for the vector potential
+   ParGridFunction Ah(nd_fespace);
+   Ah = x;
+
+   // Compute the curl of the vector potential which is the divergence 
+   // free part of the velocity field
+
+   // Compute curl of Ah in H(div)
+   ParGridFunction curl_Ah(rt_fespace);
+   ops.projectorCurlHcurlToHdiv.Apply(curl_Ah, Ah);
+
+   // 4. Verification part to make sure field is divergence free
+
+   // Verification of divergence free field
+   // The test space which is being projected to is
+   // H(div) from the trial space H(curl)
+   ParGridFunction Ah_hdiv(rt_fespace);
+   ops.projectorHdivToHcurl.Apply(Ah_hdiv, Ah);
+
+   // Set \nabla \cdot (\nabla \times Ah) to be in L2
+   // Compute \nabla \cdot (\nabla \times Ah) in H(div)
+   ParGridFunction div_curl_Ah(l2_fespace_scalar);
+   ParGridFunction div_Ah(l2_fespace_scalar);
+
+   ops.projectorDivHdivToL2.Apply(div_curl_Ah, curl_Ah);
+   ops.projectorDivHdivToL2.Apply(div_Ah, Ah_hdiv);
+
+   // 5. Move curl of vector potential to H1 for visualization for later
+   ParGridFunction curl_Ah_l2(l2_fespace_vector);
+   ops.projectorHdivToL2.Apply(curl_Ah_l2, curl_Ah);
+
+   // Project from L2 to H1 by solving linear system
+   ops.projectorL2ToH1.Apply(curl_Ah_h1, curl_Ah_l2);
+
+   {
+      ConstantCoefficient zero(0.0);
+      Vector zero_v(dim);
+      zero_v = 0.0;
+      VectorConstantCoefficient zero_vec(zero_v);
+
+      double div_curl_A_error = div_curl_Ah.ComputeL2Error(zero);
+      double div_A_error = div_Ah.ComputeL2Error(zero);
+   
+
+      if (myid == 0)
+      {
+         std::cout << "div(curl A) L2 norm (should be ~0): " << div_curl_A_error << std::endl;
+         std::cout << "div(A) L2 norm (should be ~0): " << div_A_error << std::endl;
+      }
+   }
+
+
+   // 18. Free the used memory.
+   delete a;
+   delete sigma;
+   delete muinv;
+   delete b;
+
 }
 
-// Project H1 (vector) → L2 (vector) in the L2 sense: M_L2 * result = M_mixed * u_h1
-void project_H1_to_L2(ParGridFunction &result,          // in L2 space (output)
-                      ParGridFunction &u_h1,            // in H1 vector space (input)
-                      ParFiniteElementSpace *fes_h1,    // H1 trial space
-                      ParFiniteElementSpace *fes_l2,    // L2 test/target space
-                      bool pa)
+void solve_scalar_potential( const ProjectorOps& ops,
+                             const ParGridFunction &u_h1,
+                             ParGridFunction &grad_phi_h1,
+                             ParMesh *pmesh, bool pa)
 {
-   // L2 mass matrix on the target space
-   ParBilinearForm M_L2(fes_l2);
-   if (pa) { M_L2.SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-   M_L2.AddDomainIntegrator(new VectorFEMassIntegrator()); // L2 mass for vectors
-   M_L2.Assemble();
-   if (!pa) { M_L2.Finalize(); }
+   int myid = Mpi::WorldRank();
 
-   // Mixed mass matrix: (u_h1, v_l2) for u_h1 in H1, v_l2 in L2
-   ParMixedBilinearForm M_mixed(fes_h1, fes_l2);
-   if (pa) { M_mixed.SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-   M_mixed.AddDomainIntegrator(new VectorMassIntegrator()); // Mixed mass integrator
-   M_mixed.Assemble();
-   if (!pa) { M_mixed.Finalize(); }
-
-   // Set up RHS: B = M_mixed * u_h1
-   Vector B(fes_l2->GetTrueVSize());
-   Vector X(fes_l2->GetTrueVSize());
-
+   // 1. Project u from H1 to Hdiv
+   ParGridFunction u_hdiv(rt_fespace);
+   ops.projectorH1ToHdiv.Apply(u_hdiv, u_h1);
+   
+   // 2. Divergence of u in L2 space
+   ParGridFunction div_u_l2(l2_fespace_scalar);
+   ops.projectorDivHdivToL2.Apply(div_u_l2, u_hdiv);
+   
+   // 2. Project div u from L2 to H1 for decomposition
+   ParGridFunction div_u_h1(h1_fespace_scalar);
+   ops.projectorL2ToH1Scalar.Apply(div_u_h1, div_u_l2);
+   
+   // 4. Solve Poisson problem \nabla^2 \phi = div(u)
+   
+   // Set up Laplacian operator in H1 space
+   ParBilinearForm laplacian(h1_fespace_scalar);
+   if (pa) { laplacian.SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+   laplacian.AddDomainIntegrator(new DiffusionIntegrator());
+   laplacian.Assemble();
+   if (!pa) { laplacian.Finalize(); }
+   
+   // Set up RHS using div_u_h1 (both already in same H1 space)
+   GridFunctionCoefficient div_u_coeff(&div_u_h1);
+   ParLinearForm rhs(h1_fespace_scalar);
+   rhs.AddDomainIntegrator(new DomainLFIntegrator(div_u_coeff));
+   rhs.Assemble();
+   
+   Vector RHS(h1_fespace_scalar->GetTrueVSize());
+   Vector PHI(h1_fespace_scalar->GetTrueVSize());
+   rhs.ParallelAssemble(RHS);
+   RHS *= -1.0;
+   PHI = 0.0;
+   
+   // Use OrthoSolver to handle null space (constant functions)
+   Array<int> empty_ess_tdof;  // No essential BC for periodic problem
+   
    if (pa)
    {
-      ParLinearForm b(fes_l2); // used as a vector
-      M_mixed.Mult(u_h1, b); // process-local multiplication
-      b.ParallelAssemble(B);
-   }
-   else
-   {
-      HypreParMatrix *mixed = M_mixed.ParallelAssemble();
-      Vector P(fes_h1->GetTrueVSize());
-      u_h1.GetTrueDofs(P);
-      mixed->Mult(P, B);
-      delete mixed;
-   }
-
-   // Solve M_L2 * X = B
-   X = 0.0;
-   if (pa)
-   {
-      Array<int> ess_tdof_list; // empty for pure L2 projection
-      OperatorPtr M_op;
-      M_L2.FormSystemMatrix(ess_tdof_list, M_op);
+      OperatorPtr laplacian_op;
+      laplacian.FormSystemMatrix(empty_ess_tdof, laplacian_op);
       
-      OperatorJacobiSmoother Jacobi(M_L2, ess_tdof_list);
-      CGSolver cg(fes_l2->GetComm());
-      cg.SetRelTol(1e-12);
-      cg.SetMaxIter(500);
-      cg.SetPrintLevel(0);
-      cg.SetOperator(*M_op);
-      cg.SetPreconditioner(Jacobi);
-      cg.Mult(B, X);
+      // Create preconditioner
+      OperatorJacobiSmoother jac(laplacian, empty_ess_tdof);
+      
+      // Set up base solver
+      CGSolver base_solver(h1_fespace_scalar->GetComm());
+      base_solver.SetRelTol(1e-12);
+      base_solver.SetMaxIter(1000);
+      base_solver.SetPrintLevel(0);  // Reduce output since OrthoSolver will print
+      base_solver.SetOperator(*laplacian_op);
+      base_solver.SetPreconditioner(jac);
+      
+      // Create OrthoSolver to handle null space
+      OrthoSolver ortho_solver(h1_fespace_scalar->GetComm());
+      ortho_solver.SetSolver(base_solver);
+      ortho_solver.SetOperator(*laplacian_op);
+      
+      ortho_solver.Mult(RHS, PHI);
    }
    else
    {
-      std::unique_ptr<HypreParMatrix> M_par(M_L2.ParallelAssemble());
-      HypreDiagScale Jacobi(*M_par);
-      HyprePCG pcg(*M_par);
-      pcg.SetTol(1e-12);
-      pcg.SetMaxIter(500);
-      pcg.SetPrintLevel(2);
-      pcg.SetPreconditioner(Jacobi);
-      pcg.Mult(B, X);
+      std::unique_ptr<HypreParMatrix> A(laplacian.ParallelAssemble());
+      
+      // Create base preconditioner  
+      HypreBoomerAMG amg(*A);
+      amg.SetPrintLevel(0);
+      
+      // Set up base solver
+      HyprePCG base_solver(*A);
+      base_solver.SetTol(1e-12);
+      base_solver.SetMaxIter(1000);
+      base_solver.SetPrintLevel(0);  // Reduce output
+      base_solver.SetPreconditioner(amg);
+      
+      // Create OrthoSolver to handle null space
+      OrthoSolver ortho_solver(h1_fespace_scalar->GetComm());
+      ortho_solver.SetSolver(base_solver);
+      ortho_solver.SetOperator(*A);
+      
+      ortho_solver.Mult(RHS, PHI);
+   }
+   
+   // Set the solution
+   ParGridFunction phi_scalar(h1_fespace_scalar);
+   phi_scalar = 0.0;
+   
+   phi_scalar.SetFromTrueDofs(PHI);
+
+   // 5. Compute compressive part of velocify field
+   ParGridFunction grad_phi(nd_fespace);
+   ops.projectorComputeGradientH1ScalarToHcurl.Apply(grad_phi, phi_scalar);
+   
+   // 6. Compute curl of grad_phi for verification for later
+   ParGridFunction curl_grad_phi(rt_fespace);
+   ops.projectorCurlHcurlToHdiv.Apply(curl_grad_phi, grad_phi);
+
+   // 7. Project grad phi from from Hcurl to H1
+   ParGridFunction grad_phi_hdiv(rt_fespace);
+   ops.projectorHdivToHcurl.Apply(grad_phi_hdiv,grad_phi);
+
+   ParGridFunction grad_phi_l2(l2_fespace_vector);
+
+   ops.projectorHdivToL2.Apply(grad_phi_l2, grad_phi_hdiv);
+
+   ops.projectorL2ToH1.Apply(grad_phi_h1, grad_phi_l2);
+
+   int dim = pmesh->Dimension();
+   {
+
+      ConstantCoefficient zero(0.0);
+
+      Vector zero_v(dim);
+      zero_v = 0.0;
+      VectorConstantCoefficient zero_vec(zero_v);
+
+      double curl_grad_phi_computed_error = curl_grad_phi.ComputeL2Error(zero_vec);
+   
+
+      if (myid == 0)
+      {
+         std::cout << "curl(grad phi) L2 error (should be ~0): " << curl_grad_phi_computed_error << std::endl;
+      }
    }
 
-   // Set result from true DOFs
-   result = 0.0;
-   result.SetFromTrueDofs(X);
+   // 18. Free the used memory.
+}
+
+H1ToL2OrHdivProjector::H1ToL2OrHdivProjector(ParFiniteElementSpace *test_space, 
+                   bool partial_assembly) 
+    : test_fes(test_space), pa(partial_assembly)
+{
+    SetUpOperator();
+}
+
+void H1ToL2OrHdivProjector::SetUpOperator()
+{
+    // Create mass matrix on ND space (this is the expensive part)
+    mass_form = std::make_unique<ParBilinearForm>(test_fes);
+    if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+
+    if (test_fes->GetVDim() == 1){
+        mass_form->AddDomainIntegrator(new MassIntegrator());
+    } else {
+        mass_form->AddDomainIntegrator(new VectorMassIntegrator());
+    }
+
+    mass_form->Assemble();
+    if (!pa) { mass_form->Finalize(); }
+    
+    // Setup solver for the mass matrix
+    if (pa)
+    {
+        Array<int> ess_tdof_list; // empty for L2 projection
+        mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
+        
+        jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
+        cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
+        cg_solver->SetRelTol(1e-12);
+        cg_solver->SetMaxIter(500);
+        cg_solver->SetPrintLevel(0);
+        cg_solver->SetOperator(*mass_op);
+        cg_solver->SetPreconditioner(*jacobi_prec);
+    }
+    else
+    {
+        mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
+        hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
+        hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
+        hypre_solver->SetTol(1e-12);
+        hypre_solver->SetMaxIter(500);
+        hypre_solver->SetPrintLevel(0);
+        hypre_solver->SetPreconditioner(*hypre_prec);
+    }
+}
+
+void H1ToL2OrHdivProjector::Apply(ParGridFunction &result, const ParGridFunction &u_h1) const
+{
+    ParLinearForm b(test_fes);
+
+    if (test_fes->GetVDim() == 1){
+        GridFunctionCoefficient ucoeff(&u_h1);
+        b.AddDomainIntegrator(new DomainLFIntegrator(ucoeff));
+    } else {
+        VectorGridFunctionCoefficient ucoeff(&u_h1);
+        b.AddDomainIntegrator(new VectorDomainLFIntegrator(ucoeff));
+    }
+
+    b.Assemble();
+    
+    Vector B(test_fes->GetTrueVSize()), X(test_fes->GetTrueVSize());
+    b.ParallelAssemble(B);
+    X = 0.0;
+    
+    if (pa)
+    {
+        cg_solver->Mult(B, X);
+    }
+    else
+    {
+        hypre_solver->Mult(B, X);
+    }
+    
+    result = 0.0;
+    result.SetFromTrueDofs(X);
+}
+
+ H1ToHdivOrHcurlProjector::H1ToHdivOrHcurlProjector(ParFiniteElementSpace *test_space, 
+                       bool partial_assembly) 
+        : test_fes(test_space), pa(partial_assembly)
+ {
+    SetUpOperator();
+ }
+
+ void H1ToHdivOrHcurlProjector::SetUpOperator()
+{
+    // Create mass matrix on ND space (this is the expensive part)
+    mass_form = std::make_unique<ParBilinearForm>(test_fes);
+    if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+    mass_form->AddDomainIntegrator(new VectorFEMassIntegrator());
+    mass_form->Assemble();
+    if (!pa) { mass_form->Finalize(); }
+    
+    // Setup solver for the mass matrix
+    if (pa)
+    {
+        Array<int> ess_tdof_list; // empty for L2 projection
+        mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
+        
+        jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
+        cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
+        cg_solver->SetRelTol(1e-12);
+        cg_solver->SetMaxIter(500);
+        cg_solver->SetPrintLevel(0);
+        cg_solver->SetOperator(*mass_op);
+        cg_solver->SetPreconditioner(*jacobi_prec);
+    }
+    else
+    {
+        mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
+        hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
+        hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
+        hypre_solver->SetTol(1e-12);
+        hypre_solver->SetMaxIter(500);
+        hypre_solver->SetPrintLevel(0);
+        hypre_solver->SetPreconditioner(*hypre_prec);
+    }
+}
+
+void H1ToHdivOrHcurlProjector::Apply(ParGridFunction &result, const ParGridFunction &u_h1) const
+{
+    VectorGridFunctionCoefficient ucoeff(&u_h1);
+    ParLinearForm b(test_fes);
+    b.AddDomainIntegrator(new VectorFEDomainLFIntegrator(ucoeff));
+    b.Assemble();
+    
+    Vector B(test_fes->GetTrueVSize()), X(test_fes->GetTrueVSize());
+    b.ParallelAssemble(B);  // This B depends on u_h1!
+    X = 0.0;
+    
+    if (pa)
+    {
+        cg_solver->Mult(B, X);  // Solve M*X = B
+    }
+    else
+    {
+        hypre_solver->Mult(B, X);  // Solve M*X = B
+    }
+    
+    result = 0.0;
+    result.SetFromTrueDofs(X);
+}
+
+ HcurlHdivProjector::HcurlHdivProjector(ParFiniteElementSpace *trial_space, 
+                       ParFiniteElementSpace *test_space, 
+                       bool partial_assembly) 
+        : trial_fes(trial_space), test_fes(test_space), pa(partial_assembly)
+ {
+     SetUpOperator();
+ }
+
+ void HcurlHdivProjector::SetUpOperator()
+ {
+     mass_form = std::make_unique<ParBilinearForm>(test_fes);
+     if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+     mass_form->AddDomainIntegrator(new VectorFEMassIntegrator());
+     mass_form->Assemble();
+     if (!pa) { mass_form->Finalize(); }
+
+     mixed_form = std::make_unique<ParMixedBilinearForm>(trial_fes, test_fes);
+     if (pa) { mixed_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+     mixed_form->AddDomainIntegrator(new VectorFEMassIntegrator());
+     mixed_form->Assemble();
+     if (!pa) { mixed_form->Finalize(); }
+     
+     // Setup solver for the mass matrix
+     if (pa)
+     {
+         Array<int> ess_tdof_list; // empty for L2 projection
+         mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
+
+         jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
+         cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
+         cg_solver->SetRelTol(1e-12);
+         cg_solver->SetMaxIter(500);
+         cg_solver->SetPrintLevel(0);
+         cg_solver->SetOperator(*mass_op);
+         cg_solver->SetPreconditioner(*jacobi_prec);
+     }
+     else
+     {
+         mixed_matrix = std::unique_ptr<HypreParMatrix>(mixed_form->ParallelAssemble());
+         mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
+         hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
+         hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
+         hypre_solver->SetTol(1e-12);
+         hypre_solver->SetMaxIter(500);
+         hypre_solver->SetPrintLevel(0);
+         hypre_solver->SetPreconditioner(*hypre_prec);
+     }
+ }
+
+void HcurlHdivProjector::Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
+{
+    Vector B(test_fes->GetTrueVSize());
+    Vector X(test_fes->GetTrueVSize());
+
+    if (pa)
+    {
+       ParLinearForm b(test_fes); // used as a vector
+       mixed_form->Mult(gftrial, b); // process-local multiplication
+       b.ParallelAssemble(B);
+    }
+    else
+    {
+
+       Vector P(trial_fes->GetTrueVSize());
+       gftrial.GetTrueDofs(P);
+       mixed_matrix->Mult(P,B);
+    }
+
+    X = 0.0;
+    if(pa)
+    {
+     cg_solver->Mult(B,X);
+    }else{
+     hypre_solver->Mult(B,X);
+    }
+    result.SetFromTrueDofs(X);
+}
+
+ComputeDivergenceHdivToL2::ComputeDivergenceHdivToL2(ParFiniteElementSpace *trial_space, 
+                      ParFiniteElementSpace *test_space, 
+                      bool partial_assembly) 
+       : trial_fes(trial_space), test_fes(test_space), pa(partial_assembly)
+{
+    SetUpOperator();
+}
+
+void ComputeDivergenceHdivToL2::SetUpOperator()
+{
+    mass_form = std::make_unique<ParBilinearForm>(test_fes);
+    if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+    mass_form->AddDomainIntegrator(new MassIntegrator());
+    mass_form->Assemble();
+    if (!pa) { mass_form->Finalize(); }
+
+    mixed_form = std::make_unique<ParMixedBilinearForm>(trial_fes, test_fes);
+    if (pa) { mixed_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+    mixed_form->AddDomainIntegrator(new VectorFEDivergenceIntegrator());
+    mixed_form->Assemble();
+    if (!pa) { mixed_form->Finalize(); }
+    
+    // Setup solver for the mass matrix
+    if (pa)
+    {
+        Array<int> ess_tdof_list; // empty for L2 projection
+        mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
+
+        jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
+        cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
+        cg_solver->SetRelTol(1e-12);
+        cg_solver->SetMaxIter(500);
+        cg_solver->SetPrintLevel(0);
+        cg_solver->SetOperator(*mass_op);
+        cg_solver->SetPreconditioner(*jacobi_prec);
+    }
+    else
+    {
+        mixed_matrix = std::unique_ptr<HypreParMatrix>(mixed_form->ParallelAssemble());
+        mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
+        hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
+        hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
+        hypre_solver->SetTol(1e-12);
+        hypre_solver->SetMaxIter(500);
+        hypre_solver->SetPrintLevel(0);
+        hypre_solver->SetPreconditioner(*hypre_prec);
+    }
+}
+void ComputeDivergenceHdivToL2::Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
+{
+    Vector B(test_fes->GetTrueVSize());
+    Vector X(test_fes->GetTrueVSize());
+
+    if (pa)
+    {
+       ParLinearForm b(test_fes); // used as a vector
+       mixed_form->Mult(gftrial, b); // process-local multiplication
+       b.ParallelAssemble(B);
+    }
+    else
+    {
+
+       Vector P(trial_fes->GetTrueVSize());
+       gftrial.GetTrueDofs(P);
+       mixed_matrix->Mult(P,B);
+    }
+
+    X = 0.0;
+    if(pa)
+    {
+     cg_solver->Mult(B,X);
+    }else{
+     hypre_solver->Mult(B,X);
+    }
+    result.SetFromTrueDofs(X);
+}
+
+ComputeCurlHcurlToHdiv::ComputeCurlHcurlToHdiv(ParFiniteElementSpace *trial_space, 
+                       ParFiniteElementSpace *test_space, 
+                       bool partial_assembly) 
+        : trial_fes(trial_space), test_fes(test_space), pa(partial_assembly)
+{
+    SetUpOperator();
+}
+
+void ComputeCurlHcurlToHdiv::SetUpOperator()
+{
+    mass_form = std::make_unique<ParBilinearForm>(test_fes);
+    if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+    mass_form->AddDomainIntegrator(new VectorFEMassIntegrator());
+    mass_form->Assemble();
+    if (!pa) { mass_form->Finalize(); }
+
+    mixed_form = std::make_unique<ParMixedBilinearForm>(trial_fes, test_fes);
+    if (pa) { mixed_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+    mixed_form->AddDomainIntegrator(new MixedVectorCurlIntegrator());
+    mixed_form->Assemble();
+    if (!pa) { mixed_form->Finalize(); }
+    
+    // Setup solver for the mass matrix
+    if (pa)
+    {
+        Array<int> ess_tdof_list; // empty for L2 projection
+        mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
+
+        jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
+        cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
+        cg_solver->SetRelTol(1e-12);
+        cg_solver->SetMaxIter(500);
+        cg_solver->SetPrintLevel(0);
+        cg_solver->SetOperator(*mass_op);
+        cg_solver->SetPreconditioner(*jacobi_prec);
+    }
+    else
+    {
+        mixed_matrix = std::unique_ptr<HypreParMatrix>(mixed_form->ParallelAssemble());
+        mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
+        hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
+        hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
+        hypre_solver->SetTol(1e-12);
+        hypre_solver->SetMaxIter(500);
+        hypre_solver->SetPrintLevel(0);
+        hypre_solver->SetPreconditioner(*hypre_prec);
+    }
+}
+    
+void ComputeCurlHcurlToHdiv::Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
+{
+    Vector B(test_fes->GetTrueVSize());
+    Vector X(test_fes->GetTrueVSize());
+
+    if (pa)
+    {
+       ParLinearForm b(test_fes); // used as a vector
+       mixed_form->Mult(gftrial, b); // process-local multiplication
+       b.ParallelAssemble(B);
+    }
+    else
+    {
+
+       Vector P(trial_fes->GetTrueVSize());
+       gftrial.GetTrueDofs(P);
+       mixed_matrix->Mult(P,B);
+    }
+
+    X = 0.0;
+    if(pa)
+    {
+     cg_solver->Mult(B,X);
+    }else{
+     hypre_solver->Mult(B,X);
+    }
+    result.SetFromTrueDofs(X);
+}
+
+ComputeGradientH1ScalarToHcurl::ComputeGradientH1ScalarToHcurl(ParFiniteElementSpace *trial_space, 
+                       ParFiniteElementSpace *test_space, 
+                       bool partial_assembly) 
+        : trial_fes(trial_space), test_fes(test_space), pa(partial_assembly)
+{
+    SetUpOperator();
+}
+    
+void ComputeGradientH1ScalarToHcurl::SetUpOperator()
+{
+    mass_form = std::make_unique<ParBilinearForm>(test_fes);
+    if (pa) { mass_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+    mass_form->AddDomainIntegrator(new VectorFEMassIntegrator());
+    mass_form->Assemble();
+    if (!pa) { mass_form->Finalize(); }
+
+    mixed_form = std::make_unique<ParMixedBilinearForm>(trial_fes, test_fes);
+    if (pa) { mixed_form->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+    mixed_form->AddDomainIntegrator(new MixedVectorGradientIntegrator());
+    mixed_form->Assemble();
+    if (!pa) { mixed_form->Finalize(); }
+    
+    // Setup solver for the mass matrix
+    if (pa)
+    {
+        Array<int> ess_tdof_list; // empty for L2 projection
+        mass_form->FormSystemMatrix(ess_tdof_list, mass_op);
+
+        jacobi_prec = std::make_unique<OperatorJacobiSmoother>(*mass_form, ess_tdof_list);
+        cg_solver = std::make_unique<CGSolver>(test_fes->GetComm());
+        cg_solver->SetRelTol(1e-12);
+        cg_solver->SetMaxIter(500);
+        cg_solver->SetPrintLevel(0);
+        cg_solver->SetOperator(*mass_op);
+        cg_solver->SetPreconditioner(*jacobi_prec);
+    }
+    else
+    {
+        mixed_matrix = std::unique_ptr<HypreParMatrix>(mixed_form->ParallelAssemble());
+        mass_matrix = std::unique_ptr<HypreParMatrix>(mass_form->ParallelAssemble());
+        hypre_prec = std::make_unique<HypreDiagScale>(*mass_matrix);
+        hypre_solver = std::make_unique<HyprePCG>(*mass_matrix);
+        hypre_solver->SetTol(1e-12);
+        hypre_solver->SetMaxIter(500);
+        hypre_solver->SetPrintLevel(0);
+        hypre_solver->SetPreconditioner(*hypre_prec);
+    }
+}
+    
+void ComputeGradientH1ScalarToHcurl::Apply(ParGridFunction &result, const ParGridFunction &gftrial) const
+{
+    Vector B(test_fes->GetTrueVSize());
+    Vector X(test_fes->GetTrueVSize());
+
+    if (pa)
+    {
+       ParLinearForm b(test_fes); // used as a vector
+       mixed_form->Mult(gftrial, b); // process-local multiplication
+       b.ParallelAssemble(B);
+    }
+    else
+    {
+
+       Vector P(trial_fes->GetTrueVSize());
+       gftrial.GetTrueDofs(P);
+       mixed_matrix->Mult(P,B);
+    }
+
+    X = 0.0;
+    if(pa)
+    {
+     cg_solver->Mult(B,X);
+    }else{
+     hypre_solver->Mult(B,X);
+    }
+    result.SetFromTrueDofs(X);
 }

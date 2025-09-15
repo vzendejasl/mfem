@@ -16,7 +16,7 @@ void u_exact(const Vector &x, Vector &A);
 void grad_phi_exact(const Vector &x, Vector &u);
 
 real_t freq = 1.0, kappa;
-real_t delta_const = 1e-4;
+real_t delta_const = 1e-8;
 bool static_cond = false;
 int dim;
 int sdim;
@@ -576,18 +576,18 @@ void u_exact(const Vector &x, Vector &A)
    A(0) = sin(xi) * cos(yi) * cos(zi);
    A(1) = -cos(xi) * sin(yi) * cos(zi);
    A(2) = 0.0;
-   // if (dim == 3)
-   // {
-   //    A(0) = sin(2*M_PI*x(0)) + sin(4*M_PI*x(1)) + sin(6*M_PI*x(2));
-   //    A(1) = sin(6*M_PI*x(0)) + sin(2*M_PI*x(1)) + sin(4*M_PI*x(2));
-   //    A(2) = sin(4*M_PI*x(0)) + sin(6*M_PI*x(1)) + sin(2*M_PI*x(2));
-   // }
-   //  else
-   //  {
-   //      A(0) = sin(kappa * x(1));
-   //      A(1) = sin(kappa * x(0));
-   //      if (x.Size() == 3) { A(2) = 0.0; }
-   //  }    
+   if (dim == 3)
+   {
+      A(0) = sin(2*M_PI*x(0)) + sin(4*M_PI*x(1)) + sin(6*M_PI*x(2));
+      A(1) = sin(6*M_PI*x(0)) + sin(2*M_PI*x(1)) + sin(4*M_PI*x(2));
+      A(2) = sin(4*M_PI*x(0)) + sin(6*M_PI*x(1)) + sin(2*M_PI*x(2));
+   }
+    else
+    {
+        A(0) = sin(kappa * x(1));
+        A(1) = sin(kappa * x(0));
+        if (x.Size() == 3) { A(2) = 0.0; }
+    }    
 }
 
 
