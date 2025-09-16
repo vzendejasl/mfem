@@ -242,6 +242,10 @@ void solve_vector_potential( const ProjectorOps& ops,
                              ParGridFunction &curl_Ah_h1,
                              ParMesh *pmesh, bool pa);
 
+void verify_vector_potential(const ProjectorOps& ops,
+                             const ParGridFunction &curl_Ah_h1,
+                             ParMesh *pmesh, bool pa);
+
 int main(int argc, char *argv[])
 {
    // 1. Initialize MPI and HYPRE.
@@ -439,6 +443,11 @@ int main(int argc, char *argv[])
 
    ParGridFunction curl_Ah_h1_from_grad_phi(h1_fespace_vector);
    ops.projectorL2ToH1.Apply(curl_Ah_h1_from_grad_phi, curl_Ah_l2);
+
+   verify_vector_potential(ops, curl_Ah_h1_from_grad_phi,
+                             pmesh, pa);
+   // verify_vector_potential(ops, curl_Ah_h1,
+   //                           pmesh, pa);
 
    // Define ceofficients for comparison for later
    VectorFunctionCoefficient grad_phi_coeff(sdim, grad_phi_exact); // nabla \phi
@@ -1416,4 +1425,42 @@ void ComputeGradientH1ScalarToHcurl::Apply(ParGridFunction &result, const ParGri
      hypre_solver->Mult(B,X);
     }
     result.SetFromTrueDofs(X);
+}
+
+void verify_vector_potential(const ProjectorOps& ops,
+                             const ParGridFunction &curl_Ah_h1,
+                             ParMesh *pmesh, bool pa)
+{
+   int myid = Mpi::WorldRank();
+
+   // 2. Peform the needed projections
+   // Project u in H1 to Hcurl
+   ParGridFunction curl_Ah_hdiv(rt_fespace);
+   ops.projectorH1ToHdiv.Apply(curl_Ah_hdiv, curl_Ah_h1);
+
+   // Set \nabla \cdot (\nabla \times Ah) to be in L2
+   // Compute \nabla \cdot (\nabla \times Ah) in H(div)
+   ParGridFunction div_curl_Ah(l2_fespace_scalar);
+
+   ops.projectorDivHdivToL2.Apply(div_curl_Ah, curl_Ah_hdiv);
+
+   VectorFunctionCoefficient curl_Ah_exact_coeff(sdim, curl_A_exact);
+
+   {
+      ConstantCoefficient zero(0.0);
+      Vector zero_v(dim);
+      zero_v = 0.0;
+      VectorConstantCoefficient zero_vec(zero_v);
+
+      double div_curl_A_error = div_curl_Ah.ComputeL2Error(zero);
+      double curl_Ah_h1_error = curl_Ah_h1.ComputeL2Error(curl_Ah_exact_coeff);
+
+      if (myid == 0)
+      {
+         cout << "Verify curl A from grad phi: " << std::endl;
+         cout << "div(curl A) L2 norm (should be ~0): " << div_curl_A_error << endl;
+         cout << "curl Ah H1 L2 norm: " << curl_Ah_h1_error << endl;
+      }
+   }
+
 }
