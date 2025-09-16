@@ -240,6 +240,7 @@ void solve_scalar_potential( const ProjectorOps& ops,
 void solve_vector_potential( const ProjectorOps& ops,
                              const ParGridFunction &u_h1,
                              ParGridFunction &curl_Ah_h1,
+                             ParGridFunction &Ah,
                              ParMesh *pmesh, bool pa);
 
 void verify_vector_potential(const ProjectorOps& ops,
@@ -408,7 +409,8 @@ int main(int argc, char *argv[])
    u_h1.ProjectCoefficient(u_coeff);
 
    ParGridFunction curl_Ah_h1(h1_fespace_vector);
-   solve_vector_potential(ops, u_h1, curl_Ah_h1, pmesh, pa);
+   ParGridFunction Ah(nd_fespace);
+   solve_vector_potential(ops, u_h1, curl_Ah_h1, Ah, pmesh, pa);
 
    ParGridFunction curl_Ah_l2(l2_fespace_vector);
    ops.projectorH1ToL2.Apply(curl_Ah_l2, curl_Ah_h1);
@@ -441,8 +443,13 @@ int main(int argc, char *argv[])
    curl_Ah_l2 = u_l2;
    curl_Ah_l2 -= grad_phi_l2;
 
+   // ParGridFunction curl_Ah_h1_from_grad_phi(h1_fespace_vector);
+   // ops.projectorL2ToH1.Apply(curl_Ah_h1_from_grad_phi, curl_Ah_l2);
    ParGridFunction curl_Ah_h1_from_grad_phi(h1_fespace_vector);
-   ops.projectorL2ToH1.Apply(curl_Ah_h1_from_grad_phi, curl_Ah_l2);
+
+   curl_Ah_h1_from_grad_phi = u_h1;
+   curl_Ah_h1_from_grad_phi -= grad_phi_h1;
+
 
    verify_vector_potential(ops, curl_Ah_h1_from_grad_phi,
                              pmesh, pa);
@@ -531,6 +538,7 @@ int main(int argc, char *argv[])
     dc.RegisterField("curl_Ah_h1", &curl_Ah_h1);
     dc.RegisterField("curl_Ah_h1_from_grad_phi", &curl_Ah_h1_from_grad_phi);
     dc.RegisterField("curl_Ah_exact_h1", &curl_Ah_exact_h1);
+    dc.RegisterField("Ah", &Ah);
 
     dc.RegisterField("grad_phi_h1",   &grad_phi_h1);
     dc.RegisterField("grad_phi_exact",   &grad_phi_exact_h1);
@@ -628,6 +636,7 @@ void curl_A_exact(const Vector &x, Vector &Acurl)
 void solve_vector_potential( const ProjectorOps& ops,
                              const ParGridFunction &u_h1,
                              ParGridFunction &curl_Ah_h1,
+                             ParGridFunction &Ah,
                              ParMesh *pmesh, bool pa)
 {
    int myid = Mpi::WorldRank();
@@ -717,7 +726,7 @@ void solve_vector_potential( const ProjectorOps& ops,
 #else
       MatrixFreeAMS ams(*a, *A, *nd_fespace, muinv, sigma, NULL, ess_bdr);
 
-      // std::unique_ptr<Solver> solver;
+      // std::u
       // solver.reset(new LORSolver<HypreBoomerAMG>(*a, ess_tdof_list));
       // solver.reset(new OperatorJacobiSmoother(*a, ess_tdof_list));
 #endif
@@ -749,7 +758,6 @@ void solve_vector_potential( const ProjectorOps& ops,
    a->RecoverFEMSolution(X, *b, x);
 
    // 3. Solve for the vector potential
-   ParGridFunction Ah(nd_fespace);
    Ah = x;
 
    // Compute the curl of the vector potential which is the divergence 
