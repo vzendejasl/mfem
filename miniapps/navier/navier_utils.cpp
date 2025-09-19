@@ -351,10 +351,6 @@ void SamplePoints(mfem::ParGridFunction* sol,
 //   row_major = false -> dataset shape [ncols, N_total_rows]
 // Your local buffer is always row-major: n_local_rows contiguous rows of length ncols.
 
-#include <mpi.h>
-#include <hdf5.h>
-#include <vector>
-#include <string>
 
 #ifndef H5_HAVE_PARALLEL
 #error "Parallel HDF5 not found. Rebuild/point HDF5 to a build configured with MPI (H5_HAVE_PARALLEL)."
@@ -464,7 +460,9 @@ static herr_t WriteH5Parallel2D(MPI_Comm           comm,
 
 
 
-// --- Minimal collective text writer (header from rank 0, payload from all ranks)
+// -------------------------------
+// Minimal collective text writer
+// -------------------------------
 static int WriteTextCollective(MPI_Comm comm,
                                const std::string &path,
                                const std::string &header_rank0,
@@ -478,7 +476,7 @@ static int WriteTextCollective(MPI_Comm comm,
                             MPI_INFO_NULL, &fh);
     if (err != MPI_SUCCESS) return err;
 
-    // 1) Rank 0 writes header at offset 0, then broadcast size.
+    // (1) rank 0 writes header at offset 0
     MPI_Offset header_bytes = 0;
     if (rank == 0) {
         const MPI_Offset hsz = (MPI_Offset)header_rank0.size();
@@ -493,16 +491,15 @@ static int WriteTextCollective(MPI_Comm comm,
     }
     MPI_Bcast(&header_bytes, 1, MPI_OFFSET, 0, comm);
 
-    // 2) Each rank’s byte offset via exclusive scan.
+    // (2) exclusive scan of local byte sizes
     const MPI_Offset my_bytes  = (MPI_Offset)local_text.size();
     MPI_Offset my_prefix = 0;
     MPI_Exscan(&my_bytes, &my_prefix, 1, MPI_OFFSET, MPI_SUM, comm);
     if (rank == 0) my_prefix = 0;
 
-    // 3) Raw byte-wise view.
+    // (3) byte-wise view + collective write
     MPI_File_set_view(fh, 0, MPI_BYTE, MPI_BYTE, "native", MPI_INFO_NULL);
 
-    // 4) Collective write-at-all at explicit offsets.
     const MPI_Offset my_file_offset = header_bytes + my_prefix;
     MPI_Status st_all;
     const void *buf = local_text.size() ? (const void*)local_text.data() : (const void*)"";
@@ -513,44 +510,39 @@ static int WriteTextCollective(MPI_Comm comm,
     return err; // MPI_SUCCESS on success
 }
 
-struct ClosedGridRules {
-    int    npts;
-    double bx, by, bz;  // global max per axis
-    double ex, ey, ez;  // eps per axis
+// -------------------------------
+// Helpers: endpoint snapping & global-max-plane ownership
+// -------------------------------
+static inline void snap_endpoints(double &x, double a, double b, double eps)
+{
+    if (std::abs(x - a) <= eps) x = a;
+    else if (std::abs(x - b) <= eps) x = b;
+}
 
-    ClosedGridRules(int npts_, double bx_, double by_, double bz_,
-                    double ex_, double ey_, double ez_)
-      : npts(npts_), bx(bx_), by(by_), bz(bz_), ex(ex_), ey(ey_), ez(ez_) {}
+// Decide if this element "owns" the global max plane along a given axis,
+// by checking if any of its 8 vertices touches the global max within eps.
+static bool OwnsGlobalMaxPlane(mfem::ElementTransformation *T,
+                               int axis,
+                               double b, double eps)
+{
+    static const double c[2] = {0.0, 1.0};
+    mfem::IntegrationPoint ip;
+    mfem::Vector X(T->GetSpaceDim());
+    double vmax = -std::numeric_limits<double>::infinity();
 
-    // Does this element touch the global max plane along `axis`?
-    bool OwnsMaxPlane(mfem::ElementTransformation *T, int axis) const {
-        const double b   = (axis==0 ? bx : (axis==1 ? by : bz));
-        const double eps = (axis==0 ? ex : (axis==1 ? ey : ez));
-
-        static const double c[2] = {0.0, 1.0};
-        double vmax = -std::numeric_limits<double>::infinity();
-        mfem::IntegrationPoint ip;
-        mfem::Vector X(T->GetSpaceDim());
-
-        for (int iz = 0; iz < 2; ++iz)
-        for (int iy = 0; iy < 2; ++iy)
-        for (int ix = 0; ix < 2; ++ix) {
-            ip.Set3(c[ix], c[iy], c[iz]);
-            T->Transform(ip, X);
-            vmax = std::max(vmax, X(axis));
-        }
-        return (b - vmax) <= eps;
+    for (int iz = 0; iz < 2; ++iz)
+    for (int iy = 0; iy < 2; ++iy)
+    for (int ix = 0; ix < 2; ++ix) {
+        ip.Set3(c[ix], c[iy], c[iz]);
+        T->Transform(ip, X);
+        vmax = std::max(vmax, X(axis));
     }
+    return (b - vmax) <= eps;
+}
 
-    // Closed-grid rule: include top index (== npts) only if we own that max plane.
-    bool Emit(int ix, int iy, int iz, bool own_x, bool own_y, bool own_z) const {
-        const bool topx = (ix == npts);
-        const bool topy = (iy == npts);
-        const bool topz = (iz == npts);
-        return (!topx || own_x) && (!topy || own_y) && (!topz || own_z);
-    }
-};
-
+// -------------------------------
+// Closed-grid sampler (hex meshes), moving-mesh safe
+// -------------------------------
 void SamplePoints(mfem::ParGridFunction* sol,
                   mfem::ParMesh*         pmesh,
                   int                    step,
@@ -583,77 +575,74 @@ void SamplePoints(mfem::ParGridFunction* sol,
     MFEM_VERIFY(npts > 0, "npts must be positive.");
     const double inv_n = 1.0 / double(npts);
 
-    // ---- 2) Global bounds + eps (for endpoint snapping only)
+    // ---- 2) Global bounds + eps (recomputed each call → moving mesh OK)
     mfem::Vector bbmin(pmesh->SpaceDimension()), bbmax(pmesh->SpaceDimension());
     pmesh->GetBoundingBox(bbmin, bbmax);
     const double ax = bbmin(0), bx = bbmax(0);
     const double ay = bbmin(1), by = bbmax(1);
     const double az = bbmin(2), bz = bbmax(2);
+
+    // eps scaled to domain size; tolerant to motion/curvature
     const double ex = 1e-12 * std::max(1.0, bx - ax);
     const double ey = 1e-12 * std::max(1.0, by - ay);
     const double ez = 1e-12 * std::max(1.0, bz - az);
-
-    auto snap_endpoints = [](double &x, double a, double b, double eps) {
-        if (std::abs(x - a) <= eps) x = a;
-        else if (std::abs(x - b) <= eps) x = b;
-    };
-
-    // ---- 2.5) Build the uniqueness rules object
-    ClosedGridRules rules(npts, bx, by, bz, ex, ey, ez);
 
     // ---- 3) Local payload
     std::ostringstream local_ss;
     local_ss.setf(std::ios::scientific);
     local_ss << std::setprecision(16);
-    std::vector<double> rows;
 
     mfem::FiniteElementSpace *fes = sol->FESpace();
     const int vdim = fes->GetVDim();
     MFEM_VERIFY(vdim == 3, "Adjust printing if not 3D.");
 
-    // Helper: nothing else changed—loops are your originals, but call rules.*
+    // Hexes assumed (TGV). Extend if you use mixed meshes.
+    MFEM_VERIFY(pmesh->GetElementBaseGeometry(0) == mfem::Geometry::Type::CUBE,
+                "This implementation assumes hexahedra.");
+
     const int NE = pmesh->GetNE();
     for (int e = 0; e < NE; ++e)
     {
         mfem::ElementTransformation *T = pmesh->GetElementTransformation(e);
 
-        // Ownership of global max planes
-        const bool own_max_x = rules.OwnsMaxPlane(T, 0);
-        const bool own_max_y = rules.OwnsMaxPlane(T, 1);
-        const bool own_max_z = rules.OwnsMaxPlane(T, 2);
+        // Only decide ownership for the *global* max planes:
+        const bool own_max_x = OwnsGlobalMaxPlane(T, 0, bx, ex);
+        const bool own_max_y = OwnsGlobalMaxPlane(T, 1, by, ey);
+        const bool own_max_z = OwnsGlobalMaxPlane(T, 2, bz, ez);
 
         for (int iz = 0; iz <= npts; ++iz)
         {
-            const double z_ref = iz * inv_n;
             for (int iy = 0; iy <= npts; ++iy)
             {
-                const double y_ref = iy * inv_n;
                 for (int ix = 0; ix <= npts; ++ix)
                 {
-                    if (!rules.Emit(ix, iy, iz, own_max_x, own_max_y, own_max_z))
+                    // Closed-grid rule:
+                    // - Always keep the min planes (ix==0,iy==0,iz==0)
+                    // - Keep the global max plane only if we "own" it on that axis.
+                    if ((ix == npts && !own_max_x) ||
+                        (iy == npts && !own_max_y) ||
+                        (iz == npts && !own_max_z)) {
                         continue;
+                    }
 
-                    const double x_ref = ix * inv_n;
+                    mfem::IntegrationPoint ip;
+                    ip.Set3(ix*inv_n, iy*inv_n, iz*inv_n);
 
-                    mfem::IntegrationPoint ip; ip.Set3(x_ref, y_ref, z_ref);
-
-                    // Physical coord
+                    // Physical coordinate at current ALE configuration
                     mfem::Vector Xphys(T->GetSpaceDim());
                     T->Transform(ip, Xphys);
                     double Xx = Xphys(0), Xy = Xphys(1), Xz = Xphys(2);
 
-                    // Snap to exact endpoints for clean prints (no wrap b→a)
+                    // Snap to exact endpoints for clean boundaries
                     snap_endpoints(Xx, ax, bx, ex);
                     snap_endpoints(Xy, ay, by, ey);
                     snap_endpoints(Xz, az, bz, ez);
 
-                    // Field value
+                    // Field value at current configuration
                     mfem::Vector u_val(vdim);
                     sol->GetVectorValue(*T, ip, u_val);
 
                     // Emit row
-                    rows.push_back(Xx); rows.push_back(Xy); rows.push_back(Xz);
-                    rows.push_back(u_val(0)); rows.push_back(u_val(1)); rows.push_back(u_val(2));
                     local_ss << std::setw(20) << Xx << " "
                              << std::setw(20) << Xy << " "
                              << std::setw(20) << Xz << " "
@@ -680,36 +669,20 @@ void SamplePoints(mfem::ParGridFunction* sol,
         header = h.str();
     }
 
-    // // ---- 5a) Write HDF5
-    // const hsize_t n_local_rows = rows.size() / 6;       // 6 columns: x y z vecx vecy vecz
-    // std::string h5path = cycle_dir + "/SampledData" + std::to_string(step) + ".h5";
-    
-    // // Choose on-disk layout:
-    // bool row_major_layout = true;   // true  -> dataset shape [N_rows, 6]
-    // // bool row_major_layout = false;  // false -> dataset shape [6, N_rows]
-    
-    // herr_t h5err = WriteH5Parallel2D(comm, h5path, "samples",
-    //                                rows.data(), n_local_rows, /*ncols=*/6,
-    //                                row_major_layout);
-    // if (h5err < 0 && rank == 0) {
-    //     std::cerr << "HDF5 write failed\n";
-    // }
-    // if (rank == 0) {
-    //     std::cout << "HDF5 saved: " << h5path << std::endl;
-    // }
-
-    // ---- 5) Write file to text file
-    int werr = WriteTextCollective(comm, fname, header, local_ss.str());
+    // ---- 5) Collective text write
+    const int werr = WriteTextCollective(comm, fname, header, local_ss.str());
     if (werr != MPI_SUCCESS) {
         if (rank == 0) std::cerr << "WriteTextCollective failed (MPI err=" << werr << ")\n";
         MPI_Abort(comm, 1);
     }
     if (rank == 0) {
-        std::cout << "Sampled closed-grid data (unique, endpoints kept) saved: "
+        std::cout << "Sampled closed-grid data (unique outer boundary, endpoints kept) saved: "
                   << fname << std::endl;
     }
-
 }
+
+
+
 
 // Writes unique H1 nodal true-DOFs (coords + vector values) to one file via MPI-IO.
 // Closed-domain emit: includes BOTH endpoints by mirroring boundary true-DOFs.
