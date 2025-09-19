@@ -190,7 +190,7 @@ bool LoadCheckpoint(ParMesh*& pmesh,
 
     return true;
 }
-
+/*
 void SamplePoints(mfem::ParGridFunction* sol,
                                 mfem::ParMesh* pmesh,
                                 int step,
@@ -342,7 +342,241 @@ void SamplePoints(mfem::ParGridFunction* sol,
 
    // Final synchronization
    MPI_Barrier(MPI_COMM_WORLD);
+}*/
+
+// --- Minimal collective text writer (header from rank 0, payload from all ranks)
+static int WriteTextCollective(MPI_Comm comm,
+                               const std::string &path,
+                               const std::string &header_rank0,
+                               const std::string &local_text)
+{
+    int rank; MPI_Comm_rank(comm, &rank);
+
+    MPI_File fh;
+    int err = MPI_File_open(comm, path.c_str(),
+                            MPI_MODE_CREATE | MPI_MODE_WRONLY,
+                            MPI_INFO_NULL, &fh);
+    if (err != MPI_SUCCESS) return err;
+
+    // 1) Rank 0 writes header at offset 0, then broadcast size.
+    MPI_Offset header_bytes = 0;
+    if (rank == 0) {
+        const MPI_Offset hsz = (MPI_Offset)header_rank0.size();
+        if (hsz > 0) {
+            MPI_Status st0;
+            err = MPI_File_write_at(fh, 0,
+                                    header_rank0.data(), (int)hsz,
+                                    MPI_BYTE, &st0);
+            if (err != MPI_SUCCESS) { MPI_File_close(&fh); return err; }
+        }
+        header_bytes = hsz;
+    }
+    MPI_Bcast(&header_bytes, 1, MPI_OFFSET, 0, comm);
+
+    // 2) Each rank’s byte offset via exclusive scan.
+    const MPI_Offset my_bytes  = (MPI_Offset)local_text.size();
+    MPI_Offset my_prefix = 0;
+    MPI_Exscan(&my_bytes, &my_prefix, 1, MPI_OFFSET, MPI_SUM, comm);
+    if (rank == 0) my_prefix = 0;
+
+    // 3) Raw byte-wise view.
+    MPI_File_set_view(fh, 0, MPI_BYTE, MPI_BYTE, "native", MPI_INFO_NULL);
+
+    // 4) Collective write-at-all at explicit offsets.
+    const MPI_Offset my_file_offset = header_bytes + my_prefix;
+    MPI_Status st_all;
+    const void *buf = local_text.size() ? (const void*)local_text.data() : (const void*)"";
+    err = MPI_File_write_at_all(fh, my_file_offset,
+                                buf, (int)my_bytes, MPI_BYTE, &st_all);
+
+    MPI_File_close(&fh);
+    return err; // MPI_SUCCESS on success
 }
+
+struct ClosedGridRules {
+    int    npts;
+    double bx, by, bz;  // global max per axis
+    double ex, ey, ez;  // eps per axis
+
+    ClosedGridRules(int npts_, double bx_, double by_, double bz_,
+                    double ex_, double ey_, double ez_)
+      : npts(npts_), bx(bx_), by(by_), bz(bz_), ex(ex_), ey(ey_), ez(ez_) {}
+
+    // Does this element touch the global max plane along `axis`?
+    bool OwnsMaxPlane(mfem::ElementTransformation *T, int axis) const {
+        const double b   = (axis==0 ? bx : (axis==1 ? by : bz));
+        const double eps = (axis==0 ? ex : (axis==1 ? ey : ez));
+
+        static const double c[2] = {0.0, 1.0};
+        double vmax = -std::numeric_limits<double>::infinity();
+        mfem::IntegrationPoint ip;
+        mfem::Vector X(T->GetSpaceDim());
+
+        for (int iz = 0; iz < 2; ++iz)
+        for (int iy = 0; iy < 2; ++iy)
+        for (int ix = 0; ix < 2; ++ix) {
+            ip.Set3(c[ix], c[iy], c[iz]);
+            T->Transform(ip, X);
+            vmax = std::max(vmax, X(axis));
+        }
+        return (b - vmax) <= eps;
+    }
+
+    // Closed-grid rule: include top index (== npts) only if we own that max plane.
+    bool Emit(int ix, int iy, int iz, bool own_x, bool own_y, bool own_z) const {
+        const bool topx = (ix == npts);
+        const bool topy = (iy == npts);
+        const bool topz = (iz == npts);
+        return (!topx || own_x) && (!topy || own_y) && (!topz || own_z);
+    }
+};
+
+void SamplePoints(mfem::ParGridFunction* sol,
+                  mfem::ParMesh*         pmesh,
+                  int                    step,
+                  double                 time,
+                  const std::string&     suffix,
+                  const s_NavierContext* ctx)
+{
+    MPI_Comm comm = pmesh->GetComm();
+    int rank; MPI_Comm_rank(comm, &rank);
+
+    // ---- 0) Output paths
+    std::string main_dir = std::string("SamplePoints") + suffix +
+                           "_Re" + std::to_string((int)GetReynum(ctx)) +
+                           "NumPtsPerDir" + std::to_string(GetNumPts(ctx)) +
+                           "RefLv" + std::to_string(GetElementSubdivisions(ctx) +
+                                                    GetElementSubdivisionsParallel(ctx)) +
+                           "P" + std::to_string(GetOrder(ctx));
+    std::string cycle_dir = main_dir + "/cycle_" + std::to_string(step);
+    std::string fname     = cycle_dir + "/SampledData" + std::to_string(step) + ".txt";
+
+    if (rank == 0) {
+        (void)system(("mkdir -p " + main_dir ).c_str());
+        (void)system(("mkdir -p " + cycle_dir).c_str());
+    }
+    MPI_Barrier(comm);
+
+    // ---- 1) Sampling resolution
+    int npts = GetOrder(ctx);
+    if (GetOverSample(ctx)) npts = GetOrder(ctx) + 1;
+    MFEM_VERIFY(npts > 0, "npts must be positive.");
+    const double inv_n = 1.0 / double(npts);
+
+    // ---- 2) Global bounds + eps (for endpoint snapping only)
+    mfem::Vector bbmin(pmesh->SpaceDimension()), bbmax(pmesh->SpaceDimension());
+    pmesh->GetBoundingBox(bbmin, bbmax);
+    const double ax = bbmin(0), bx = bbmax(0);
+    const double ay = bbmin(1), by = bbmax(1);
+    const double az = bbmin(2), bz = bbmax(2);
+    const double ex = 1e-12 * std::max(1.0, bx - ax);
+    const double ey = 1e-12 * std::max(1.0, by - ay);
+    const double ez = 1e-12 * std::max(1.0, bz - az);
+
+    auto snap_endpoints = [](double &x, double a, double b, double eps) {
+        if (std::abs(x - a) <= eps) x = a;
+        else if (std::abs(x - b) <= eps) x = b;
+    };
+
+    // ---- 2.5) Build the uniqueness rules object
+    ClosedGridRules rules(npts, bx, by, bz, ex, ey, ez);
+
+    // ---- 3) Local payload
+    std::ostringstream local_ss;
+    local_ss.setf(std::ios::scientific);
+    local_ss << std::setprecision(16);
+
+    mfem::FiniteElementSpace *fes = sol->FESpace();
+    const int vdim = fes->GetVDim();
+    MFEM_VERIFY(vdim == 3, "Adjust printing if not 3D.");
+
+    // Helper: nothing else changed—loops are your originals, but call rules.*
+    const int NE = pmesh->GetNE();
+    for (int e = 0; e < NE; ++e)
+    {
+        mfem::ElementTransformation *T = pmesh->GetElementTransformation(e);
+
+        // Ownership of global max planes
+        const bool own_max_x = rules.OwnsMaxPlane(T, 0);
+        const bool own_max_y = rules.OwnsMaxPlane(T, 1);
+        const bool own_max_z = rules.OwnsMaxPlane(T, 2);
+
+        for (int iz = 0; iz <= npts; ++iz)
+        {
+            const double z_ref = iz * inv_n;
+            for (int iy = 0; iy <= npts; ++iy)
+            {
+                const double y_ref = iy * inv_n;
+                for (int ix = 0; ix <= npts; ++ix)
+                {
+                    if (!rules.Emit(ix, iy, iz, own_max_x, own_max_y, own_max_z))
+                        continue;
+
+                    const double x_ref = ix * inv_n;
+
+                    mfem::IntegrationPoint ip; ip.Set3(x_ref, y_ref, z_ref);
+
+                    // Physical coord
+                    mfem::Vector Xphys(T->GetSpaceDim());
+                    T->Transform(ip, Xphys);
+                    double Xx = Xphys(0), Xy = Xphys(1), Xz = Xphys(2);
+
+                    // Snap to exact endpoints for clean prints (no wrap b→a)
+                    snap_endpoints(Xx, ax, bx, ex);
+                    snap_endpoints(Xy, ay, by, ey);
+                    snap_endpoints(Xz, az, bz, ez);
+
+                    // Field value
+                    mfem::Vector u_val(vdim);
+                    sol->GetVectorValue(*T, ip, u_val);
+
+                    // Emit row
+                    local_ss << std::setw(20) << Xx << " "
+                             << std::setw(20) << Xy << " "
+                             << std::setw(20) << Xz << " "
+                             << std::setw(20) << u_val(0) << " "
+                             << std::setw(20) << u_val(1) << " "
+                             << std::setw(20) << u_val(2) << "\n";
+                }
+            }
+        }
+    }
+
+    // ---- 4) Header
+    std::string header;
+    if (rank == 0) {
+        std::ostringstream h;
+        h.setf(std::ios::scientific); h << std::setprecision(16);
+        h << "3D Taylor Green Vortex\n"
+          << "Order = " << GetOrder(ctx) << ", Over sample = " << GetOverSample(ctx) << "\n"
+          << "Step = " << step << "\n"
+          << "Time = " << std::scientific << std::setprecision(16) << time << "\n"
+          << "==================================================================="
+          << "==========================================================================\n"
+          << "            x                      y                      z                   vecx                   vecy                   vecz\n";
+        header = h.str();
+    }
+
+    // ---- 5) Write file (simple helper)
+    int werr = WriteTextCollective(comm, fname, header, local_ss.str());
+    if (werr != MPI_SUCCESS) {
+        if (rank == 0) std::cerr << "WriteTextCollective failed (MPI err=" << werr << ")\n";
+        MPI_Abort(comm, 1);
+    }
+    if (rank == 0) {
+        std::cout << "Sampled closed-grid data (unique, endpoints kept) saved: "
+                  << fname << std::endl;
+    }
+
+
+
+}
+// ======================= Updated SamplePointsAtDoFs ==========================
+#include <vector>
+#include <limits>
+#include <sstream>
+#include <iomanip>
+#include <algorithm>
 
 // Writes unique H1 nodal true-DOFs (coords + vector values) to one file via MPI-IO.
 // Closed-domain emit: includes BOTH endpoints by mirroring boundary true-DOFs.
@@ -434,7 +668,7 @@ void SamplePointsAtDoFs(mfem::ParGridFunction      *u,
         return v; // size 1 (interior) or 2 (on a face)
     };
 
-    // ---- 5) Build payload (rank-local). Single simple nested loop over variants.
+    // ---- 5) Build payload (rank-local).
     std::ostringstream data_ss;
     data_ss.setf(std::ios::scientific);
     data_ss << std::setprecision(16);
@@ -487,40 +721,18 @@ void SamplePointsAtDoFs(mfem::ParGridFunction      *u,
         header = h.str();
     }
 
-    // ---- 7) Simple MPI-IO: header-at-0, view-after-header, rank-ordered write
-    MPI_File fh;
-    int err = MPI_File_open(comm, fname.c_str(),
-                            MPI_MODE_CREATE | MPI_MODE_WRONLY,
-                            MPI_INFO_NULL, &fh);
-    if (err != MPI_SUCCESS) {
-        if (rank == 0) std::cerr << "Error opening " << fname << " with MPI I/O\n";
+    // ---- 7) Simple write helper (same as your other function)
+    const int werr = WriteTextCollective(comm, fname, header, data);
+    if (werr != MPI_SUCCESS) {
+        if (rank == 0) std::cerr << "WriteTextCollective failed (MPI err=" << werr << ")\n";
         MPI_Abort(comm, 1);
     }
-
-    MPI_Offset header_bytes = 0;
-    if (rank == 0) {
-        MPI_Status st0;
-        MPI_File_write_at(fh, 0, header.data(), (int)header.size(), MPI_CHAR, &st0);
-        header_bytes = (MPI_Offset)header.size();
-    }
-    MPI_Bcast(&header_bytes, 1, MPI_OFFSET, 0, comm);
-
-    // everyone writes after the header
-    MPI_File_set_view(fh, header_bytes, MPI_CHAR, MPI_CHAR, "native", MPI_INFO_NULL);
-
-    // rank-ordered collective write (no Exscan)
-    {
-        MPI_Status st1;
-        const int my_count = (int)data.size(); // if ever >2GB/rank, chunk this
-        MPI_File_write_ordered(fh, data.data(), my_count, MPI_CHAR, &st1);
-    }
-
-    MPI_File_close(&fh);
 
     if (rank == 0) {
         std::cout << "Sampled closed-domain DOF data saved: " << fname << std::endl;
     }
 }
+
 
 /*
 // Writes unique H1 nodal true-DOFs (coords + vector values) to one file via MPI-IO.
