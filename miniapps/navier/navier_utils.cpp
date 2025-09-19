@@ -3,6 +3,7 @@
 #include <algorithm> // for std::remove_if
 #include <string>
 #include <cstdio> // for popen, pclose
+#include "hdf5.h"
 // #include <adios2.h>
 
 using namespace mfem;
@@ -344,6 +345,125 @@ void SamplePoints(mfem::ParGridFunction* sol,
    MPI_Barrier(MPI_COMM_WORLD);
 }*/
 
+// Parallel-only HDF5 writer (collective MPI-IO).
+// On disk:
+//   row_major = true  -> dataset shape [N_total_rows, ncols]
+//   row_major = false -> dataset shape [ncols, N_total_rows]
+// Your local buffer is always row-major: n_local_rows contiguous rows of length ncols.
+
+#include <mpi.h>
+#include <hdf5.h>
+#include <vector>
+#include <string>
+
+#ifndef H5_HAVE_PARALLEL
+#error "Parallel HDF5 not found. Rebuild/point HDF5 to a build configured with MPI (H5_HAVE_PARALLEL)."
+#endif
+
+static herr_t WriteH5Parallel2D(MPI_Comm           comm,
+                                const std::string &path,
+                                const std::string &dset_name,
+                                const double      *local_rows,   // row-major buffer
+                                hsize_t            n_local_rows,
+                                int                ncols,
+                                bool               row_major)
+{
+    int rank; MPI_Comm_rank(comm, &rank);
+
+    // Global rows and my starting row (exclusive scan)
+    hsize_t N_total = 0, my_start = 0;
+    MPI_Allreduce(&n_local_rows, &N_total, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
+    MPI_Exscan(&n_local_rows, &my_start, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
+    if (rank == 0) my_start = 0;
+
+    // Parallel file driver
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_fapl_mpio(fapl, comm, MPI_INFO_NULL);
+
+    // Create/truncate file
+    hid_t file = H5Fcreate(path.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+    H5Pclose(fapl);
+    if (file < 0) return file;
+
+    herr_t st = 0;
+    hid_t fspace = -1, mspace = -1, dset = -1;
+
+    if (row_major) {
+        // Dataset [N_total, ncols]; write my row slab
+        const hsize_t dims[2]   = { N_total, (hsize_t)ncols };
+        const hsize_t offset[2] = { my_start, 0 };
+        const hsize_t count[2]  = { n_local_rows, (hsize_t)ncols };
+
+        fspace = H5Screate_simple(2, dims, nullptr);
+        dset   = H5Dcreate2(file, dset_name.c_str(), H5T_NATIVE_DOUBLE,
+                            fspace, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+
+        if (n_local_rows > 0) H5Sselect_hyperslab(fspace, H5S_SELECT_SET, offset, nullptr, count, nullptr);
+        else                  H5Sselect_none(fspace);
+
+        if (n_local_rows > 0) {
+            const hsize_t mdims[2] = { n_local_rows, (hsize_t)ncols };
+            mspace = H5Screate_simple(2, mdims, nullptr);
+            H5Sselect_all(mspace);
+        } else {
+            const hsize_t mdims[2] = { 1, (hsize_t)ncols };
+            mspace = H5Screate_simple(2, mdims, nullptr);
+            H5Sselect_none(mspace);
+        }
+
+        // Collective write
+        hid_t dxpl = H5Pcreate(H5P_DATASET_XFER);
+        H5Pset_dxpl_mpio(dxpl, H5FD_MPIO_COLLECTIVE);
+        const void *buf = (n_local_rows > 0) ? (const void*)local_rows : nullptr;
+        st = H5Dwrite(dset, H5T_NATIVE_DOUBLE, mspace, fspace, dxpl, buf);
+        H5Pclose(dxpl);
+    } else {
+        // Dataset [ncols, N_total]; write column slab by locally transposing
+        std::vector<double> tmp((size_t)ncols * (size_t)std::max<hsize_t>(n_local_rows, 1));
+        for (hsize_t r = 0; r < n_local_rows; ++r) {
+            const double *src = local_rows + (size_t)r * (size_t)ncols;
+            for (int c = 0; c < ncols; ++c)
+                tmp[(size_t)c * (size_t)std::max<hsize_t>(n_local_rows,1) + (size_t)r] = src[c];
+        }
+
+        const hsize_t dims[2]   = { (hsize_t)ncols, N_total };
+        const hsize_t offset[2] = { 0, my_start };
+        const hsize_t count[2]  = { (hsize_t)ncols, n_local_rows };
+
+        fspace = H5Screate_simple(2, dims, nullptr);
+        dset   = H5Dcreate2(file, dset_name.c_str(), H5T_NATIVE_DOUBLE,
+                            fspace, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+
+        if (n_local_rows > 0) H5Sselect_hyperslab(fspace, H5S_SELECT_SET, offset, nullptr, count, nullptr);
+        else                  H5Sselect_none(fspace);
+
+        if (n_local_rows > 0) {
+            const hsize_t mdims[2] = { (hsize_t)ncols, n_local_rows };
+            mspace = H5Screate_simple(2, mdims, nullptr);
+            H5Sselect_all(mspace);
+        } else {
+            const hsize_t mdims[2] = { (hsize_t)ncols, 1 };
+            mspace = H5Screate_simple(2, mdims, nullptr);
+            H5Sselect_none(mspace);
+        }
+
+        hid_t dxpl = H5Pcreate(H5P_DATASET_XFER);
+        H5Pset_dxpl_mpio(dxpl, H5FD_MPIO_COLLECTIVE);
+        const void *buf = (n_local_rows > 0) ? (const void*)tmp.data() : nullptr;
+        st = H5Dwrite(dset, H5T_NATIVE_DOUBLE, mspace, fspace, dxpl, buf);
+        H5Pclose(dxpl);
+    }
+
+    // Cleanup
+    if (dset   >= 0) H5Dclose(dset);
+    if (mspace >= 0) H5Sclose(mspace);
+    if (fspace >= 0) H5Sclose(fspace);
+    H5Fclose(file);
+    return st;  // >=0 on success, <0 on error
+}
+
+
+
 // --- Minimal collective text writer (header from rank 0, payload from all ranks)
 static int WriteTextCollective(MPI_Comm comm,
                                const std::string &path,
@@ -485,6 +605,7 @@ void SamplePoints(mfem::ParGridFunction* sol,
     std::ostringstream local_ss;
     local_ss.setf(std::ios::scientific);
     local_ss << std::setprecision(16);
+    std::vector<double> rows;
 
     mfem::FiniteElementSpace *fes = sol->FESpace();
     const int vdim = fes->GetVDim();
@@ -531,6 +652,8 @@ void SamplePoints(mfem::ParGridFunction* sol,
                     sol->GetVectorValue(*T, ip, u_val);
 
                     // Emit row
+                    rows.push_back(Xx); rows.push_back(Xy); rows.push_back(Xz);
+                    rows.push_back(u_val(0)); rows.push_back(u_val(1)); rows.push_back(u_val(2));
                     local_ss << std::setw(20) << Xx << " "
                              << std::setw(20) << Xy << " "
                              << std::setw(20) << Xz << " "
@@ -557,7 +680,25 @@ void SamplePoints(mfem::ParGridFunction* sol,
         header = h.str();
     }
 
-    // ---- 5) Write file (simple helper)
+    // // ---- 5a) Write HDF5
+    // const hsize_t n_local_rows = rows.size() / 6;       // 6 columns: x y z vecx vecy vecz
+    // std::string h5path = cycle_dir + "/SampledData" + std::to_string(step) + ".h5";
+    
+    // // Choose on-disk layout:
+    // bool row_major_layout = true;   // true  -> dataset shape [N_rows, 6]
+    // // bool row_major_layout = false;  // false -> dataset shape [6, N_rows]
+    
+    // herr_t h5err = WriteH5Parallel2D(comm, h5path, "samples",
+    //                                rows.data(), n_local_rows, /*ncols=*/6,
+    //                                row_major_layout);
+    // if (h5err < 0 && rank == 0) {
+    //     std::cerr << "HDF5 write failed\n";
+    // }
+    // if (rank == 0) {
+    //     std::cout << "HDF5 saved: " << h5path << std::endl;
+    // }
+
+    // ---- 5) Write file to text file
     int werr = WriteTextCollective(comm, fname, header, local_ss.str());
     if (werr != MPI_SUCCESS) {
         if (rank == 0) std::cerr << "WriteTextCollective failed (MPI err=" << werr << ")\n";
@@ -568,15 +709,7 @@ void SamplePoints(mfem::ParGridFunction* sol,
                   << fname << std::endl;
     }
 
-
-
 }
-// ======================= Updated SamplePointsAtDoFs ==========================
-#include <vector>
-#include <limits>
-#include <sstream>
-#include <iomanip>
-#include <algorithm>
 
 // Writes unique H1 nodal true-DOFs (coords + vector values) to one file via MPI-IO.
 // Closed-domain emit: includes BOTH endpoints by mirroring boundary true-DOFs.
