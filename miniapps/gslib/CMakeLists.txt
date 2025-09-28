@@ -46,6 +46,12 @@ if (MFEM_USE_GSLIB)
   add_dependencies(field-interp
     copy_miniapps_gslib_data copy_miniapps_meshing_data)
 
+  add_mfem_miniapp(field-interp-victor
+    MAIN field-interp-victor.cpp
+    LIBRARIES mfem)
+  add_dependencies(field-interp
+    copy_miniapps_gslib_data copy_miniapps_meshing_data)
+
   if (MFEM_ENABLE_TESTING)
     foreach (test "schwarz_ex1" "field-diff" "findpts" "field-interp")
       add_test(NAME ${test}

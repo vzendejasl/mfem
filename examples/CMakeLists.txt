@@ -18,6 +18,7 @@ list(APPEND ALL_EXE_SRCS
   exVectorDecompConvergence.cpp
   exVectorDecomp.cpp
   exVectorDecompAnalytical.cpp
+  victor_interp_grid_function.cpp
   ex0.cpp
   ex1.cpp
   ex2.cpp
