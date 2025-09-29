@@ -663,6 +663,153 @@ void ComputeQCriterion(ParGridFunction &u, ParGridFunction &q)
    }
 }
 
+// ---- small helper: symmetric 3x3 eigenvalues (Jacobi) ----
+static inline void SymmetricEigenvalues3x3(const mfem::DenseMatrix &A, double ev[3])
+{
+   double a00=A(0,0), a01=A(0,1), a02=A(0,2);
+   double a11=A(1,1), a12=A(1,2), a22=A(2,2);
+
+   auto sweep = [&](int p,int q, double &app,double &aqq,double &apq,
+                    double &ar1,double &ar2)
+   {
+      if (std::abs(apq) <= 0.0) return;
+      double tau = (aqq - app)/(2.0*apq);
+      double t = (tau >= 0.0) ? 1.0/(tau + std::sqrt(1.0 + tau*tau))
+                              : 1.0/(tau - std::sqrt(1.0 + tau*tau));
+      double c = 1.0/std::sqrt(1.0 + t*t);
+      double s = t*c;
+      double appn = c*c*app - 2.0*s*c*apq + s*s*aqq;
+      double aqqn = s*s*app + 2.0*s*c*apq + c*c*aqq;
+      double apqn = 0.0;
+      double ar1n = c*ar1 - s*ar2;
+      double ar2n = s*ar1 + c*ar2;
+      app=appn; aqq=aqqn; apq=apqn; ar1=ar1n; ar2=ar2n;
+   };
+
+   for (int it=0; it<8; ++it) // few sweeps suffice
+   {
+      sweep(0,1, a00,a11,a01, a02,a12);
+      sweep(0,2, a00,a22,a02, a01,a12);
+      sweep(1,2, a11,a22,a12, a01,a02);
+   }
+   ev[0]=a00; ev[1]=a11; ev[2]=a22;
+   // sort ascending
+   if (ev[0]>ev[1]) std::swap(ev[0],ev[1]);
+   if (ev[1]>ev[2]) std::swap(ev[1],ev[2]);
+   if (ev[0]>ev[1]) std::swap(ev[0],ev[1]);
+}
+
+// ---- main routine: nodal λ2 like your Q code ----
+void ComputeLambda2Nodal(mfem::ParGridFunction &u, mfem::ParGridFunction &lambda2)
+{
+   using namespace mfem;
+   FiniteElementSpace *v_fes = u.FESpace();
+   FiniteElementSpace *s_fes = lambda2.FESpace();
+
+   MFEM_VERIFY(v_fes->GetVDim() >= v_fes->GetMesh()->Dimension(),
+               "Expect vdim >= dim for velocity.");
+
+   // Count per vdof for averaging (like your Q routine)
+   Array<int> zones_per_vdof(s_fes->GetVSize());
+   zones_per_vdof = 0;
+   lambda2 = 0.0;
+
+   Array<int> v_dofs, s_dofs;
+   Vector loc_vec;
+   DenseMatrix dshape, grad_hat, grad; // grad: vdim x dim
+
+   for (int e = 0; e < s_fes->GetNE(); ++e)
+   {
+      s_fes->GetElementVDofs(e, s_dofs);
+      v_fes->GetElementVDofs(e, v_dofs);
+
+      ElementTransformation *T = s_fes->GetElementTransformation(e);
+      const FiniteElement *el_s = s_fes->GetFE(e);
+      const FiniteElement *el_v = v_fes->GetFE(e);
+
+      const int nd_s = el_s->GetDof();
+      const int nd_v = el_v->GetDof();
+      const int dim  = T->GetSpaceDim();
+      const int vdim = v_fes->GetVDim();
+
+      // local velocity dofs as (nd_v x vdim)
+      u.GetSubVector(v_dofs, loc_vec);
+      DenseMatrix Ue(loc_vec.GetData(), nd_v, vdim);
+
+      // storage for element values written to scalar dofs
+      Vector vals(nd_s);
+
+      // gradient buffers
+      dshape.SetSize(nd_v, dim);
+      grad_hat.SetSize(vdim, dim);
+      grad.SetSize(vdim, dim);
+
+      // Loop interpolation points = element nodes of scalar space
+      const IntegrationRule &nodes = el_s->GetNodes();
+      for (int i = 0; i < nd_s; ++i)
+      {
+         const IntegrationPoint &ip = nodes.IntPoint(i);
+         T->SetIntPoint(&ip);
+
+         // Compute ∇u at ip
+         el_v->CalcDShape(ip, dshape);                 // dφ/dξ
+         const DenseMatrix &Jinv = T->InverseJacobian();
+         DenseMatrix dshape_phys(dshape.Height(), dshape.Width());
+         Mult(dshape, Jinv, dshape_phys);              // dφ/dx
+
+         MultAtB(Ue, dshape_phys, grad);               // grad(u): vdim x dim
+
+         // Build S and W (3x3 padded), then M = S^2 + W^2
+         DenseMatrix S(3), W(3);
+         S = 0.0; W = 0.0;
+         const int n = std::min({3, vdim, dim});
+         for (int a=0; a<n; ++a)
+         {
+            for (int b=0; b<n; ++b)
+            {
+               const double aab = grad(a,b);
+               const double aba = grad(b,a);
+               S(a,b) = 0.5*(aab + aba);
+               W(a,b) = 0.5*(aab - aba);
+            }
+         }
+         DenseMatrix SS(3), WW(3), M(3);
+         Mult(S,S,SS);
+         Mult(W,W,WW);
+         Add(1.0, SS, 1.0, WW, M);
+
+         // λ2 = middle eigenvalue of M
+         double ev[3]; SymmetricEigenvalues3x3(M, ev);
+         vals(i) = (ev[0]>ev[1]? (ev[1]>ev[2]? ev[1] : std::min(ev[0],ev[2]))
+                                : (ev[0]>ev[2]? ev[0] : std::min(ev[1],ev[2])));
+      }
+
+      // Accumulate to scalar DOFs and count
+      for (int j = 0; j < s_dofs.Size(); ++j)
+      {
+         int ldof = s_dofs[j];
+         lambda2(ldof) += vals[j];
+         zones_per_vdof[ldof] += 1;
+      }
+   }
+
+   // Communicate & average over shared vdofs
+   GroupCommunicator &gcomm = lambda2.ParFESpace()->GroupComm();
+   gcomm.Reduce<int>(zones_per_vdof, GroupCommunicator::Sum);
+   gcomm.Bcast(zones_per_vdof);
+
+   gcomm.Reduce<real_t>(lambda2.GetData(), GroupCommunicator::Sum);
+   gcomm.Bcast<real_t>(lambda2.GetData());
+
+   for (int i = 0; i < lambda2.Size(); ++i)
+   {
+      const int nz = zones_per_vdof[i];
+      if (nz) { lambda2(i) /= nz; }
+   }
+}
+
+
+
 void ComputeDivergence3D(ParGridFunction &u, ParGridFunction &du)
 {
 
@@ -1431,10 +1578,12 @@ int main(int argc, char *argv[])
    ParGridFunction w_gf(velocity_fespace);
    ParGridFunction q_gf(pressure_fespace);
    ParGridFunction d_gf(pressure_fespace);
+   ParGridFunction lambda2_gf(pressure_fespace);
    ParGridFunction ke_gf(pressure_fespace);
 
    flowsolver->ComputeCurl3D(*u_gf, w_gf);
    ComputeQCriterion(*u_gf, q_gf);
+   ComputeLambda2Nodal(*u_gf, lambda2_gf);
    ComputeDissipation(*u_gf, d_gf);
 
    // ComputeDivergence3D(*u_gf, divu_gf);
@@ -1582,6 +1731,7 @@ int main(int argc, char *argv[])
       dc->RegisterField("pressure", p_gf);
       dc->RegisterField("vorticity", &w_gf);
       dc->RegisterField("qcriterion", &q_gf);
+      dc->RegisterField("lambda2", &lambda2_gf);
       // dc->RegisterField("curl_Ah", &curl_Ah_h1);
       // dc->RegisterField("curl_Ah_from_grad_phi", &curl_Ah_h1_from_grad_phi);
       // dc->RegisterField("grad_phi", &grad_phi_h1);
@@ -1842,6 +1992,7 @@ int main(int argc, char *argv[])
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
             ComputeQCriterion(*u_gf, q_gf);
+            ComputeLambda2Nodal(*u_gf, lambda2_gf);
             flowsolver->ComputeCurl3D(*u_gf, w_gf);
 
             /*
