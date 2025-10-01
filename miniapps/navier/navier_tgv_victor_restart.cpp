@@ -449,6 +449,89 @@ public:
       *kmax_return = kmax_global;
   }
 
+   double ComputeTaylorMicroscale(const mfem::ParGridFunction &u,
+                                                      const mfem::IntegrationRule *user_ir,
+                                                      double lambda_components[3])
+   {
+      using namespace mfem;
+
+      MFEM_VERIFY(u.ParFESpace() != nullptr, "Velocity ParGridFunction has no FESpace.");
+      const ParFiniteElementSpace &fes = *u.ParFESpace();
+      MFEM_VERIFY(fes.GetParMesh() && fes.GetParMesh()->Dimension() == 3, "Expect 3D mesh.");
+      MFEM_VERIFY(fes.GetVDim() == 3, "Expect vdim=3 velocity.");
+
+      MPI_Comm comm = fes.GetComm();
+      ParMesh &pmesh = *fes.GetParMesh();
+
+      double local_vol = 0.0;
+      double local_u2[3]  = {0.0, 0.0, 0.0};  // ∫ u_b^2 dV
+      double local_du2[3] = {0.0, 0.0, 0.0};  // ∫ (∂u_b/∂x_b)^2 dV
+
+      Vector uval(3);
+      DenseMatrix grad(3,3); // grad(i,j) = ∂u_i/∂x_j
+
+      const int NE = pmesh.GetNE();
+      for (int e = 0; e < NE; ++e)
+      {
+         const FiniteElement &fe = *fes.GetFE(e);
+         ElementTransformation &T = *fes.GetElementTransformation(e);
+
+         // Match a “robust” dissipation quadrature depth: 2*p (unless user supplies one)
+         const int ir_order = (user_ir) ? user_ir->GetOrder() : 2*fe.GetOrder();
+         const IntegrationRule &ir = (user_ir) ? *user_ir
+                                             : IntRules.Get(fe.GetGeomType(), ir_order);
+
+         for (int q = 0; q < ir.GetNPoints(); ++q)
+         {
+            const IntegrationPoint &ip = ir.IntPoint(q);
+            T.SetIntPoint(&ip);
+            const double w = ip.weight * T.Weight(); // physical dV
+
+            // ParGridFunction API: value via (elem, ip, vec)
+            u.GetVectorValue(e, ip, uval);
+            // Physical gradient via transformation
+            u.GetVectorGradient(T, grad); // size vdim x dim
+
+            local_vol += w;
+            for (int b = 0; b < 3; ++b)
+            {
+               const double ub  = uval(b);
+               const double dub = grad(b,b); // longitudinal derivative ∂u_b/∂x_b
+               local_u2[b]  += ub*ub * w;
+               local_du2[b] += dub*dub * w;
+            }
+         }
+      }
+
+      double vol = 0.0, u2[3], du2[3];
+      MPI_Allreduce(&local_vol, &vol, 1, MPI_DOUBLE, MPI_SUM, comm);
+      MPI_Allreduce(local_u2,  u2,  3, MPI_DOUBLE, MPI_SUM, comm);
+      MPI_Allreduce(local_du2, du2, 3, MPI_DOUBLE, MPI_SUM, comm);
+
+      double lambda_sum = 0.0;
+      double lam_local[3] = {0.0, 0.0, 0.0};
+      for (int b = 0; b < 3; ++b)
+      {
+         const double u2_avg  = (vol > 0.0) ? (u2[b]  / vol) : 0.0; // ⟨u_b^2⟩
+         const double du2_avg = (vol > 0.0) ? (du2[b] / vol) : 0.0; // ⟨(∂u_b/∂x_b)^2⟩
+         lam_local[b] = (du2_avg > 0.0) ? std::sqrt(u2_avg / du2_avg) : 0.0;
+         lambda_sum  += lam_local[b];
+      }
+
+      // If caller provided storage, fill λx, λy, λz (order = x,y,z = components 0,1,2)
+      if (lambda_components)
+      {
+         lambda_components[0] = lam_local[0];
+         lambda_components[1] = lam_local[1];
+         lambda_components[2] = lam_local[2];
+      }
+
+      return lambda_sum / 3.0; // component-averaged λ
+   }
+
+
+
+
   void ComputeKolmogorovAndTaylorMicroLength(ParGridFunction &d_gf,real_t vol_avg_dissipation, real_t *kolmogorov_length, 
                                                                    real_t *avg_lambda, real_t *avg_kolmogorov_length, 
                                                                    real_t *kolmogorov_time_scale,
@@ -474,7 +557,7 @@ public:
 
       // Compute the smallest Taylor Micro scale using the maximum dissipation
       // lambda = sqrt(10*<ke>/<diss>), < > means volume average
-      *avg_lambda = pow(10.0*ke/vol_avg_dissipation/ctx.reynum, 0.50);
+      *avg_lambda = pow(10.0*ke*ctx.kinvis/vol_avg_dissipation, 0.50);
 
       // Kolmogorov time scale
       // Tau_eta = sqrt(\nu/diss_max)
@@ -780,8 +863,7 @@ void ComputeLambda2Nodal(mfem::ParGridFunction &u, mfem::ParGridFunction &lambda
 
          // λ2 = middle eigenvalue of M
          double ev[3]; SymmetricEigenvalues3x3(M, ev);
-         vals(i) = (ev[0]>ev[1]? (ev[1]>ev[2]? ev[1] : std::min(ev[0],ev[2]))
-                                : (ev[0]>ev[2]? ev[0] : std::min(ev[1],ev[2])));
+         vals(i) = ev[1];
       }
 
       // Accumulate to scalar DOFs and count
@@ -1809,6 +1891,16 @@ int main(int argc, char *argv[])
    kin_energy.ComputeKolmogorovAndTaylorMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, &avg_kolmTimeScl, &max_diss, ke);
    kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta, &kmax, &hmin);
 
+   // double lambdas[3];
+   double avg_lambda_iso = kin_energy.ComputeTaylorMicroscale(*u_gf, nullptr, nullptr);
+
+   // if (Mpi::Root())
+   // {
+   //    std::printf("Taylor microscale components: "
+   //                "lambda_x=%.6e  lambda_y=%.6e  lambda_z=%.6e  |  avg=%.6e\n",
+   //                lambdas[0], lambdas[1], lambdas[2], lambda_avg);
+   // }
+
    // Pope definetion of grid resolution
    real_t avg_hmin_eta = hmin/avg_kolmLenScl;
    real_t avg_kmax_eta = kmax*avg_kolmLenScl;
@@ -1916,15 +2008,15 @@ int main(int argc, char *argv[])
           fprintf(f_turb, "===============================================================================");
           fprintf(f_turb, "===============================================================================");
           fprintf(f_turb, "===============================================================================");
-          fprintf(f_turb, "=================================================================\n");
+          fprintf(f_turb, "=============================================================================\n");
           fprintf(f_turb, "        time                        cycle                Max Dissipation       Average Dissipation     Min Kolmogorov Length Scale    Taylor Length Scale");
-          fprintf(f_turb, "        Average Kolm Len          Kolmogorov Time Scale            Average Kolm Time Scale       Taylor Re (Avg)");
+          fprintf(f_turb, "        Taylor Length Scale (aniso)          Average Kolm Len          Kolmogorov Time Scale            Average Kolm Time Scale       Taylor Re (Avg)");
           fprintf(f_turb, "               u_rms    \n");
 
           // Write the initial data point
-           fprintf(f_turb, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
+           fprintf(f_turb, "%20.16e     %20.16e     %20.16e    %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
                        t, static_cast<real_t>(global_cycle + step), max_diss, avg_diss, kolmLenScl, 
-                       avg_lambda, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
+                       avg_lambda, avg_lambda_iso, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
                        Re_taylor, u_rms);
 
           // Write header only if not restarting
@@ -2152,6 +2244,15 @@ int main(int argc, char *argv[])
       avg_hmin_eta = hmin/avg_kolmLenScl;
       avg_kmax_eta = kmax*avg_kolmLenScl;
 
+      avg_lambda_iso = kin_energy.ComputeTaylorMicroscale(*u_gf, nullptr, nullptr);
+
+      // if (Mpi::Root())
+      // {
+      //    std::printf("Taylor microscale components: "
+      //                "lambda_x=%.6e  lambda_y=%.6e  lambda_z=%.6e  |  avg=%.6e\n",
+      //                lambdas[0], lambdas[1], lambdas[2], lambda_avg);
+      // }
+
 
       if (Mpi::Root())
       {
@@ -2164,8 +2265,6 @@ int main(int argc, char *argv[])
                        t, static_cast<real_t>(global_cycle + step), max_diss, avg_diss, kolmLenScl, 
                        avg_lambda, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
                        Re_taylor, u_rms);
-           // fprintf(f_turb_grid, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e\n",
-           //             t, static_cast<real_t>(global_cycle + step), kmax_eta, hmin_eta, PI_nu, PI_nu_min);
            fprintf(f_turb_grid, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e    %20.16e    %20.16e\n",
                        t, static_cast<real_t>(global_cycle + step), kmax_eta, hmin_eta, PI_nu, PI_nu_min, avg_kmax_eta, avg_hmin_eta);
            fflush(f);
