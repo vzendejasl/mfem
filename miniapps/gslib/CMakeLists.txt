@@ -69,6 +69,10 @@ if (MFEM_USE_GSLIB)
       MAIN pfindpts.cpp
       LIBRARIES mfem)
 
+    add_mfem_miniapp(pfindpts_victor
+      MAIN pfindpts_victor.cpp
+      LIBRARIES mfem)
+
     if (MFEM_ENABLE_TESTING)
       foreach (test "schwarz_ex1p" "pfindpts")
         add_test(NAME ${test}_np${MFEM_MPI_NP}

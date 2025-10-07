@@ -71,77 +71,6 @@ struct InterpolationResult
    int failed_points;
 };
 
-// Transfer data from non-periodic mesh to periodic mesh
-void TransferNonPeriodicToPeriodic(ParGridFunction &nonperiodic_gf, 
-                                   ParGridFunction &periodic_gf,
-                                   double L)
-{
-   // Get the data arrays
-   const int vdim = nonperiodic_gf.VectorDim();
-   const int np_ndofs = nonperiodic_gf.FESpace()->GetNDofs();
-   const int p_ndofs = periodic_gf.FESpace()->GetNDofs();
-   
-   // For a structured Cartesian mesh, we need to map DOFs correctly
-   // The non-periodic mesh has all unique DOFs
-   // The periodic mesh has shared DOFs on periodic boundaries
-   
-   // Get the vertex mappings for both meshes
-   ParMesh *np_mesh = nonperiodic_gf.ParFESpace()->GetParMesh();
-   ParMesh *p_mesh = periodic_gf.ParFESpace()->GetParMesh();
-   
-   // Simple approach: Use GSLIB to interpolate from non-periodic to periodic
-   // This handles the DOF mapping automatically
-   FindPointsGSLIB finder(MPI_COMM_WORLD);
-   finder.Setup(*np_mesh);
-   finder.SetDistanceToleranceForPointsFoundOnBoundary(1e-12);
-   
-   // Get coordinates of periodic mesh nodes
-   ParGridFunction *p_nodes = dynamic_cast<ParGridFunction*>(p_mesh->GetNodes());
-   const int local_ndofs = p_nodes->FESpace()->GetNDofs();
-   
-   Vector target_coords(3 * local_ndofs);
-   for (int d = 0; d < 3; ++d)
-   {
-      const double *comp = p_nodes->GetData() + d * local_ndofs;
-      for (int i = 0; i < local_ndofs; ++i)
-      {
-         // Apply periodic wrapping for coordinates
-         double coord = comp[i];
-         // Ensure coordinates are in [0, L) range for periodicity
-         while (coord >= L) coord -= L;
-         while (coord < 0) coord += L;
-         target_coords[d * local_ndofs + i] = coord;
-      }
-   }
-   
-   // Find points and interpolate
-   finder.FindPoints(target_coords, Ordering::byNODES);
-   
-   Vector interp_vals(local_ndofs * vdim);
-   finder.Interpolate(nonperiodic_gf, interp_vals);
-   
-   // Check for failed interpolations
-   Array<unsigned int> code_out = finder.GetCode();
-   for (int i = 0; i < local_ndofs; ++i)
-   {
-      if (code_out[i] >= 2)  // Point not found
-      {
-         // For periodic boundaries, this might be expected - try to handle gracefully
-         for (int c = 0; c < vdim; ++c)
-         {
-            interp_vals[c * local_ndofs + i] = 0.0;  // Or use averaging from neighbors
-         }
-      }
-   }
-   
-   // Store result in periodic GridFunction
-   double *result_data = periodic_gf.GetData();
-   for (int i = 0; i < local_ndofs * vdim; ++i)
-   {
-      result_data[i] = interp_vals[i];
-   }
-}
-
 InterpolationResult DoPeriodicProjectionInterpolation(int nx, int ny, int nz, int order, 
                                                      double L, double amp, bool vector_field,
                                                      bool use_perturbation, bool visit_output, 
@@ -154,11 +83,9 @@ InterpolationResult DoPeriodicProjectionInterpolation(int nx, int ny, int nz, in
    result.total_points = 0;
    result.failed_points = 0;
    
-   // ========== STEP 1: Create all meshes ==========
-   // Create base clean mesh
+   // ========== STEP 1: Create periodic meshes ==========
    Mesh clean_serial = Mesh::MakeCartesian3D(nx, ny, nz, Element::HEXAHEDRON, L, L, L, false);
    
-   // Create periodic meshes (source and target)
    Vector x_translation({L, 0.0, 0.0});
    Vector y_translation({0.0, L, 0.0});
    Vector z_translation({0.0, 0.0, L});
@@ -170,7 +97,7 @@ InterpolationResult DoPeriodicProjectionInterpolation(int nx, int ny, int nz, in
    EnsureNodes(periodic_source_serial, order);
    EnsureNodes(periodic_target_serial, order);
    
-   // Apply perturbation to periodic source if requested
+   // ========== STEP 2: Apply perturbation to source mesh only ==========
    if (use_perturbation)
    {
       H1_FECollection disp_fec(order, 3);
@@ -178,135 +105,104 @@ InterpolationResult DoPeriodicProjectionInterpolation(int nx, int ny, int nz, in
       GridFunction displacement(&disp_fes);
       MeshPerturbationCoefficient disp_coeff(amp);
       displacement.ProjectCoefficient(disp_coeff);
+      
       GridFunction *source_nodes = periodic_source_serial.GetNodes();
       *source_nodes += displacement;
    }
    
-   // Create non-periodic meshes for GSLIB interpolation
-   Mesh nonperiodic_source_serial = Mesh::MakeCartesian3D(nx, ny, nz, Element::HEXAHEDRON, L, L, L, false);
-   Mesh nonperiodic_target_serial = Mesh::MakeCartesian3D(nx, ny, nz, Element::HEXAHEDRON, L, L, L, false);
-   
-   EnsureNodes(nonperiodic_source_serial, order);
-   EnsureNodes(nonperiodic_target_serial, order);
-   
-   // Apply same perturbation to non-periodic source
-   if (use_perturbation)
-   {
-      H1_FECollection disp_fec(order, 3);
-      FiniteElementSpace np_disp_fes(&nonperiodic_source_serial, &disp_fec, 3);
-      GridFunction np_displacement(&np_disp_fes);
-      MeshPerturbationCoefficient disp_coeff(amp);
-      np_displacement.ProjectCoefficient(disp_coeff);
-      GridFunction *np_source_nodes = nonperiodic_source_serial.GetNodes();
-      *np_source_nodes += np_displacement;
-   }
-   
-   // ========== STEP 2: Create parallel meshes ==========
-   ParMesh nonperiodic_source_mesh(MPI_COMM_WORLD, nonperiodic_source_serial);
-   ParMesh nonperiodic_target_mesh(MPI_COMM_WORLD, nonperiodic_target_serial);
+   // ========== STEP 3: Create parallel meshes ==========
    ParMesh periodic_source_mesh(MPI_COMM_WORLD, periodic_source_serial);
    ParMesh periodic_target_mesh(MPI_COMM_WORLD, periodic_target_serial);
    
-   // ========== STEP 3: Create FE spaces and GridFunctions ==========
+   // ========== STEP 4: Create FE spaces and GridFunctions ==========
    const int vdim = vector_field ? 3 : 1;
    H1_FECollection fec(order, 3);
    
-   ParFiniteElementSpace nonperiodic_source_fes(&nonperiodic_source_mesh, &fec, vdim);
-   ParFiniteElementSpace nonperiodic_target_fes(&nonperiodic_target_mesh, &fec, vdim);
    ParFiniteElementSpace periodic_source_fes(&periodic_source_mesh, &fec, vdim);
    ParFiniteElementSpace periodic_target_fes(&periodic_target_mesh, &fec, vdim);
    
-   ParGridFunction nonperiodic_source_data(&nonperiodic_source_fes);
-   ParGridFunction nonperiodic_interpolated(&nonperiodic_target_fes);
    ParGridFunction periodic_source_data(&periodic_source_fes);
    ParGridFunction periodic_interpolated(&periodic_target_fes);
    ParGridFunction periodic_exact(&periodic_target_fes);
    
-   // ========== STEP 4: Set up source data (same on both periodic and non-periodic) ==========
+   // ========== STEP 5: Set up source data ==========
    if (vector_field)
    {
       ExactVectorCoefficient coeff;
-      nonperiodic_source_data.ProjectCoefficient(coeff);
       periodic_source_data.ProjectCoefficient(coeff);
       periodic_exact.ProjectCoefficient(coeff);
    }
    else
    {
       FunctionCoefficient coeff(scalar_func);
-      nonperiodic_source_data.ProjectCoefficient(coeff);
       periodic_source_data.ProjectCoefficient(coeff);
       periodic_exact.ProjectCoefficient(coeff);
    }
    
-   // ========== STEP 5: Perform GSLIB interpolation (non-periodic to non-periodic) ==========
-   FindPointsGSLIB finder(MPI_COMM_WORLD);
-   finder.Setup(nonperiodic_source_mesh);
+   // CRITICAL: Synchronize shared DOFs on periodic boundaries
+   periodic_source_data.SetFromTrueVector();
+   periodic_exact.SetFromTrueVector();
    
+   // ========== STEP 6: Set up GSLIB interpolation ==========
+   FindPointsGSLIB finder(MPI_COMM_WORLD);
+   finder.Setup(periodic_source_mesh);
+   
+   // Set tolerance based on perturbation amplitude
    double tolerance = std::max(1e-12 * L, 2.0 * amp);
    finder.SetDistanceToleranceForPointsFoundOnBoundary(tolerance);
    
-   ParGridFunction *target_nodes = dynamic_cast<ParGridFunction*>(nonperiodic_target_mesh.GetNodes());
-   const int local_ndofs = target_nodes->FESpace()->GetNDofs();
+   // ========== STEP 7: Get target coordinates (using true DOFs) ==========
+   ParGridFunction *target_nodes = dynamic_cast<ParGridFunction*>(periodic_target_mesh.GetNodes());
    
-   Vector target_coords(3 * local_ndofs);
-   for (int d = 0; d < 3; ++d)
-   {
-      const double *comp = target_nodes->GetData() + d * local_ndofs;
-      for (int i = 0; i < local_ndofs; ++i)
-      {
-         target_coords[d * local_ndofs + i] = comp[i];
-      }
-   }
+   // Get the true DOF coordinates (handles periodic boundaries correctly)
+   Vector target_coords_true;
+   target_nodes->GetTrueDofs(target_coords_true);
    
-   finder.FindPoints(target_coords, Ordering::byNODES);
+   const int true_vsize = periodic_target_fes.GetTrueVSize();
+   const int local_true_ndofs = true_vsize / vdim;
+   
+   // ========== STEP 8: Find points and interpolate ==========
+   finder.FindPoints(target_coords_true, Ordering::byNODES);
    
    Array<unsigned int> code_out = finder.GetCode();
-   Vector interp_vals(local_ndofs * vdim);
-   finder.Interpolate(nonperiodic_source_data, interp_vals);
+   Vector interp_vals_true(true_vsize);
+   finder.Interpolate(periodic_source_data, interp_vals_true);
    
-   // Count success/failure
+   // ========== STEP 9: Count success/failure ==========
    int local_inside = 0, local_border = 0, local_miss = 0;
-   for (int i = 0; i < local_ndofs; ++i)
+   for (int i = 0; i < local_true_ndofs; ++i)
    {
       if (code_out[i] == 0u) ++local_inside;
       else if (code_out[i] == 1u) ++local_border;
       else ++local_miss;
    }
    
-   int global_inside, global_border, global_miss, global_ndofs;
+   int global_inside, global_border, global_miss, global_true_ndofs;
    MPI_Allreduce(&local_inside, &global_inside, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
    MPI_Allreduce(&local_border, &global_border, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
    MPI_Allreduce(&local_miss, &global_miss, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-   MPI_Allreduce(&local_ndofs, &global_ndofs, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+   MPI_Allreduce(&local_true_ndofs, &global_true_ndofs, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
    
-   result.total_points = global_ndofs;
+   result.total_points = global_true_ndofs;
    result.failed_points = global_miss;
-   result.success_rate = (global_ndofs > 0) ? 100.0 * (global_inside + global_border) / global_ndofs : 0.0;
+   result.success_rate = (global_true_ndofs > 0) ? 100.0 * (global_inside + global_border) / global_true_ndofs : 0.0;
    
-   // Handle failed points
-   for (int i = 0; i < local_ndofs; ++i)
+   // ========== STEP 10: Handle failed points ==========
+   for (int i = 0; i < local_true_ndofs; ++i)
    {
       if (code_out[i] >= 2)  // Point not found
       {
          for (int c = 0; c < vdim; ++c)
          {
-            interp_vals[c * local_ndofs + i] = 0.0;
+            interp_vals_true[c * local_true_ndofs + i] = 0.0;
          }
       }
    }
    
-   // Store in non-periodic result
-   double *np_result_data = nonperiodic_interpolated.GetData();
-   for (int i = 0; i < local_ndofs * vdim; ++i)
-   {
-      np_result_data[i] = interp_vals[i];
-   }
+   // CRITICAL: Set from true DOFs (handles periodic boundaries)
+   periodic_interpolated.SetFromTrueDofs(interp_vals_true);
    
-   // ========== STEP 6: Transfer interpolated data to periodic mesh ==========
-   if (myid == 0) { std::cout << "Transferring interpolated data to periodic mesh...\n"; }
-   TransferNonPeriodicToPeriodic(nonperiodic_interpolated, periodic_interpolated, L);
-   
-   // ========== STEP 7: Compute errors on periodic mesh ==========
+   // ========== STEP 11: Compute errors ==========
    if (vector_field)
    {
       ExactVectorCoefficient exact_coeff;
@@ -328,7 +224,7 @@ InterpolationResult DoPeriodicProjectionInterpolation(int nx, int ny, int nz, in
       result.relative_error = (l2_norm > 0.0) ? (result.l2_error / l2_norm) : result.l2_error;
    }
    
-   // ========== STEP 8: Create VisIt output ==========
+   // ========== STEP 12: Create VisIt output ==========
    if (visit_output)
    {
       try 
@@ -343,10 +239,10 @@ InterpolationResult DoPeriodicProjectionInterpolation(int nx, int ny, int nz, in
             source_dc.SetTime(0.0);
             source_dc.Save();
             
-            // Output 2: Interpolated data on clean periodic target mesh (THE ACTUAL RESULT)
+            // Output 2: Interpolated data on clean periodic target mesh
             VisItDataCollection target_dc(output_prefix + "_Target", &periodic_target_mesh);
             target_dc.SetPrecision(16);
-            target_dc.RegisterField("interpolated_data", &periodic_interpolated);  // Now this is real!
+            target_dc.RegisterField("interpolated_data", &periodic_interpolated);
             target_dc.RegisterField("exact_data", &periodic_exact);
             
             // Compute and save error field
@@ -358,14 +254,6 @@ InterpolationResult DoPeriodicProjectionInterpolation(int nx, int ny, int nz, in
             target_dc.SetCycle(0); 
             target_dc.SetTime(0.0);
             target_dc.Save();
-            
-            // Output 3: Non-periodic interpolated (for debugging)
-            VisItDataCollection np_dc(output_prefix + "_NonPeriodic", &nonperiodic_target_mesh);
-            np_dc.SetPrecision(8);
-            np_dc.RegisterField("np_interpolated", &nonperiodic_interpolated);
-            np_dc.SetCycle(0);
-            np_dc.SetTime(0.0);
-            np_dc.Save();
          }
          else
          {
@@ -433,7 +321,7 @@ int main(int argc, char *argv[])
 
    if (myid == 0)
    {
-      std::cout << "\nPeriodic Data Projection Interpolation Test\n";
+      std::cout << "\nPeriodic Data Projection Interpolation Test (CORRECTED)\n";
       std::cout << "Grid: " << nx << "x" << ny << "x" << nz 
                 << ", Order: " << order 
                 << ", Amplitude: " << amp
@@ -483,22 +371,29 @@ int main(int argc, char *argv[])
       // Analysis
       if (result_with_pert.success_rate > 99.0)
       {
-         std::cout << "EXCELLENT: >99% success rate achieved!\n";
+         std::cout << "✓ EXCELLENT: >99% success rate achieved!\n";
       }
       else if (result_with_pert.success_rate > 95.0)
       {
-         std::cout << "GOOD: High success rate achieved.\n";
+         std::cout << "✓ GOOD: High success rate achieved.\n";
       }
       else
       {
-         std::cout << "WARNING: Lower than expected success rate.\n";
+         std::cout << "⚠ WARNING: Lower than expected success rate.\n";
       }
       
-      if (result_with_pert.l2_error > 1e-6)
+      if (result_with_pert.relative_error < 1e-6)
       {
-         std::cout << "Note: L2 error is significant. This may be due to:\n";
+         std::cout << "✓ EXCELLENT: Very low relative error!\n";
+      }
+      else if (result_with_pert.relative_error < 1e-3)
+      {
+         std::cout << "✓ GOOD: Acceptable relative error.\n";
+      }
+      else
+      {
+         std::cout << "⚠ Note: Significant L2 error. This may be due to:\n";
          std::cout << "  - Mesh perturbation affecting interpolation accuracy\n";
-         std::cout << "  - Periodic boundary handling in the transfer step\n";
          std::cout << "  - Consider reducing perturbation amplitude or increasing mesh resolution\n";
       }
       
@@ -509,9 +404,18 @@ int main(int argc, char *argv[])
          std::cout << "\nVisIt files created:\n";
          std::cout << "  Baseline_Baseline/ - Baseline without perturbation\n";
          std::cout << "  PeriodicProjection_Source/ - Original data on perturbed periodic mesh\n";
-         std::cout << "  PeriodicProjection_Target/ - ACTUAL interpolated data on clean periodic mesh\n";
-         std::cout << "  PeriodicProjection_NonPeriodic/ - Intermediate non-periodic result\n";
+         std::cout << "  PeriodicProjection_Target/ - Interpolated data on clean periodic mesh\n";
+         std::cout << "     - Fields: interpolated_data, exact_data, interpolation_error\n";
       }
+      
+      std::cout << "\n" << std::string(80, '=') << "\n";
+      std::cout << "KEY IMPROVEMENTS IN THIS VERSION:\n";
+      std::cout << "  • Uses SetFromTrueVector() after projection (syncs periodic boundaries)\n";
+      std::cout << "  • Uses GetTrueDofs() for target coordinates (respects periodicity)\n";
+      std::cout << "  • Uses SetFromTrueDofs() for interpolated result (correct DOF mapping)\n";
+      std::cout << "  • Eliminated unnecessary non-periodic mesh complexity\n";
+      std::cout << "  • Direct periodic-to-periodic interpolation via GSLIB\n";
+      std::cout << std::string(80, '=') << "\n";
    }
 
    return 0;
@@ -519,10 +423,31 @@ int main(int argc, char *argv[])
 
 /*
 COMPILATION:
-mpicxx -std=c++17 -I$MFEM_DIR -L$MFEM_DIR -o periodic_test_fixed \
-       periodic_test_fixed.cpp -lmfem -lHYPRE -lmetis
+============
+Make sure MFEM is built with GSLIB support (MFEM_USE_GSLIB=YES)
 
-USAGE:
-mpirun -np 4 ./periodic_test_fixed -amp 0.02 -vec
-mpirun -np 1 ./periodic_test_fixed -amp 0.05 -vec  # Test in serial first
+mpicxx -std=c++17 -I$MFEM_DIR -L$MFEM_DIR -o periodic_test_corrected \
+       periodic_test_corrected.cpp -lmfem -lHYPRE -lmetis
+
+USAGE EXAMPLES:
+===============
+# Serial test with scalar field
+mpirun -np 1 ./periodic_test_corrected -amp 0.05
+
+# Parallel test with vector field
+mpirun -np 4 ./periodic_test_corrected -amp 0.02 -vec
+
+# High-resolution test
+mpirun -np 8 ./periodic_test_corrected -nx 16 -ny 16 -nz 16 -o 3 -vec
+
+# Test without visualization output
+mpirun -np 4 ./periodic_test_corrected -amp 0.05 -no-visit
+
+WHAT TO EXPECT:
+===============
+- Baseline test should have ~0% error (identity mapping)
+- Perturbed test success rate should be >99% (maybe 100%)
+- L2 error should be small (dependent on amplitude and resolution)
+- Lower perturbation amplitude = lower error
+- Higher order and finer mesh = lower error
 */
