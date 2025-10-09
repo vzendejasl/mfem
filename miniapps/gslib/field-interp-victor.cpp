@@ -12,37 +12,33 @@ using namespace std;
 // ---------------- test fields ----------------
 static double scalar_func(const Vector &x)
 {
-   return std::sin(M_PI*x[0]) * std::cos(M_PI*x[1]) * std::sin(0.5*M_PI*x[2])
-        + x[0]*x[1]*x[2];
+   return std::sin(M_PI*x[0]) * std::cos(M_PI*x[1]) * std::sin(0.5*M_PI*x[2]);
 }
 
 // Vector field function
 static void vector_func(const Vector &x, Vector &v)
 {
-   v.SetSize(3);
-   v[0] = std::sin(M_PI*x[1]) * std::cos(M_PI*x[2]) + x[0]*x[1];
-   v[1] = std::cos(M_PI*x[0]) * std::sin(M_PI*x[2]) + x[1]*x[2];
-   v[2] = std::sin(M_PI*x[0]) * std::cos(M_PI*x[1]) + x[2]*x[0];
+
+   double xi = 2*M_PI*x(0);
+   double yi = 2*M_PI*x(1);
+   double zi = 2*M_PI*x(2);
+
+   v(0) = sin(xi) * cos(yi) * cos(zi);
+   v(1) = -cos(xi) * sin(yi) * cos(zi);
+   v(2) = 0.0;
+
 }
 
-// Sine-wave mesh perturbation (vector coefficient in physical coords)
-class MeshPerturbationCoefficient : public VectorCoefficient
+// Mesh transformation for perturbation
+double amp = 0.05;
+void PerturbMeshTransform(const Vector &x_in, Vector &x_out)
 {
-   double amp, freq;
-public:
-   MeshPerturbationCoefficient(double amplitude, double frequency = 2.0*M_PI)
-   : VectorCoefficient(3), amp(amplitude), freq(frequency) {}
-
-   virtual void Eval(Vector &u, ElementTransformation &T, const IntegrationPoint &ip)
-   {
-      Vector x(3);
-      T.Transform(ip, x);
-      u.SetSize(3);
-      u[0] = amp * std::sin(freq*x[1]) * std::cos(freq*x[2]);
-      u[1] = amp * std::cos(freq*x[0]) * std::sin(freq*x[2]) * 0.8;
-      u[2] = amp * std::sin(freq*x[0]) * std::cos(freq*x[1]) * 0.6;
-   }
-};
+   const double freq = 2.0*M_PI;
+   x_out = x_in;
+   x_out[0] += amp * std::sin(freq*x_in[1]) * std::cos(freq*x_in[2]);
+   x_out[1] += amp * std::cos(freq*x_in[0]) * std::sin(freq*x_in[2]) * 0.8;
+   x_out[2] += amp * std::sin(freq*x_in[0]) * std::cos(freq*x_in[1]) * 0.6;
+}
 
 // Vector function coefficient wrapper
 class ExactVectorCoefficient : public VectorCoefficient
@@ -93,6 +89,55 @@ static void ComputeError(const GF &a, const GF &b, GF &err)
    err = a; err -= b;
 }
 
+// Check to make sure mesh is periodic
+template<typename T>
+bool InArray(const T* begin, size_t sz, T i)
+{
+   const T *end = begin + sz;
+   return std::find(begin, end, i) != end;
+}
+
+bool IndicesAreConnected(const Table &t, int i, int j)
+{
+   return InArray(t.GetRow(i), t.RowSize(i), j)
+          && InArray(t.GetRow(j), t.RowSize(j), i);
+}
+
+void VerifyPeriodicMesh(const int n, mfem::Mesh *mesh)
+{
+    const mfem::Table &e2e = mesh->ElementToElementTable();
+    int n2 = n * n;
+
+    std::cout << "Checking to see if mesh is periodic.." << std::endl;
+
+    if (mesh->GetNV() == pow(n - 1, 3) + 3 * pow(n - 1, 2) + 3 * (n - 1) + 1) {
+        std::cout << "Total number of vertices match a periodic mesh." << std::endl;
+    } else {
+        MFEM_ABORT("Mesh does not have the correct number of vertices for a periodic mesh.");
+    }
+
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i) {
+            // Check periodicity in z direction
+            if (!IndicesAreConnected(e2e, i + j * n, i + j * n + n2 * (n - 1))) {
+                MFEM_ABORT("Mesh is not periodic in the z direction.");
+            }
+
+            // Check periodicity in y direction
+            if (!IndicesAreConnected(e2e, i + j * n2, i + j * n2 + n * (n - 1))) {
+                MFEM_ABORT("Mesh is not periodic in the y direction.");
+            }
+
+            // Check periodicity in x direction
+            if (!IndicesAreConnected(e2e, i * n + j * n2, i * n + j * n2 + n - 1)) {
+                MFEM_ABORT("Mesh is not periodic in the x direction.");
+            }
+        }
+    }
+            
+    std::cout << "Done checking... Periodic in all directions." << std::endl;
+}
+
 // ---------------- main ----------------
 int main(int argc, char *argv[])
 {
@@ -104,7 +149,7 @@ int main(int argc, char *argv[])
 
    int nx = 8, ny = 8, nz = 8;
    int order = 2;
-   double amp = 0.05;
+   amp = 0.05;
    double L = 1.0;
    bool visualization = false, visit_output = true;
    int visport = 19916;
@@ -152,32 +197,27 @@ int main(int argc, char *argv[])
 
    // Create serial meshes on all ranks (identical)
    Mesh clean_smesh = Mesh::MakeCartesian3D(nx, ny, nz, Element::HEXAHEDRON, L, L, L);
-   Mesh pert_smesh(clean_smesh);  // Copy for perturbation
+   // Mesh pert_smesh(clean_smesh);  // Copy for perturbation
+   Mesh base_mesh = Mesh::MakeCartesian3D(nx, ny, nz, Element::HEXAHEDRON, L, L, L, false);
+
+   Vector x_trans({L, 0.0, 0.0});
+   Vector y_trans({0.0, L, 0.0});
+   Vector z_trans({0.0, 0.0, L});
+   std::vector<Vector> translations = {x_trans, y_trans, z_trans};
+
+   std::vector<int> v2v = base_mesh.CreatePeriodicVertexMapping(translations);
+   Mesh pert_smesh = Mesh::MakePeriodic(base_mesh, v2v);
+   // Mesh clean_smesh = Mesh::MakePeriodic(base_mesh, v2v);
    
    EnsureNodes(clean_smesh, order);
    EnsureNodes(pert_smesh, order);
 
-   // Apply perturbation to SERIAL perturbed mesh
-   if (myid == 0) { std::cout << "\n=== Applying Perturbation to Serial Mesh ===\n"; }
-   
-   H1_FECollection serial_disp_fec(order, 3);
-   FiniteElementSpace serial_disp_fes(&pert_smesh, &serial_disp_fec, /*vdim=*/3);
-   GridFunction serial_displacement(&serial_disp_fes);
-   
-   MeshPerturbationCoefficient disp_coeff(amp);
-   serial_displacement.ProjectCoefficient(disp_coeff);
-   
-   // Apply displacement to serial mesh nodes
-   GridFunction *serial_nodes = pert_smesh.GetNodes();
-   MFEM_VERIFY(serial_nodes && serial_nodes->VectorDim() == 3, "Expected 3D serial nodes.");
-   *serial_nodes += serial_displacement;
-   
-   // Compute max displacement on serial mesh
-   double max_disp_serial = MaxVectorMagnitudeAtNodes(serial_displacement);
+   if (true) { pert_smesh.Transform(PerturbMeshTransform); }
+
    if (myid == 0)
    {
-      std::cout << "Max node displacement (serial): " << std::setprecision(12)
-                << max_disp_serial << "\n";
+      VerifyPeriodicMesh(nx, &pert_smesh);
+      // VerifyPeriodicMesh(nx, &clean_smesh);
    }
 
    // Partition both meshes

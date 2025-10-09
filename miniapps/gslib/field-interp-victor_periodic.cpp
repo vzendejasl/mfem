@@ -1,453 +1,478 @@
+// Copyright (c) 2010-2025, Lawrence Livermore National Security, LLC. Produced
+// at the Lawrence Livermore National Laboratory. All Rights reserved. See files
+// LICENSE and NOTICE for details. LLNL-CODE-806117.
+//
+// This file is part of the MFEM library. For more information and source code
+// availability visit https://mfem.org.
+//
+// MFEM is free software; you can redistribute it and/or modify it under the
+// terms of the BSD-3 license. We welcome feedback and contributions, see file
+// CONTRIBUTING.md for details.
+//
+//      -------------------------------------------------------------
+//      Field Interp Miniapp: Transfer a grid function between meshes
+//      -------------------------------------------------------------
+//
+// This miniapp provides the capability to transfer a grid function (H1, L2,
+// H(div), and H(curl)) from one mesh onto another using GSLIB-FindPoints. Using
+// FindPoints, we identify the nodal positions of the target mesh with respect
+// to the source mesh and then interpolate the source grid function. The
+// interpolated values are then projected onto the desired finite element space
+// on the target mesh. Finally, the transferred solution is visualized using
+// GLVis. Note that the source grid function can be a user-defined vector
+// function or a grid function file that is compatible with the source mesh.
+//
+// Compile with: make field-interp
+//
+// Sample runs:
+//   field-interp
+//   field-interp -o 1
+//   field-interp -fts 3 -ft 0
+//   field-interp -m1 triple-pt-1.mesh -s1 triple-pt-1.gf -m2 triple-pt-2.mesh -ft 1
+//   field-interp -m1 triple-pt-1.mesh -m2 triple-pt-2.mesh -ft 1
+//   field-interp -m2 ../meshing/amr-quad-q2.mesh -ft 0 -r 1 -fts 0
+
 #include "mfem.hpp"
-#include <cmath>
 #include <fstream>
-#include <iomanip>
-#include <iostream>
-#include <memory>
-#include <limits>
 
 using namespace mfem;
 using namespace std;
 
-// Test functions
-static double scalar_func(const Vector &x)
+// Mesh transformation for perturbation
+static double g_amp = 0.05;
+void PerturbMeshTransform(const Vector &x_in, Vector &x_out)
 {
-   return std::sin(2.0*M_PI*x[0]) * std::cos(2.0*M_PI*x[1]) * std::sin(2.0*M_PI*x[2]);
+   const double freq = 2.0*M_PI;
+   x_out = x_in;
+   x_out[0] += g_amp * std::sin(freq*x_in[1]) * std::cos(freq*x_in[2]);
+   x_out[1] += g_amp * std::cos(freq*x_in[0]) * std::sin(freq*x_in[2]) * 0.8;
+   x_out[2] += g_amp * std::sin(freq*x_in[0]) * std::cos(freq*x_in[1]) * 0.6;
 }
 
-static void vector_func(const Vector &x, Vector &v)
+// Add this function to create periodic meshes
+Mesh MakePeriodicMesh(int nx, int ny, int nz, double L)
 {
-   v.SetSize(3);
-   v[0] = std::sin(2.0*M_PI*x[1]) * std::cos(2.0*M_PI*x[2]);
-   v[1] = std::cos(2.0*M_PI*x[0]) * std::sin(2.0*M_PI*x[2]);
-   v[2] = std::sin(2.0*M_PI*x[0]) * std::cos(2.0*M_PI*x[1]);
+   Mesh base_mesh = Mesh::MakeCartesian3D(nx, ny, nz, Element::HEXAHEDRON, 
+                                          L, L, L, false);
+   
+   Vector x_trans({L, 0.0, 0.0});
+   Vector y_trans({0.0, L, 0.0});
+   Vector z_trans({0.0, 0.0, L});
+   std::vector<Vector> translations = {x_trans, y_trans, z_trans};
+   
+   std::vector<int> v2v = base_mesh.CreatePeriodicVertexMapping(translations);
+   return Mesh::MakePeriodic(base_mesh, v2v);
 }
 
-class MeshPerturbationCoefficient : public VectorCoefficient
-{
-   double amp, freq;
-public:
-   MeshPerturbationCoefficient(double amplitude, double frequency = 2.0*M_PI)
-   : VectorCoefficient(3), amp(amplitude), freq(frequency) {}
+// The key: Apply perturbation as displacement AFTER making periodic
+// Your MeshPerturbationCoefficient is already periodic (sin/cos with period L)
+// so this should preserve periodicity
 
-   virtual void Eval(Vector &u, ElementTransformation &T, const IntegrationPoint &ip)
-   {
-      Vector x(3);
-      T.Transform(ip, x);
-      u.SetSize(3);
-      u[0] = amp * std::sin(freq*x[1]) * std::cos(freq*x[2]);
-      u[1] = amp * std::cos(freq*x[0]) * std::sin(freq*x[2]) * 0.8;
-      u[2] = amp * std::sin(freq*x[0]) * std::cos(freq*x[1]) * 0.6;
-   }
-};
-
-class ExactVectorCoefficient : public VectorCoefficient
+// Scalar function to project
+double scalar_func(const Vector &x)
 {
-public:
-   ExactVectorCoefficient() : VectorCoefficient(3) {}
-   
-   virtual void Eval(Vector &v, ElementTransformation &T, const IntegrationPoint &ip)
-   {
-      Vector x(3);
-      T.Transform(ip, x);
-      vector_func(x, v);
-   }
-};
-
-static void EnsureNodes(Mesh &mesh, int order)
-{
-   if (!mesh.GetNodes())
-   {
-      mesh.SetCurvature(order, false, mesh.Dimension(), Ordering::byNODES);
-   }
+   const int dim = x.Size();
+   double res = 0.0;
+   for (int d = 0; d < dim; d++) { res += x(d) * x(d); }
+   return res;
 }
 
-struct InterpolationResult
+void vector_func(const Vector &p, Vector &F)
 {
-   double success_rate;
-   double l2_error;
-   double relative_error;
-   int total_points;
-   int failed_points;
-};
+   // F(0) = scalar_func(p);
+   // for (int i = 1; i < F.Size(); i++) { F(i) = (i+1)*pow(-1, i)*F(0); }
 
-InterpolationResult DoPeriodicProjectionInterpolation(int nx, int ny, int nz, int order, 
-                                                     double L, double amp, bool vector_field,
-                                                     bool use_perturbation, bool visit_output, 
-                                                     const std::string& output_prefix, int myid)
-{
-   InterpolationResult result;
-   result.success_rate = 0.0;
-   result.l2_error = 0.0;
-   result.relative_error = 0.0;
-   result.total_points = 0;
-   result.failed_points = 0;
-   
-   // ========== STEP 1: Create periodic meshes ==========
-   Mesh clean_serial = Mesh::MakeCartesian3D(nx, ny, nz, Element::HEXAHEDRON, L, L, L, false);
-   
-   Vector x_translation({L, 0.0, 0.0});
-   Vector y_translation({0.0, L, 0.0});
-   Vector z_translation({0.0, 0.0, L});
-   std::vector<Vector> translations = {x_translation, y_translation, z_translation};
-   
-   Mesh periodic_source_serial = Mesh::MakePeriodic(clean_serial, clean_serial.CreatePeriodicVertexMapping(translations));
-   Mesh periodic_target_serial = Mesh::MakePeriodic(clean_serial, clean_serial.CreatePeriodicVertexMapping(translations));
-   
-   EnsureNodes(periodic_source_serial, order);
-   EnsureNodes(periodic_target_serial, order);
-   
-   // ========== STEP 2: Apply perturbation to source mesh only ==========
-   if (use_perturbation)
-   {
-      H1_FECollection disp_fec(order, 3);
-      FiniteElementSpace disp_fes(&periodic_source_serial, &disp_fec, 3);
-      GridFunction displacement(&disp_fes);
-      MeshPerturbationCoefficient disp_coeff(amp);
-      displacement.ProjectCoefficient(disp_coeff);
-      
-      GridFunction *source_nodes = periodic_source_serial.GetNodes();
-      *source_nodes += displacement;
-   }
-   
-   // ========== STEP 3: Create parallel meshes ==========
-   ParMesh periodic_source_mesh(MPI_COMM_WORLD, periodic_source_serial);
-   ParMesh periodic_target_mesh(MPI_COMM_WORLD, periodic_target_serial);
-   
-   // ========== STEP 4: Create FE spaces and GridFunctions ==========
-   const int vdim = vector_field ? 3 : 1;
-   H1_FECollection fec(order, 3);
-   
-   ParFiniteElementSpace periodic_source_fes(&periodic_source_mesh, &fec, vdim);
-   ParFiniteElementSpace periodic_target_fes(&periodic_target_mesh, &fec, vdim);
-   
-   ParGridFunction periodic_source_data(&periodic_source_fes);
-   ParGridFunction periodic_interpolated(&periodic_target_fes);
-   ParGridFunction periodic_exact(&periodic_target_fes);
-   
-   // ========== STEP 5: Set up source data ==========
-   if (vector_field)
-   {
-      ExactVectorCoefficient coeff;
-      periodic_source_data.ProjectCoefficient(coeff);
-      periodic_exact.ProjectCoefficient(coeff);
-   }
-   else
-   {
-      FunctionCoefficient coeff(scalar_func);
-      periodic_source_data.ProjectCoefficient(coeff);
-      periodic_exact.ProjectCoefficient(coeff);
-   }
-   
-   // CRITICAL: Synchronize shared DOFs on periodic boundaries
-   periodic_source_data.SetFromTrueVector();
-   periodic_exact.SetFromTrueVector();
-   
-   // ========== STEP 6: Set up GSLIB interpolation ==========
-   FindPointsGSLIB finder(MPI_COMM_WORLD);
-   finder.Setup(periodic_source_mesh);
-   
-   // Set tolerance based on perturbation amplitude
-   double tolerance = std::max(1e-12 * L, 2.0 * amp);
-   finder.SetDistanceToleranceForPointsFoundOnBoundary(tolerance);
-   
-   // ========== STEP 7: Get target coordinates (using true DOFs) ==========
-   ParGridFunction *target_nodes = dynamic_cast<ParGridFunction*>(periodic_target_mesh.GetNodes());
-   
-   // Get the true DOF coordinates (handles periodic boundaries correctly)
-   Vector target_coords_true;
-   target_nodes->GetTrueDofs(target_coords_true);
-   
-   const int true_vsize = periodic_target_fes.GetTrueVSize();
-   const int local_true_ndofs = true_vsize / vdim;
-   
-   // ========== STEP 8: Find points and interpolate ==========
-   finder.FindPoints(target_coords_true, Ordering::byNODES);
-   
-   Array<unsigned int> code_out = finder.GetCode();
-   Vector interp_vals_true(true_vsize);
-   finder.Interpolate(periodic_source_data, interp_vals_true);
-   
-   // ========== STEP 9: Count success/failure ==========
-   int local_inside = 0, local_border = 0, local_miss = 0;
-   for (int i = 0; i < local_true_ndofs; ++i)
-   {
-      if (code_out[i] == 0u) ++local_inside;
-      else if (code_out[i] == 1u) ++local_border;
-      else ++local_miss;
-   }
-   
-   int global_inside, global_border, global_miss, global_true_ndofs;
-   MPI_Allreduce(&local_inside, &global_inside, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-   MPI_Allreduce(&local_border, &global_border, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-   MPI_Allreduce(&local_miss, &global_miss, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-   MPI_Allreduce(&local_true_ndofs, &global_true_ndofs, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-   
-   result.total_points = global_true_ndofs;
-   result.failed_points = global_miss;
-   result.success_rate = (global_true_ndofs > 0) ? 100.0 * (global_inside + global_border) / global_true_ndofs : 0.0;
-   
-   // ========== STEP 10: Handle failed points ==========
-   for (int i = 0; i < local_true_ndofs; ++i)
-   {
-      if (code_out[i] >= 2)  // Point not found
-      {
-         for (int c = 0; c < vdim; ++c)
-         {
-            interp_vals_true[c * local_true_ndofs + i] = 0.0;
-         }
-      }
-   }
-   
-   // CRITICAL: Set from true DOFs (handles periodic boundaries)
-   periodic_interpolated.SetFromTrueDofs(interp_vals_true);
-   
-   // ========== STEP 11: Compute errors ==========
-   if (vector_field)
-   {
-      ExactVectorCoefficient exact_coeff;
-      Vector zero_vec(vdim);
-      zero_vec = 0.0;
-      VectorConstantCoefficient zero_coeff(zero_vec);
-      
-      result.l2_error = periodic_interpolated.ComputeL2Error(exact_coeff);
-      double l2_norm = periodic_exact.ComputeL2Error(zero_coeff);
-      result.relative_error = (l2_norm > 0.0) ? (result.l2_error / l2_norm) : result.l2_error;
-   }
-   else
-   {
-      FunctionCoefficient exact_coeff(scalar_func);
-      ConstantCoefficient zero_coeff(0.0);
-      
-      result.l2_error = periodic_interpolated.ComputeL2Error(exact_coeff);
-      double l2_norm = periodic_exact.ComputeL2Error(zero_coeff);
-      result.relative_error = (l2_norm > 0.0) ? (result.l2_error / l2_norm) : result.l2_error;
-   }
-   
-   // ========== STEP 12: Create VisIt output ==========
-   if (visit_output)
-   {
-      try 
-      {
-         if (use_perturbation)
-         {
-            // Output 1: Original data on perturbed periodic source mesh
-            VisItDataCollection source_dc(output_prefix + "_Source", &periodic_source_mesh);
-            source_dc.SetPrecision(16);
-            source_dc.RegisterField("original_data", &periodic_source_data);
-            source_dc.SetCycle(0); 
-            source_dc.SetTime(0.0);
-            source_dc.Save();
-            
-            // Output 2: Interpolated data on clean periodic target mesh
-            VisItDataCollection target_dc(output_prefix + "_Target", &periodic_target_mesh);
-            target_dc.SetPrecision(16);
-            target_dc.RegisterField("interpolated_data", &periodic_interpolated);
-            target_dc.RegisterField("exact_data", &periodic_exact);
-            
-            // Compute and save error field
-            ParGridFunction error_field(&periodic_target_fes);
-            error_field = periodic_exact;
-            error_field -= periodic_interpolated;
-            target_dc.RegisterField("interpolation_error", &error_field);
-            
-            target_dc.SetCycle(0); 
-            target_dc.SetTime(0.0);
-            target_dc.Save();
-         }
-         else
-         {
-            // Baseline case
-            VisItDataCollection baseline_dc(output_prefix + "_Baseline", &periodic_target_mesh);
-            baseline_dc.SetPrecision(8);
-            baseline_dc.RegisterField("data", &periodic_interpolated);
-            baseline_dc.RegisterField("exact", &periodic_exact);
-            baseline_dc.SetCycle(0); 
-            baseline_dc.SetTime(0.0);
-            baseline_dc.Save();
-         }
-      }
-      catch (...)
-      {
-         if (myid == 0)
-         {
-            std::cout << "WARNING: VisIt output failed, continuing without visualization.\n";
-         }
-      }
-   }
-   
-   return result;
+   double xi = 2*M_PI*p(0);
+   double yi = 2*M_PI*p(1);
+   double zi = 2*M_PI*p(2);
+
+   F(0) = sin(xi) * cos(yi) * cos(zi);
+   F(1) = -cos(xi) * sin(yi) * cos(zi);
+   F(2) = 0.0;
 }
 
-int main(int argc, char *argv[])
+int main (int argc, char *argv[])
 {
-   Mpi::Init(argc, argv);
-   int myid = Mpi::WorldRank();
-   int nprocs = Mpi::WorldSize();
-   Hypre::Init();
+   // Set the method's default parameters.
+   const char *src_mesh_file = "../meshing/square01.mesh";
+   const char *tar_mesh_file = "../../data/inline-tri.mesh";
+   const char *src_sltn_file = "must_be_provided_by_the_user.gf";
+   int src_fieldtype   = 0;
+   int src_ncomp       = 1;
+   int src_gf_ordering = 0;
+   int ref_levels      = 0;
+   int fieldtype       = -1;
+   int order           = 3;
+   bool visualization  = true;
+   int visport         = 19916;
+   bool perturb_source = false;
+   int nx              = 8;
+   double L            = 1.0;
 
-   int nx = 8, ny = 8, nz = 8;
-   int order = 2;
-   double amp = 0.05;
-   double L = 1.0;
-   bool vector_field = false;
-   bool visit_output = true;
-
+   // Parse command-line options.
    OptionsParser args(argc, argv);
-   args.AddOption(&nx, "-nx", "--nx", "Elements in x.");
-   args.AddOption(&ny, "-ny", "--ny", "Elements in y.");
-   args.AddOption(&nz, "-nz", "--nz", "Elements in z.");
-   args.AddOption(&order, "-o", "--order", "H1 order (scalar/vector).");
-   args.AddOption(&amp, "-amp", "--amplitude", "Perturbation amplitude (absolute).");
-   args.AddOption(&L, "-L", "--domain-size", "Cube side length.");
-   args.AddOption(&vector_field, "-vec", "--vector-field", "-no-vec", "--no-vector-field",
-                  "Use vector field instead of scalar field.");
-   args.AddOption(&visit_output, "-visit", "--visit-output", "-no-visit", "--no-visit-output", 
-                  "VisIt dump on/off.");
+   args.AddOption(&src_mesh_file, "-m1", "--mesh1",
+                  "Mesh file for the starting solution.");
+   args.AddOption(&tar_mesh_file, "-m2", "--mesh2",
+                  "Mesh file for interpolation.");
+   args.AddOption(&src_sltn_file, "-s1", "--solution1",
+                  "(optional) GridFunction file compatible with src_mesh_file."
+                  "Set src_fieldtype to -1 if this option is used.");
+   args.AddOption(&src_fieldtype, "-fts", "--field-type-src",
+                  "Source GridFunction type:"
+                  "0 - H1 (default), 1 - L2, 2 - H(div), 3 - H(curl).");
+   args.AddOption(&src_ncomp, "-nc", "--ncomp",
+                  "Number of components for H1 or L2 GridFunctions.");
+   args.AddOption(&src_gf_ordering, "-gfo", "--gfo",
+                  "Node ordering: 0 (byNodes) or 1 (byVDim)");
+   args.AddOption(&ref_levels, "-r", "--refine",
+                  "Number of refinements of the interpolation mesh.");
+   args.AddOption(&fieldtype, "-ft", "--field-type",
+                  "Target GridFunction type: -1 - source GridFunction type (default),"
+                  "0 - H1, 1 - L2, 2 - H(div), 3 - H(curl).");
+   args.AddOption(&order, "-o", "--order",
+                  "Order of the interpolated solution.");
+   args.AddOption(&visualization, "-vis", "--visualization", "-no-vis",
+                  "--no-visualization",
+                  "Enable or disable GLVis visualization.");
+   args.AddOption(&visport, "-p", "--send-port", "Socket for GLVis.");
+   args.AddOption(&perturb_source, "-pert", "--perturb", "-no-pert", "--no-perturb",
+                  "Perturb source mesh.");
    args.Parse();
    if (!args.Good())
    {
-      if (myid == 0) { args.PrintUsage(std::cout); }
+      args.PrintUsage(cout);
       return 1;
    }
+   args.PrintOptions(cout);
 
-#ifndef MFEM_USE_GSLIB
-   if (myid == 0)
+   // If a grid function is specified, set src_fieldtype to -1
+   if (strcmp(src_sltn_file, "must_be_provided_by_the_user.gf") != 0)
    {
-      std::cerr << "ERROR: Requires MFEM built with GSLIB (MFEM_USE_GSLIB=YES).\n";
-   }
-   return 2;
-#endif
-
-   if (myid == 0)
-   {
-      std::cout << "\nPeriodic Data Projection Interpolation Test (CORRECTED)\n";
-      std::cout << "Grid: " << nx << "x" << ny << "x" << nz 
-                << ", Order: " << order 
-                << ", Amplitude: " << amp
-                << ", Field: " << (vector_field ? "Vector" : "Scalar")
-                << ", Ranks: " << nprocs << "\n";
-      std::cout << std::string(80, '-') << "\n";
+      src_fieldtype = -1;
    }
 
-   // Test case 1: No perturbation (baseline)
-   if (myid == 0) { std::cout << "Testing without mesh perturbation (baseline)...\n"; }
-   InterpolationResult result_no_pert = DoPeriodicProjectionInterpolation(
-      nx, ny, nz, order, L, amp, vector_field, false, visit_output, "Baseline", myid);
-   
-   // Test case 2: With perturbation (the actual test)
-   if (myid == 0) { std::cout << "Testing with mesh perturbation...\n"; }
-   InterpolationResult result_with_pert = DoPeriodicProjectionInterpolation(
-      nx, ny, nz, order, L, amp, vector_field, true, visit_output, "PeriodicProjection", myid);
+   // Input meshes.
+   // Mesh mesh_1(src_mesh_file, 1, 1, false);
+   // Mesh mesh_2(tar_mesh_file, 1, 1, false);
 
-   // Report results
-   if (myid == 0)
+         
+   // Mesh mesh_1 = MakePeriodicMesh(nx, nx, nx, L, perturb_source); // SOURCE: periodic + (optional) perturb
+   // Mesh mesh_2 = MakePeriodicMesh(nx, nx, nx, L, false);  
+   // Mesh mesh_1 = Mesh::MakeCartesian3D(nx, nx, nx , Element::HEXAHEDRON, L, L, L, false);
+   // if (true) { mesh_1.Transform(PerturbMeshTransform); }
+   // Mesh mesh_2 = Mesh::MakeCartesian3D(nx, nx, nx , Element::HEXAHEDRON, L, L, L, false);
+
+   // In main(), replace mesh creation:
+   Mesh mesh_1 = MakePeriodicMesh(nx, nx, nx, L);
+   if (true) { mesh_1.Transform(PerturbMeshTransform); }
+   Mesh mesh_2 = MakePeriodicMesh(nx, nx, nx, L);  // Also periodic!
+
+
+   const int dim = mesh_1.Dimension();
+   MFEM_ASSERT(dim == mesh_2.Dimension(), "Source and target meshes "
+               "must be in the same dimension.");
+   MFEM_VERIFY(dim > 1, "GSLIB requires a 2D or a 3D mesh" );
+
+   for (int lev = 0; lev < ref_levels; lev++)
    {
-      std::cout << std::string(80, '-') << "\n";
-      std::cout << "RESULTS SUMMARY\n";
-      std::cout << std::string(80, '-') << "\n";
-      
-      std::cout << std::left << std::setw(30) << "Case" 
-                << std::setw(15) << "Success Rate" 
-                << std::setw(15) << "L2 Error"
-                << std::setw(15) << "Rel Error (%)"
-                << std::setw(10) << "Failed Pts" << "\n";
-      std::cout << std::string(80, '-') << "\n";
-      
-      std::cout << std::left << std::setw(30) << "No Perturbation:"
-                << std::setw(15) << (std::to_string(result_no_pert.success_rate) + "%")
-                << std::setw(15) << std::scientific << std::setprecision(2) << result_no_pert.l2_error
-                << std::setw(15) << std::fixed << std::setprecision(4) << (result_no_pert.relative_error * 100.0)
-                << std::setw(10) << result_no_pert.failed_points << "\n";
-                
-      std::cout << std::left << std::setw(30) << "With Perturbation:"
-                << std::setw(15) << (std::to_string(result_with_pert.success_rate) + "%")
-                << std::setw(15) << std::scientific << std::setprecision(2) << result_with_pert.l2_error
-                << std::setw(15) << std::fixed << std::setprecision(4) << (result_with_pert.relative_error * 100.0)
-                << std::setw(10) << result_with_pert.failed_points << "\n";
-      
-      std::cout << std::string(80, '-') << "\n";
-      
-      // Analysis
-      if (result_with_pert.success_rate > 99.0)
+      mesh_2.UniformRefinement();
+   }
+
+   if (mesh_1.GetNodes() == NULL) { mesh_1.SetCurvature(1); }
+   if (mesh_2.GetNodes() == NULL) { mesh_2.SetCurvature(1); }
+   const int mesh_poly_deg =
+      mesh_2.GetNodes()->FESpace()->GetElementOrder(0);
+   cout << "Source mesh curvature: "
+        << mesh_1.GetNodes()->OwnFEC()->Name() << endl
+        << "Target mesh curvature: "
+        << mesh_2.GetNodes()->OwnFEC()->Name() << endl;
+
+   int src_vdim = src_ncomp;
+   FiniteElementCollection *src_fec = NULL;
+   FiniteElementSpace *src_fes = NULL;
+   GridFunction *func_source = NULL;
+   if (src_fieldtype < 0) // use src_sltn_file
+   {
+      ifstream mat_stream_1(src_sltn_file);
+      func_source = new GridFunction(&mesh_1, mat_stream_1);
+      src_vdim = func_source->FESpace()->GetVDim();
+      src_fes = func_source->FESpace();
+   }
+   else if (src_fieldtype == 0)
+   {
+      src_fec = new H1_FECollection(order, dim);
+   }
+   else if (src_fieldtype == 1)
+   {
+      src_fec = new L2_FECollection(order, dim);
+   }
+   else if (src_fieldtype == 2)
+   {
+      src_fec = new RT_FECollection(order, dim);
+      src_ncomp = 1;
+      src_vdim = dim;
+   }
+   else if (src_fieldtype == 3)
+   {
+      src_fec = new ND_FECollection(order, dim);
+      src_ncomp = 1;
+      src_vdim = dim;
+   }
+   else
+   {
+      MFEM_ABORT("Invalid FECollection type.");
+   }
+
+   if (src_fieldtype > -1)
+   {
+      MFEM_VERIFY(src_gf_ordering >= 0 && src_gf_ordering <= 1,
+                  " Source grid function ordering must be 0 (byNodes)"
+                  " or 1 (byVDIM.");
+      src_fes = new FiniteElementSpace(&mesh_1, src_fec, src_ncomp, src_gf_ordering);
+      func_source = new GridFunction(src_fes);
+      // Project the grid function using VectorFunctionCoefficient.
+      VectorFunctionCoefficient F(src_vdim, vector_func);
+      func_source->ProjectCoefficient(F);
+   }
+
+   // Display the starting mesh and the field.
+   if (visualization)
+   {
+      char vishost[] = "localhost";
+      socketstream sout1;
+      sout1.open(vishost, visport);
+      if (!sout1)
       {
-         std::cout << "✓ EXCELLENT: >99% success rate achieved!\n";
-      }
-      else if (result_with_pert.success_rate > 95.0)
-      {
-         std::cout << "✓ GOOD: High success rate achieved.\n";
+         cout << "Unable to connect to GLVis server at "
+              << vishost << ':' << visport << endl;
       }
       else
       {
-         std::cout << "⚠ WARNING: Lower than expected success rate.\n";
+         sout1.precision(8);
+         sout1 << "solution\n" << mesh_1 << *func_source
+               << "window_title 'Source mesh and solution'"
+               << "window_geometry 0 0 600 600";
+         if (dim == 2) { sout1 << "keys RmjAc"; }
+         if (dim == 3) { sout1 << "keys mA\n"; }
+         sout1 << flush;
       }
-      
-      if (result_with_pert.relative_error < 1e-6)
+   }
+
+   const Geometry::Type gt = mesh_2.GetTypicalElementGeometry();
+   MFEM_VERIFY(gt != Geometry::PRISM, "Wedge elements are not currently "
+               "supported.");
+   MFEM_VERIFY(mesh_2.GetNumGeometries(mesh_2.Dimension()) == 1, "Mixed meshes"
+               "are not currently supported.");
+
+   // Ensure the source grid function can be transferred using GSLIB-FindPoints.
+   const FiniteElementCollection *fec_in = func_source->FESpace()->FEColl();
+   std::cout << "Source FE collection: " << fec_in->Name() << std::endl;
+
+   if (src_fieldtype < 0)
+   {
+      const H1_FECollection *fec_h1 = dynamic_cast<const H1_FECollection *>(fec_in);
+      const L2_FECollection *fec_l2 = dynamic_cast<const L2_FECollection *>(fec_in);
+      const RT_FECollection *fec_rt = dynamic_cast<const RT_FECollection *>(fec_in);
+      const ND_FECollection *fec_nd = dynamic_cast<const ND_FECollection *>(fec_in);
+      if (fec_h1)      { src_fieldtype = 0; }
+      else if (fec_l2) { src_fieldtype = 1; }
+      else if (fec_rt) { src_fieldtype = 2; }
+      else if (fec_nd) { src_fieldtype = 3; }
+      else { MFEM_ABORT("GridFunction type not supported yet."); }
+   }
+   if (fieldtype < 0) { fieldtype = src_fieldtype; }
+
+   // Setup the FiniteElementSpace and GridFunction on the target mesh.
+   FiniteElementCollection *tar_fec = NULL;
+   FiniteElementSpace *tar_fes = NULL;
+
+   int tar_vdim = src_vdim;
+   if (fieldtype == 0)
+   {
+      tar_fec = new H1_FECollection(order, dim);
+      tar_vdim = (src_fieldtype > 1) ? dim : src_vdim;
+   }
+   else if (fieldtype == 1)
+   {
+      tar_fec = new L2_FECollection(order, dim);
+      tar_vdim = (src_fieldtype > 1) ? dim : src_vdim;
+   }
+   else if (fieldtype == 2)
+   {
+      tar_fec = new RT_FECollection(order, dim);
+      tar_vdim = 1;
+      MFEM_VERIFY(src_fieldtype > 1, "Cannot interpolate a scalar "
+                  "grid function to a vector");
+
+   }
+   else if (fieldtype == 3)
+   {
+      tar_fec = new ND_FECollection(order, dim);
+      tar_vdim = 1;
+      MFEM_VERIFY(src_fieldtype > 1, "Cannot interpolate a scalar "
+                  "grid function to a vector");
+   }
+   else
+   {
+      MFEM_ABORT("GridFunction type not supported.");
+   }
+   std::cout << "Target FE collection: " << tar_fec->Name() << std::endl;
+   tar_fes = new FiniteElementSpace(&mesh_2, tar_fec, tar_vdim,
+                                    src_fes->GetOrdering());
+   GridFunction func_target(tar_fes);
+
+   const int NE = mesh_2.GetNE(),
+             nsp = tar_fes->GetTypicalFE()->GetNodes().GetNPoints(),
+             tar_ncomp = func_target.VectorDim();
+
+   // Generate list of points where the grid function will be evaluated.
+   Vector vxyz;
+   int point_ordering;
+   if (fieldtype == 0 && order == mesh_poly_deg)
+   {
+      vxyz = *mesh_2.GetNodes();
+      point_ordering = mesh_2.GetNodes()->FESpace()->GetOrdering();
+   }
+   else
+   {
+      vxyz.SetSize(nsp*NE*dim);
+      for (int i = 0; i < NE; i++)
       {
-         std::cout << "✓ EXCELLENT: Very low relative error!\n";
+         const FiniteElement *fe = tar_fes->GetFE(i);
+         const IntegrationRule ir = fe->GetNodes();
+         ElementTransformation *et = tar_fes->GetElementTransformation(i);
+
+         DenseMatrix pos;
+         et->Transform(ir, pos);
+         Vector rowx(vxyz.GetData() + i*nsp, nsp),
+                rowy(vxyz.GetData() + i*nsp + NE*nsp, nsp),
+                rowz;
+         if (dim == 3)
+         {
+            rowz.SetDataAndSize(vxyz.GetData() + i*nsp + 2*NE*nsp, nsp);
+         }
+         pos.GetRow(0, rowx);
+         pos.GetRow(1, rowy);
+         if (dim == 3) { pos.GetRow(2, rowz); }
       }
-      else if (result_with_pert.relative_error < 1e-3)
+      point_ordering = Ordering::byNODES;
+   }
+   const int nodes_cnt = vxyz.Size() / dim;
+
+   // Evaluate source grid function.
+   Vector interp_vals(nodes_cnt*tar_ncomp);
+   FindPointsGSLIB finder;
+   finder.Setup(mesh_1);
+   finder.Interpolate(vxyz, *func_source, interp_vals, point_ordering);
+
+   // Project the interpolated values to the target FiniteElementSpace.
+   if (fieldtype <= 1) // H1 or L2
+   {
+      if ((fieldtype == 0 && order == mesh_poly_deg) || fieldtype == 1)
       {
-         std::cout << "✓ GOOD: Acceptable relative error.\n";
+         func_target = interp_vals;
+      }
+      else // H1 - but mesh order != GridFunction order
+      {
+         Array<int> vdofs;
+         Vector vals;
+         Vector elem_dof_vals(nsp*tar_ncomp);
+
+         for (int i = 0; i < mesh_2.GetNE(); i++)
+         {
+            tar_fes->GetElementVDofs(i, vdofs);
+            vals.SetSize(vdofs.Size());
+            for (int j = 0; j < nsp; j++)
+            {
+               for (int d = 0; d < tar_ncomp; d++)
+               {
+                  // Arrange values byNodes
+                  int idx = src_fes->GetOrdering() == Ordering::byNODES ?
+                            d*nsp*NE + i*nsp + j : i*nsp*dim + d + j*dim;
+                  elem_dof_vals(j + d*nsp) = interp_vals(idx);
+               }
+            }
+            func_target.SetSubVector(vdofs, elem_dof_vals);
+         }
+      }
+   }
+   else // H(div) or H(curl)
+   {
+      Array<int> vdofs;
+      Vector vals;
+      Vector elem_dof_vals(nsp*tar_ncomp);
+
+      for (int i = 0; i < mesh_2.GetNE(); i++)
+      {
+         tar_fes->GetElementVDofs(i, vdofs);
+         vals.SetSize(vdofs.Size());
+         for (int j = 0; j < nsp; j++)
+         {
+            for (int d = 0; d < tar_ncomp; d++)
+            {
+               // Arrange values byVDim
+               int idx = src_fes->GetOrdering() == Ordering::byNODES ?
+                         d*nsp*NE + i*nsp + j : i*nsp*dim + d + j*dim;
+               elem_dof_vals(j*tar_ncomp+d) = interp_vals(idx);
+            }
+         }
+         tar_fes->GetFE(i)->ProjectFromNodes(elem_dof_vals,
+                                             *tar_fes->GetElementTransformation(i),
+                                             vals);
+         func_target.SetSubVector(vdofs, vals);
+      }
+   }
+
+   func_target.SetTrueVector();
+   func_target.SetFromTrueVector();
+   // Visualize the transferred solution.
+   if (visualization)
+   {
+      char vishost[] = "localhost";
+      socketstream sout1;
+      sout1.open(vishost, visport);
+      if (!sout1)
+      {
+         cout << "Unable to connect to GLVis server at "
+              << vishost << ':' << visport << endl;
       }
       else
       {
-         std::cout << "⚠ Note: Significant L2 error. This may be due to:\n";
-         std::cout << "  - Mesh perturbation affecting interpolation accuracy\n";
-         std::cout << "  - Consider reducing perturbation amplitude or increasing mesh resolution\n";
+         sout1.precision(8);
+         sout1 << "solution\n" << mesh_2 << func_target
+               << "window_title 'Target mesh and solution'"
+               << "window_geometry 600 0 600 600";
+         if (dim == 2) { sout1 << "keys RmjAc"; }
+         if (dim == 3) { sout1 << "keys mA\n"; }
+         sout1 << flush;
       }
-      
-      std::cout << "\nTotal points tested: " << result_with_pert.total_points << "\n";
-      
-      if (visit_output)
-      {
-         std::cout << "\nVisIt files created:\n";
-         std::cout << "  Baseline_Baseline/ - Baseline without perturbation\n";
-         std::cout << "  PeriodicProjection_Source/ - Original data on perturbed periodic mesh\n";
-         std::cout << "  PeriodicProjection_Target/ - Interpolated data on clean periodic mesh\n";
-         std::cout << "     - Fields: interpolated_data, exact_data, interpolation_error\n";
-      }
-      
-      std::cout << "\n" << std::string(80, '=') << "\n";
-      std::cout << "KEY IMPROVEMENTS IN THIS VERSION:\n";
-      std::cout << "  • Uses SetFromTrueVector() after projection (syncs periodic boundaries)\n";
-      std::cout << "  • Uses GetTrueDofs() for target coordinates (respects periodicity)\n";
-      std::cout << "  • Uses SetFromTrueDofs() for interpolated result (correct DOF mapping)\n";
-      std::cout << "  • Eliminated unnecessary non-periodic mesh complexity\n";
-      std::cout << "  • Direct periodic-to-periodic interpolation via GSLIB\n";
-      std::cout << std::string(80, '=') << "\n";
    }
+
+   // Output the target mesh with the interpolated solution.
+   ostringstream rho_name;
+   rho_name  << "interpolated.gf";
+   ofstream rho_ofs(rho_name.str().c_str());
+   rho_ofs.precision(8);
+   func_target.Save(rho_ofs);
+   rho_ofs.close();
+
+   // Free the internal gslib data.
+   finder.FreeData();
+
+   // Delete remaining memory.
+   if (func_source->OwnFEC())
+   {
+      delete func_source;
+   }
+   else
+   {
+      delete func_source;
+      delete src_fes;
+      delete src_fec;
+   }
+   delete tar_fes;
+   delete tar_fec;
 
    return 0;
 }
-
-/*
-COMPILATION:
-============
-Make sure MFEM is built with GSLIB support (MFEM_USE_GSLIB=YES)
-
-mpicxx -std=c++17 -I$MFEM_DIR -L$MFEM_DIR -o periodic_test_corrected \
-       periodic_test_corrected.cpp -lmfem -lHYPRE -lmetis
-
-USAGE EXAMPLES:
-===============
-# Serial test with scalar field
-mpirun -np 1 ./periodic_test_corrected -amp 0.05
-
-# Parallel test with vector field
-mpirun -np 4 ./periodic_test_corrected -amp 0.02 -vec
-
-# High-resolution test
-mpirun -np 8 ./periodic_test_corrected -nx 16 -ny 16 -nz 16 -o 3 -vec
-
-# Test without visualization output
-mpirun -np 4 ./periodic_test_corrected -amp 0.05 -no-visit
-
-WHAT TO EXPECT:
-===============
-- Baseline test should have ~0% error (identity mapping)
-- Perturbed test success rate should be >99% (maybe 100%)
-- L2 error should be small (dependent on amplitude and resolution)
-- Lower perturbation amplitude = lower error
-- Higher order and finer mesh = lower error
-*/
