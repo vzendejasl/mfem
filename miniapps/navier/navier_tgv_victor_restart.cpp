@@ -1528,56 +1528,37 @@ int main(int argc, char *argv[])
    }
 
    ctx.num_snapshots += 1;
-   // if (ctx.time_based_output)
-   // {
-   //    ctx.snapshot_interval = ctx.t_final / (ctx.num_snapshots - 1);
-   //    ctx.snapshot_times.resize(ctx.num_snapshots);
-   //    ctx.snapshot_written.resize(ctx.num_snapshots, false);
-
-   //    for (int i = 0; i < ctx.num_snapshots; i++)
-   //    {
-   //       ctx.snapshot_times[i] = i * ctx.snapshot_interval;
-   //    }
-
-   //    if (Mpi::Root())
-   //    {
-   //       std::cout << "Time-based output enabled:" << std::endl;
-   //       std::cout << "  Number of snapshots: " << ctx.num_snapshots << std::endl;
-   //       std::cout << "  Time interval: " << ctx.snapshot_interval << std::endl;
-   //       std::cout << "  Target times: ";
-   //       for (auto t : ctx.snapshot_times) std::cout << t << " ";
-   //       std::cout << std::endl;
-   //    }
-   // }
-
    if (ctx.time_based_output)
    {
-      ctx.snapshot_times.clear();
-      ctx.snapshot_written.clear();
+      ctx.snapshot_interval = ctx.t_final / (ctx.num_snapshots - 1);
+      ctx.snapshot_times.resize(ctx.num_snapshots);
+      ctx.snapshot_written.resize(ctx.num_snapshots, false);
 
-      // evenly spaced times from t_start to t_final (inclusive)
-      const real_t t_start = 0.0; // or your start time variable
-      if (ctx.num_snapshots <= 1)
+      for (int i = 0; i < ctx.num_snapshots; i++)
       {
-         ctx.snapshot_times.push_back(ctx.t_final);
-      }
-      else
-      {
-         ctx.snapshot_interval = (ctx.t_final - t_start) / (real_t)(ctx.num_snapshots - 1);
-         ctx.snapshot_times.resize(ctx.num_snapshots);
-         for (int i = 0; i < ctx.num_snapshots; ++i)
-         {
-            ctx.snapshot_times[i] = t_start + i * ctx.snapshot_interval;
-         }
-         // make sure the last one is exactly t_final
-         ctx.snapshot_times.back() = ctx.t_final;
+         ctx.snapshot_times[i] = i * ctx.snapshot_interval;
       }
 
-      ctx.snapshot_written.assign((size_t)ctx.snapshot_times.size(), false);
+      if (Mpi::Root())
+      {
+         std::cout << "Time-based output enabled:" << std::endl;
+         std::cout << "  Number of snapshots: " << ctx.num_snapshots << std::endl;
+         std::cout << "  Time interval: " << ctx.snapshot_interval << std::endl;
+         std::cout << "  Target times: ";
+         for (auto t : ctx.snapshot_times) std::cout << t << " ";
+         std::cout << std::endl;
+      }
    }
 
-
-
+   if (ctx.time_based_output && ctx.snapshot_times.empty()) 
+   {
+       ctx.snapshot_interval = ctx.t_final / (ctx.num_snapshots - 1);
+       ctx.snapshot_times.resize(ctx.num_snapshots);
+       for (int i = 0; i < ctx.num_snapshots; i++) 
+       {
+           ctx.snapshot_times[i] = i * ctx.snapshot_interval;
+       }
+   }
 
    // This is only for setting up the initial velocity to compare with 
    // compressible codes!!
@@ -1636,14 +1617,38 @@ int main(int argc, char *argv[])
       {
          if (Mpi::Root())
          {
-            std::cout << "Restart files found. Continuing from checkpoint at time t = " << t << std::endl;
+            std::cout << "Restart files found. Continuing from checkpoint at time t = " 
+                      << t << ", step = " << step << std::endl;
          }
-         // Store the initial step number at restart
-         global_cycle = step;
 
-         // Reset step from restart for flow solver
+         // Store the initial step number at restart
+         global_cycle = step + 1; // Acount for the cycle shift when restarting
+
+         // Reset step counter for the new run segment
          step = 0;
 
+         // Fix for time-based output: find the correct starting snapshot index
+         if (ctx.time_based_output)
+         {
+             ctx.snapshot_index = 0;
+             // Find the first snapshot time that's GREATER than current time
+             // (we've already passed any that are <= current time)
+             while (ctx.snapshot_index < ctx.num_snapshots && 
+                    t >= ctx.snapshot_times[ctx.snapshot_index] - ctx.dt * 0.01)
+             {
+                 ctx.snapshot_index++;
+             }
+
+             if (Mpi::Root())
+             {
+                 std::cout << "Restart: starting snapshot index = " << ctx.snapshot_index;
+                 if (ctx.snapshot_index < ctx.num_snapshots)
+                 {
+                     std::cout << " (next target time = " << ctx.snapshot_times[ctx.snapshot_index] << ")";
+                 }
+                 std::cout << std::endl;
+             }
+         }
       }
       else
       {
@@ -1651,8 +1656,12 @@ int main(int argc, char *argv[])
          {
             std::cout << "Restart files not found. Starting from initial conditions." << std::endl;
          }
+         global_cycle = 0;
       }
-
+   }
+   else
+   {
+      global_cycle = 0;
    }
 
    if (!ctx.restart || !restart_files_found)
@@ -2205,33 +2214,22 @@ int main(int argc, char *argv[])
       fflush(stdout);
    }
 
-
    if (ctx.restart && restart_files_found && ctx.time_based_output)
    {
-      // Helper: map a target time to its planned absolute step from t=0
-      auto planned_step = [&](real_t tk)
+      const real_t tol = 0.49 * ctx.dt;  // “within ~1 dt” trigger window
+      ctx.snapshot_index = 0;
+      while (ctx.snapshot_index < ctx.num_snapshots &&
+             t >= ctx.snapshot_times[ctx.snapshot_index] - tol)
       {
-         return (int)std::floor((tk + 0.5*ctx.dt) / ctx.dt);
-      };
-
-      const int cur_abs = global_cycle + step; // your real step number
-      ctx.snapshot_index = ctx.num_snapshots;  // default: nothing left
-
-      for (int i = 0; i < ctx.num_snapshots; ++i)
-      {
-         const int s_i = planned_step(ctx.snapshot_times[i]);
-         if (cur_abs < s_i) { ctx.snapshot_index = i; break; }
+         ctx.snapshot_index++;
       }
-
       if (Mpi::Root())
       {
-         std::cout << "Restart with time-based output: next snapshot index = "
-                   << ctx.snapshot_index;
-         if (ctx.snapshot_index < ctx.num_snapshots)
-         {
-            std::cout << " (at t = " << ctx.snapshot_times[ctx.snapshot_index] << ")";
-         }
-         std::cout << std::endl;
+         std::cout << "Restart: next snapshot_index=" << ctx.snapshot_index
+                   << (ctx.snapshot_index < ctx.num_snapshots
+                       ? (" at t≈" + std::to_string(ctx.snapshot_times[ctx.snapshot_index]))
+                       : " (none left)")
+                   << std::endl;
       }
    }
 
@@ -2261,15 +2259,19 @@ int main(int argc, char *argv[])
    //    }
    // }
 
+
+
    real_t dt = ctx.dt;
    real_t t_final = ctx.t_final;
    bool last_step = false;
 
    for (; !last_step; ++step)
    {
+      bool should_dump_data = false;
       if (t + dt >= t_final - dt / 2)
       {
          last_step = true;
+         should_dump_data=true;
       }
 
       // Adjust alpha for restart
@@ -2297,32 +2299,25 @@ int main(int argc, char *argv[])
 
       cfl = flowsolver->ComputeCFL(*u_gf, ctx.dt);
 
-      
-      bool should_dump_data = false;
-
-      if(ctx.time_based_output)
+      if (ctx.time_based_output)
       {
-         if(ctx.snapshot_index < ctx.num_snapshots)
+         // Check if we should output based on current time and snapshot schedule
+         if (ctx.snapshot_index < ctx.num_snapshots)
          {
-            real_t target_time = ctx.snapshot_times[ctx.snapshot_index];
-
-            // AFTER (compute planned step and compare to real step number)
-            int planned_step = (int)std::floor(target_time / ctx.dt + (real_t)0.5);
-            if ((global_cycle + step) >= planned_step)
+            // Check if current time is within a small tolerance of the target snapshot time
+            if (t >= ctx.snapshot_times[ctx.snapshot_index] - ctx.dt * 0.01)
             {
                should_dump_data = true;
-
                if (Mpi::Root())
                {
-                  std::cout << "Output snapshot " << ctx.snapshot_index
-                            << "at t = " << t 
-                            << "(target was " << target_time << ")"
+                  std::cout << "Time-based output triggered at t = " << t 
+                            << ", target time = " << ctx.snapshot_times[ctx.snapshot_index] 
                             << std::endl;
                }
             }
          }
-
-         if(last_step)
+         // Also output on last step
+         if (last_step && !should_dump_data)
          {
             should_dump_data = true;
          }
@@ -2332,7 +2327,9 @@ int main(int argc, char *argv[])
          should_dump_data = ((global_cycle + step) % ctx.data_dump_cycle == 0) || last_step;
       }
 
-      if (should_dump_data)
+      // Skip output on the very first step after restart to avoid duplicates
+      bool is_first_step_after_restart = (ctx.restart && restart_files_found && step == 0);
+      if (should_dump_data && !is_first_step_after_restart)
       {
          // If restarting, skip the first saved checkpoint
          if (!(ctx.restart && step == 0 && restart_files_found))
@@ -2341,9 +2338,12 @@ int main(int argc, char *argv[])
             ComputeLambda2Nodal(*u_gf, lambda2_gf);
             flowsolver->ComputeCurl3D(*u_gf, w_gf);
 
+            // For all output types, use this consistent output_cycle calculation:
+            int output_cycle = global_cycle + step;
+
             if (ctx.paraview)
             {
-               pvdc->SetCycle(global_cycle + step);
+               pvdc->SetCycle(output_cycle);
                pvdc->SetTime(t);
                pvdc->Save();
                if (Mpi::Root())
@@ -2354,7 +2354,7 @@ int main(int argc, char *argv[])
 
             if (ctx.visit)
             {
-               dc->SetCycle(global_cycle + step);
+               dc->SetCycle(output_cycle);
                dc->SetTime(t);
                dc->Save();
 
@@ -2381,7 +2381,7 @@ int main(int argc, char *argv[])
 
             if (ctx.conduit)
             {
-               cdc->SetCycle(global_cycle + step);
+               cdc->SetCycle(output_cycle);
                cdc->SetTime(t);
                cdc->Save();
 
@@ -2407,7 +2407,12 @@ int main(int argc, char *argv[])
                }
 
             }
-            if(ctx.time_based_output){ctx.snapshot_index++;}
+                
+            if (ctx.time_based_output && ctx.snapshot_index < ctx.num_snapshots)
+            {
+               ctx.snapshot_written[ctx.snapshot_index] = true;
+               ctx.snapshot_index++;
+            }
          }
       }
 
