@@ -67,8 +67,6 @@ struct s_NavierContext
    real_t snapshot_interval = 0.0;  
    int snapshot_index = 0;          // Which snapshot we're looking for next
    std::vector<real_t> snapshot_times; // Pre-computed target times
-   std::vector<bool> snapshot_written; // Track which snapshots have been written
-   
 
 } ctx;
 
@@ -1532,7 +1530,6 @@ int main(int argc, char *argv[])
    {
       ctx.snapshot_interval = ctx.t_final / (ctx.num_snapshots - 1);
       ctx.snapshot_times.resize(ctx.num_snapshots);
-      ctx.snapshot_written.resize(ctx.num_snapshots, false);
 
       for (int i = 0; i < ctx.num_snapshots; i++)
       {
@@ -1627,7 +1624,6 @@ int main(int argc, char *argv[])
          // Reset step counter for the new run segment
          step = 0;
 
-         // Fix for time-based output: find the correct starting snapshot index
          if (ctx.time_based_output)
          {
              ctx.snapshot_index = 0;
@@ -2214,53 +2210,6 @@ int main(int argc, char *argv[])
       fflush(stdout);
    }
 
-   if (ctx.restart && restart_files_found && ctx.time_based_output)
-   {
-      const real_t tol = 0.49 * ctx.dt;  // “within ~1 dt” trigger window
-      ctx.snapshot_index = 0;
-      while (ctx.snapshot_index < ctx.num_snapshots &&
-             t >= ctx.snapshot_times[ctx.snapshot_index] - tol)
-      {
-         ctx.snapshot_index++;
-      }
-      if (Mpi::Root())
-      {
-         std::cout << "Restart: next snapshot_index=" << ctx.snapshot_index
-                   << (ctx.snapshot_index < ctx.num_snapshots
-                       ? (" at t≈" + std::to_string(ctx.snapshot_times[ctx.snapshot_index]))
-                       : " (none left)")
-                   << std::endl;
-      }
-   }
-
-
-   // if (ctx.restart && restart_files_found && ctx.time_based_output)
-   // {
-   //    // Find which snapshot to output next based on restart time
-   //    ctx.snapshot_index = 0;
-   //    for (int i = 0; i < ctx.num_snapshots; i++)
-   //    {
-   //       if (t < ctx.snapshot_times[i] - ctx.dt/2.0)
-   //       {
-   //          ctx.snapshot_index = i;
-   //          break;
-   //       }
-   //    }
-
-   //    if (Mpi::Root())
-   //    {
-   //       std::cout << "Restart with time-based output: next snapshot index = " 
-   //                 << ctx.snapshot_index;
-   //       if (ctx.snapshot_index < ctx.num_snapshots)
-   //       {
-   //          std::cout << " (at t = " << ctx.snapshot_times[ctx.snapshot_index] << ")";
-   //       }
-   //       std::cout << std::endl;
-   //    }
-   // }
-
-
-
    real_t dt = ctx.dt;
    real_t t_final = ctx.t_final;
    bool last_step = false;
@@ -2328,8 +2277,7 @@ int main(int argc, char *argv[])
       }
 
       // Skip output on the very first step after restart to avoid duplicates
-      bool is_first_step_after_restart = (ctx.restart && restart_files_found && step == 0);
-      if (should_dump_data && !is_first_step_after_restart)
+      if (should_dump_data)
       {
          // If restarting, skip the first saved checkpoint
          if (!(ctx.restart && step == 0 && restart_files_found))
@@ -2410,7 +2358,6 @@ int main(int argc, char *argv[])
                 
             if (ctx.time_based_output && ctx.snapshot_index < ctx.num_snapshots)
             {
-               ctx.snapshot_written[ctx.snapshot_index] = true;
                ctx.snapshot_index++;
             }
          }
