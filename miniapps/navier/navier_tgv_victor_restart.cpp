@@ -59,6 +59,16 @@ struct s_NavierContext
    real_t alpha = 0.3;
    real_t delta_const = 1e-8;
    bool problem1 = true;
+   double u0 = 1.0;
+
+   // Add these for time-based output
+   bool time_based_output = false;  
+   int num_snapshots = 25;          
+   real_t snapshot_interval = 0.0;  
+   int snapshot_index = 0;          // Which snapshot we're looking for next
+   std::vector<real_t> snapshot_times; // Pre-computed target times
+   std::vector<bool> snapshot_written; // Track which snapshots have been written
+   
 
 } ctx;
 
@@ -93,8 +103,8 @@ void vel_tgv(const Vector &x, real_t t, Vector &u)
      zi = 2*M_PI*x(2);
    }
 
-   u(0) = sin(xi) * cos(yi) * cos(zi);
-   u(1) = -cos(xi) * sin(yi) * cos(zi);
+   u(0) =  ctx.u0*sin(xi) * cos(yi) * cos(zi);
+   u(1) = -ctx.u0*cos(xi) * sin(yi) * cos(zi);
    u(2) = 0.0;
 }
 
@@ -319,6 +329,7 @@ public:
    };
    */
 
+   /*
   real_t ComputeEnstrophy(ParGridFunction &w)
   {
       Vector wx, wy, wz;
@@ -379,7 +390,79 @@ public:
                     MPI_COMM_WORLD);
   
       return 0.5 * global_integral / volume;
-  }
+  }*/
+
+
+  real_t ComputeEnstrophy(ParGridFunction &u)
+  {
+
+   const ParFiniteElementSpace *pfes = u.ParFESpace();
+
+   double local_half_w2_int = 0.0; 
+   double local_vol        = 0.0;  
+
+   Array<int> vdofs;
+   Vector loc_data;                 
+   DenseMatrix dshape;              
+   DenseMatrix grad_hat;            
+   DenseMatrix grad;                
+
+   const int ne = pfes->GetNE();
+   for (int e = 0; e < ne; ++e)
+   {
+      pfes->GetElementVDofs(e, vdofs);
+      u.GetSubVector(vdofs, loc_data);
+
+      ElementTransformation *T = pfes->GetElementTransformation(e);
+      const FiniteElement   *el = pfes->GetFE(e);
+
+      const int elndofs = el->GetDof();
+      const int vdim    = pfes->GetVDim();
+      const int dim     = 3;
+
+      const int ir_order = 2*el->GetOrder() + 2;
+      const IntegrationRule &ir = IntRules.Get(el->GetGeomType(), ir_order);
+
+      dshape.SetSize(elndofs, dim);
+      DenseMatrix loc_data_mat(loc_data.GetData(), elndofs, vdim);
+
+      for (int i = 0; i < ir.GetNPoints(); ++i)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(i);
+         T->SetIntPoint(&ip);
+
+         el->CalcDShape(ip, dshape);
+
+         grad_hat.SetSize(vdim, dim);
+         MultAtB(loc_data_mat, dshape, grad_hat);
+
+         const DenseMatrix &Jinv = T->InverseJacobian();
+
+         grad.SetSize(vdim, dim);
+         Mult(grad_hat, Jinv, grad); 
+
+         const double wx = grad(2,1) - grad(1,2);
+         const double wy = grad(0,2) - grad(2,0);
+         const double wz = grad(1,0) - grad(0,1);
+         const double w2 = wx*wx + wy*wy + wz*wz;
+
+         const double dV = ip.weight * T->Weight();
+
+         local_half_w2_int += 0.5 * w2 * dV;
+         local_vol         += dV;        
+      }
+   }
+
+   double global_half_w2_int = 0.0;
+   double global_vol         = 0.0;
+   MPI_Comm comm = pfes->GetComm();
+   MPI_Allreduce(&local_half_w2_int, &global_half_w2_int, 1, MPI_DOUBLE, MPI_SUM, comm);
+   MPI_Allreduce(&local_vol,         &global_vol,         1, MPI_DOUBLE, MPI_SUM, comm);
+
+   return global_half_w2_int / global_vol;
+
+   }
+
 
   void ComputeGridPtsRequirementsTurb(ParGridFunction &u, real_t Kolmogorov_length, real_t *hmin_eta , real_t *kmax_eta, real_t *kmax_return, real_t *hmin_return)
   {
@@ -1398,7 +1481,7 @@ int main(int argc, char *argv[])
       "-no-cr",
       "--no-checkresult",
       "Enable or disable checking of the result. Returns -1 on failure.");
-   args.AddOption(&ctx.reynum, "-Re", "--Renolds-number", "Reynolds Number.");
+   args.AddOption(&ctx.reynum, "-Re", "--Reynolds-number", "Reynolds Number.");
    args.AddOption(&ctx.element_center_cycle, "-ecc", "--Element-Center-Cycle", "Element Center Cycle.");
    args.AddOption(&ctx.data_dump_cycle, "-ddc", "--Data-Dump-Cycle", "Data Dump Cycle.");
    args.AddOption(
@@ -1420,6 +1503,16 @@ int main(int argc, char *argv[])
    args.AddOption(&ctx.problem1, "-problem1", "--Problem-1", "-no-problem1",
                   "--no-Problem-1",
                   "Domain length will be 2pi, otherwise 1.0");
+   args.AddOption(&ctx.time_based_output,
+                  "-time-out",
+                  "--time-based-output", 
+                  "-no-time-out",
+                  "--no-time-based-output",
+                  "Enable time-based output instead of cycle-based.");
+   args.AddOption(&ctx.num_snapshots,
+                  "-nsnap",
+                  "--num-snapshots",
+                  "Number of evenly-spaced snapshots to output.");   
    args.Parse();
    if (!args.Good())
    {
@@ -1434,19 +1527,89 @@ int main(int argc, char *argv[])
       args.PrintOptions(mfem::out);
    }
 
+   ctx.num_snapshots += 1;
+   // if (ctx.time_based_output)
+   // {
+   //    ctx.snapshot_interval = ctx.t_final / (ctx.num_snapshots - 1);
+   //    ctx.snapshot_times.resize(ctx.num_snapshots);
+   //    ctx.snapshot_written.resize(ctx.num_snapshots, false);
+
+   //    for (int i = 0; i < ctx.num_snapshots; i++)
+   //    {
+   //       ctx.snapshot_times[i] = i * ctx.snapshot_interval;
+   //    }
+
+   //    if (Mpi::Root())
+   //    {
+   //       std::cout << "Time-based output enabled:" << std::endl;
+   //       std::cout << "  Number of snapshots: " << ctx.num_snapshots << std::endl;
+   //       std::cout << "  Time interval: " << ctx.snapshot_interval << std::endl;
+   //       std::cout << "  Target times: ";
+   //       for (auto t : ctx.snapshot_times) std::cout << t << " ";
+   //       std::cout << std::endl;
+   //    }
+   // }
+
+   if (ctx.time_based_output)
+   {
+      ctx.snapshot_times.clear();
+      ctx.snapshot_written.clear();
+
+      // evenly spaced times from t_start to t_final (inclusive)
+      const real_t t_start = 0.0; // or your start time variable
+      if (ctx.num_snapshots <= 1)
+      {
+         ctx.snapshot_times.push_back(ctx.t_final);
+      }
+      else
+      {
+         ctx.snapshot_interval = (ctx.t_final - t_start) / (real_t)(ctx.num_snapshots - 1);
+         ctx.snapshot_times.resize(ctx.num_snapshots);
+         for (int i = 0; i < ctx.num_snapshots; ++i)
+         {
+            ctx.snapshot_times[i] = t_start + i * ctx.snapshot_interval;
+         }
+         // make sure the last one is exactly t_final
+         ctx.snapshot_times.back() = ctx.t_final;
+      }
+
+      ctx.snapshot_written.assign((size_t)ctx.snapshot_times.size(), false);
+   }
+
+
+
+
+   // This is only for setting up the initial velocity to compare with 
+   // compressible codes!!
+   // Can adjust this for different Mach number comparisions
+   // Specify manually on purpose
+   double Mach0 = 0.1;
+   double gamma = 5.0/3.0;
+   double p0    = 1.0;
+   double rho0  = 1.0;
+   ctx.u0 = 2.0*Mach0*sqrt(gamma*p0/rho0);
+
    // K0 = 1.0/L0
    double L0 = (ctx.problem1) ? 1.0 : 1.0/(2.0*M_PI);
-   double dt_scale = (ctx.problem1) ? 1.0 : 1.0/L0;
+
+   // t*=u0/L*t
+   double t_star_final = (ctx.problem1) ? 1.0 : L0/ctx.u0*ctx.t_final;
+
+   // t = u0/L*t* (we are solving the for rescaled time based on velocity)
+   double dt_scale = (ctx.problem1) ? 1.0 : ctx.u0/L0;
 
    // Update kinematic viscosity
-   ctx.kinvis = L0 / (ctx.reynum);
+   ctx.kinvis = ctx.u0 * L0 / (ctx.reynum);
+
+   // Update the time scales accordingly
    ctx.dt /=dt_scale;
-   ctx.t_final /=dt_scale;
+   ctx.t_final = t_star_final*dt_scale;
 
    if (Mpi::Root())
    {
-      double Re_eff = L0 / (ctx.kinvis);
+      double Re_eff = ctx.u0*L0 / (ctx.kinvis);
       std::cout << "Configured L0 =" << L0 
+                << ", u0 = " << ctx.u0
                 << ", nu=" << ctx.kinvis
                 << ", dt=" << ctx.dt
                 << ", t_final=" << ctx.t_final
@@ -1872,7 +2035,7 @@ int main(int argc, char *argv[])
 
    // real_t ke = kin_energy.ComputeKineticEnergy(*u_gf);
    real_t vel_curl_ke = kin_energy.ComputeInertialRangeEnergy(*u_gf);
-   real_t enstrophy = kin_energy.ComputeEnstrophy(w_gf);
+   real_t enstrophy = kin_energy.ComputeEnstrophy(*u_gf);
 
    real_t kolmLenScl = 0.0;
    real_t avg_kolmLenScl = 0.0;
@@ -1993,11 +2156,11 @@ int main(int argc, char *argv[])
           fprintf(f, "order = %d\n", ctx.order);
           fprintf(f, "grid = %d x %d x %d\n", nel1d, nel1d, nel1d);
           fprintf(f, "dofs per component = %d\n", ngridpts);
-          fprintf(f, "=========================================================================================\n");
-          fprintf(f, "        time                      cycle                 kinetic energy               enstrophy\n");
+          fprintf(f, "==============================================================================================================================\n");
+          fprintf(f, "        time                      cycle                 kinetic energy               enstrophy               cfl\n");
 
           // Write the initial data point
-           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e\n", t, static_cast<real_t>(global_cycle + step), ke, enstrophy);
+           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e      %20.16e\n", t, static_cast<real_t>(global_cycle + step), ke, enstrophy, cfl);
 
           // Write header only if not restarting
           fprintf(f_turb, "3D Taylor Green Vortex (turbulence metrics)\n");
@@ -2042,6 +2205,62 @@ int main(int argc, char *argv[])
       fflush(stdout);
    }
 
+
+   if (ctx.restart && restart_files_found && ctx.time_based_output)
+   {
+      // Helper: map a target time to its planned absolute step from t=0
+      auto planned_step = [&](real_t tk)
+      {
+         return (int)std::floor((tk + 0.5*ctx.dt) / ctx.dt);
+      };
+
+      const int cur_abs = global_cycle + step; // your real step number
+      ctx.snapshot_index = ctx.num_snapshots;  // default: nothing left
+
+      for (int i = 0; i < ctx.num_snapshots; ++i)
+      {
+         const int s_i = planned_step(ctx.snapshot_times[i]);
+         if (cur_abs < s_i) { ctx.snapshot_index = i; break; }
+      }
+
+      if (Mpi::Root())
+      {
+         std::cout << "Restart with time-based output: next snapshot index = "
+                   << ctx.snapshot_index;
+         if (ctx.snapshot_index < ctx.num_snapshots)
+         {
+            std::cout << " (at t = " << ctx.snapshot_times[ctx.snapshot_index] << ")";
+         }
+         std::cout << std::endl;
+      }
+   }
+
+
+   // if (ctx.restart && restart_files_found && ctx.time_based_output)
+   // {
+   //    // Find which snapshot to output next based on restart time
+   //    ctx.snapshot_index = 0;
+   //    for (int i = 0; i < ctx.num_snapshots; i++)
+   //    {
+   //       if (t < ctx.snapshot_times[i] - ctx.dt/2.0)
+   //       {
+   //          ctx.snapshot_index = i;
+   //          break;
+   //       }
+   //    }
+
+   //    if (Mpi::Root())
+   //    {
+   //       std::cout << "Restart with time-based output: next snapshot index = " 
+   //                 << ctx.snapshot_index;
+   //       if (ctx.snapshot_index < ctx.num_snapshots)
+   //       {
+   //          std::cout << " (at t = " << ctx.snapshot_times[ctx.snapshot_index] << ")";
+   //       }
+   //       std::cout << std::endl;
+   //    }
+   // }
+
    real_t dt = ctx.dt;
    real_t t_final = ctx.t_final;
    bool last_step = false;
@@ -2055,7 +2274,7 @@ int main(int argc, char *argv[])
 
       // Adjust alpha for restart
       real_t effective_alpha = ctx.alpha;  // Default to the original alpha
-      if (ctx.restart && restart_files_found && step <= 500)  // Ramp over first 10 steps
+      if (ctx.filter && ctx.restart && restart_files_found && step <= 500)  // Ramp over first 10 steps
       {
    
          // Gradual ramp up
@@ -2078,7 +2297,42 @@ int main(int argc, char *argv[])
 
       cfl = flowsolver->ComputeCFL(*u_gf, ctx.dt);
 
-      if ((global_cycle + step) % ctx.data_dump_cycle == 0 || last_step)
+      
+      bool should_dump_data = false;
+
+      if(ctx.time_based_output)
+      {
+         if(ctx.snapshot_index < ctx.num_snapshots)
+         {
+            real_t target_time = ctx.snapshot_times[ctx.snapshot_index];
+
+            // AFTER (compute planned step and compare to real step number)
+            int planned_step = (int)std::floor(target_time / ctx.dt + (real_t)0.5);
+            if ((global_cycle + step) >= planned_step)
+            {
+               should_dump_data = true;
+
+               if (Mpi::Root())
+               {
+                  std::cout << "Output snapshot " << ctx.snapshot_index
+                            << "at t = " << t 
+                            << "(target was " << target_time << ")"
+                            << std::endl;
+               }
+            }
+         }
+
+         if(last_step)
+         {
+            should_dump_data = true;
+         }
+      }
+      else
+      {
+         should_dump_data = ((global_cycle + step) % ctx.data_dump_cycle == 0) || last_step;
+      }
+
+      if (should_dump_data)
       {
          // If restarting, skip the first saved checkpoint
          if (!(ctx.restart && step == 0 && restart_files_found))
@@ -2086,51 +2340,6 @@ int main(int argc, char *argv[])
             ComputeQCriterion(*u_gf, q_gf);
             ComputeLambda2Nodal(*u_gf, lambda2_gf);
             flowsolver->ComputeCurl3D(*u_gf, w_gf);
-
-            /*
-            // Vector decomposition
-            solve_vector_potential(ops, *u_gf, curl_Ah_h1, pmesh, ctx.pa);
-            ops.projectorH1ToL2.Apply(curl_Ah_l2, curl_Ah_h1);
-
-            solve_scalar_potential(ops, *u_gf, grad_phi_h1, pmesh, ctx.pa);
-
-            ops.projectorH1ToL2.Apply(grad_phi_l2, grad_phi_h1);
-
-            ops.projectorH1ToL2.Apply(u_l2, *u_gf);
-
-            vel_error = grad_phi_l2;
-            vel_error += curl_Ah_l2;
-            vel_error -= u_l2;
-
-            // Subtract grad phi from u -- do we get a better curl Ah field?
-            curl_Ah_l2 = u_l2;
-            curl_Ah_l2 -= grad_phi_l2;
-
-            ops.projectorL2ToH1.Apply(curl_Ah_h1_from_grad_phi, curl_Ah_l2);
-
-            // 15. Compute and print the L^2 norm of the error.
-            {
-
-               ConstantCoefficient zero(0.0);
-
-               Vector zero_v(dim);
-               zero_v = 0.0;
-               VectorConstantCoefficient zero_vec(zero_v);
-
-               // double curl_grad_phi_computed_error_project = curl_grad_phi_hdiv.ComputeL2Error(zero_vec);
-               // double div_curl_A_error_l2 = div_curl_Ah_l2.ComputeL2Error(zero);
-               double total_vel_error = vel_error.ComputeL2Error(zero);
-   
-
-               if (myid == 0)
-               {
-                  // cout << "curl(grad phi) project L2 error (should be ~0): " << curl_grad_phi_computed_error_project << endl;
-                  std::cout << "vel error from reconstruction: " << total_vel_error << std::endl;
-               }
-            }
-            */
-
-
 
             if (ctx.paraview)
             {
@@ -2196,28 +2405,37 @@ int main(int argc, char *argv[])
                    std::cout << "After loading from checkpoint in LoadCheckpoint: u_gf Norml2 = "
                              << u_inf << ", p_gf Norml2 = " << p_inf << std::endl;
                }
+
             }
+            if(ctx.time_based_output){ctx.snapshot_index++;}
          }
       }
 
-      if ((global_cycle + step) % ctx.element_center_cycle == 0 || last_step)
+
+      bool should_dump_element_centers = false;
+      if (ctx.time_based_output)
+      {
+         should_dump_element_centers = should_dump_data;
+      }
+      else
+      {
+         should_dump_element_centers = ((global_cycle + step) % ctx.element_center_cycle == 0) || last_step;
+      }
+   
+      if (should_dump_element_centers)
       {
          // If restarting, skip the first saved checkpoint
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
-            SamplePoints( u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
+            SamplePoints(u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
             SamplePointsAtDoFs(u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
-            // SamplePointsAdios( u_gf, pmesh, global_cycle + step, t, "Velocity",ctx.oversample, &ctx);
-            // ComputeElementCenterValues(&w_gf, pmesh, global_cycle + step, t, "Vorticity");
-
             if (Mpi::Root())
             {
                std::cout << "\nOutput element center file saved at cycle " << global_cycle + step << "." << std::endl;
             }
-
          }
       }
-            
+
       u_inf_loc = u_gf->Normlinf();
       p_inf_loc = p_gf->Normlinf();
 
@@ -2229,7 +2447,7 @@ int main(int argc, char *argv[])
       ke = kin_energy.ComputeKineticEnergy(*u_gf, ke_gf);
       // ke = kin_energy.ComputeKineticEnergy(*u_gf);
       vel_curl_ke = kin_energy.ComputeInertialRangeEnergy(*u_gf);
-      enstrophy = kin_energy.ComputeEnstrophy(w_gf);
+      enstrophy = kin_energy.ComputeEnstrophy(*u_gf);
 
       ComputeDissipation(*u_gf, d_gf);
       avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
@@ -2260,7 +2478,7 @@ int main(int argc, char *argv[])
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
            printf("%.5E %.5E %.5E %.5E %.5E %.5E %.5E\n", t, ctx.dt, u_inf, p_inf, ke, enstrophy, cfl);
-           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e\n", t, static_cast<real_t>(step + global_cycle), ke, enstrophy);
+           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e      %20.16e\n", t, static_cast<real_t>(step + global_cycle), ke, enstrophy, cfl);
            fprintf(f_turb, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
                        t, static_cast<real_t>(global_cycle + step), max_diss, avg_diss, kolmLenScl, 
                        avg_lambda, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
