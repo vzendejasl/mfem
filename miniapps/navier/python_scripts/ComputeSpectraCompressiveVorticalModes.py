@@ -477,26 +477,38 @@ def plot_velocity_slice(x_coords, y_coords, z_coords, vx, vy, vz,
 # ------------------------------------------------------------------ #
 def save_spectra(k_centers, E_total, E_comp, E_rot, filename, step_number, time_value,
                  nx, ny, nz, total_ke, comp_ke, rot_ke):
-    """Save all spectra to a single file"""
+    """Save all spectra to a single file, including compensated spectra"""
+    import numpy as np
+
     E_sum = E_comp + E_rot
-    
+    k_power = np.power(k_centers, 5.0/3.0)
+
+    # Compensated spectra
+    E_total_compensated = E_total * k_power
+    E_comp_compensated  = E_comp  * k_power
+    E_rot_compensated   = E_rot   * k_power
+    E_sum_compensated   = E_sum   * k_power
+
     output_filename = os.path.join(os.path.dirname(filename), 
-                                   f'energy_spectrum_library_match_step_{step_number}.txt')
+                                   f'energy_spectrum_step_{step_number}.txt')
     
     with open(output_filename, 'w') as f:
         f.write(f"# Energy Spectra for Step {step_number}, Time {time_value:.6e}\n")
         f.write(f"# Domain: [0,1]³, Grid: {nx}x{ny}x{nz}\n")
         f.write(f"# Total KE: {total_ke:.6f}, Compressive KE: {comp_ke:.6f}, Rotational KE: {rot_ke:.6f}\n")
-        f.write(f"# FIXED: Integer wavenumber binning to match library approach\n")
-        f.write("# Columns: wavenumber, E_total, E_compressive, E_rotational, E_sum\n")
-        f.write("# wavenumber,E_total,E_compressive,E_rotational,E_sum\n")
+        f.write("# Columns: wavenumber, E_total, E_compressive, E_rotational, E_sum, "
+                "E_total*k^(5/3), E_compressive*k^(5/3), E_rotational*k^(5/3), E_sum*k^(5/3)\n")
+        f.write("# wavenumber,E_total,E_compressive,E_rotational,E_sum,"
+                "E_total_compensated,E_compressive_compensated,E_rotational_compensated,E_sum_compensated\n")
         
-        for k, e_tot, e_comp, e_rot, e_sum in zip(k_centers, E_total, E_comp, E_rot, E_sum):
-            f.write(f"{k:.6e},{e_tot:.6e},{e_comp:.6e},{e_rot:.6e},{e_sum:.6e}\n")
+        for k, e_tot, e_comp, e_rot, e_sum, e_tot_c, e_comp_c, e_rot_c, e_sum_c in zip(
+                k_centers, E_total, E_comp, E_rot, E_sum,
+                E_total_compensated, E_comp_compensated, E_rot_compensated, E_sum_compensated):
+            f.write(f"{k:.6e},{e_tot:.6e},{e_comp:.6e},{e_rot:.6e},{e_sum:.6e},"
+                    f"{e_tot_c:.6e},{e_comp_c:.6e},{e_rot_c:.6e},{e_sum_c:.6e}\n")
     
     print(f"Saved library-matched spectra to: {output_filename}")
     return output_filename
-
 
 # ------------------------------------------------------------------ #
 #  Main function - puts it all together

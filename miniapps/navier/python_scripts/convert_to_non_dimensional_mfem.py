@@ -52,15 +52,24 @@ def process_file(fname: str, U0: float, domain_length: float) -> None:
 
     # I believe this is not correct but standard in definitions
     df['Re'] = (U0 * L) / df['effective_nu']
+
+    # ReL = 2 * enstrophy * (kinetic_energy**2) / (-(dk_dt**2))
+    # Add a tiny epsilon to avoid division by zero
+    eps = 1e-10
+    denom = df['dk_dt']**2 - eps
+    df['ReL'] = 2.0 * df['enstrophy'] * (df['kinetic_energy']**2) / denom
     
     # Example non‐dimensional quantities:
     # t* = t * U0 / L
     df['t_star'] = df['time'] * U0 / L
+
     # (dK/dt)* = (dK/dt) / (U0^3 / L)
     df['dk_dt_star'] = df['dk_dt'] / (U0**3 / L)
+
     # ω* = 2.0*ω / (U0/L)^2
     df['enstrophy_star'] = df['enstrophy'] * 2.0 / (U0/L)**2
-    
+
+    df['kinetic_energy_star'] = df['kinetic_energy']/ (U0)**2
 
     # --- 4) Write out
     out_dir   = os.path.dirname(os.path.abspath(fname))
