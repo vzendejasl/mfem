@@ -55,10 +55,18 @@ struct s_NavierContext
    int element_center_cycle = 100;
    int data_dump_cycle = 100;
    bool filter = false;
-   bool oversample = true;
+   bool oversample = false;
    real_t alpha = 0.3;
    real_t delta_const = 1e-8;
    bool problem1 = true;
+   double u0 = 1.0;
+
+   // Add these for time-based output
+   bool time_based_output = false;  
+   int num_snapshots = 25;          
+   real_t snapshot_interval = 0.0;  
+   int snapshot_index = 0;          // Which snapshot we're looking for next
+   std::vector<real_t> snapshot_times; // Pre-computed target times
 
 } ctx;
 
@@ -93,8 +101,8 @@ void vel_tgv(const Vector &x, real_t t, Vector &u)
      zi = 2*M_PI*x(2);
    }
 
-   u(0) = sin(xi) * cos(yi) * cos(zi);
-   u(1) = -cos(xi) * sin(yi) * cos(zi);
+   u(0) =  ctx.u0*sin(xi) * cos(yi) * cos(zi);
+   u(1) = -ctx.u0*cos(xi) * sin(yi) * cos(zi);
    u(2) = 0.0;
 }
 
@@ -125,10 +133,9 @@ public:
       volume = mass_lf->operator()(one_gf);
    };
 
-   real_t ComputeKineticEnergy(ParGridFunction &v, ParGridFunction &ke_gf)
-   // real_t ComputeKineticEnergy(ParGridFunction &v)
+   // real_t ComputeKineticEnergy(ParGridFunction &v, ParGridFunction &ke_gf)
+   real_t ComputeKineticEnergy(ParGridFunction &v)
    {
-     /*
       Vector velx, vely, velz;
       real_t integ = 0.0;
       const FiniteElement *fe;
@@ -167,29 +174,28 @@ public:
                     MPI_COMM_WORLD);
 
       return 0.5 * global_integral / volume;
-      */
 
-    ParFiniteElementSpace *vfes = v.ParFESpace();
-    ParBilinearForm mass(vfes);
-    ConstantCoefficient ones(1.0);
-    mass.AddDomainIntegrator(new VectorMassIntegrator(ones));
+    // ParFiniteElementSpace *vfes = v.ParFESpace();
+    // ParBilinearForm mass(vfes);
+    // ConstantCoefficient ones(1.0);
+    // mass.AddDomainIntegrator(new VectorMassIntegrator(ones));
   
-    mass.Assemble();
-    mass.Finalize();
+    // mass.Assemble();
+    // mass.Finalize();
 
-    // Create KE grid function
-    VectorGridFunctionCoefficient U(&v);     
+    // // Create KE grid function
+    // VectorGridFunctionCoefficient U(&v);     
 
-    InnerProductCoefficient uu(U, U);          
+    // InnerProductCoefficient uu(U, U);          
 
-    ConstantCoefficient half(0.5);
+    // ConstantCoefficient half(0.5);
 
-    ProductCoefficient kcoeff(half, uu);       
+    // ProductCoefficient kcoeff(half, uu);       
 
-    ke_gf.ProjectCoefficient(kcoeff);
+    // ke_gf.ProjectCoefficient(kcoeff);
 
-    const double ke = 0.5*mass.ParInnerProduct(v,v);
-    return ke / volume;
+    // const double ke = 0.5*mass.ParInnerProduct(v,v);
+    // return ke / volume;
    };
 
    // This is the version we want to work because 
@@ -319,6 +325,7 @@ public:
    };
    */
 
+   /*
   real_t ComputeEnstrophy(ParGridFunction &w)
   {
       Vector wx, wy, wz;
@@ -379,7 +386,79 @@ public:
                     MPI_COMM_WORLD);
   
       return 0.5 * global_integral / volume;
-  }
+  }*/
+
+
+  real_t ComputeEnstrophy(ParGridFunction &u)
+  {
+
+   const ParFiniteElementSpace *pfes = u.ParFESpace();
+
+   double local_half_w2_int = 0.0; 
+   double local_vol        = 0.0;  
+
+   Array<int> vdofs;
+   Vector loc_data;                 
+   DenseMatrix dshape;              
+   DenseMatrix grad_hat;            
+   DenseMatrix grad;                
+
+   const int ne = pfes->GetNE();
+   for (int e = 0; e < ne; ++e)
+   {
+      pfes->GetElementVDofs(e, vdofs);
+      u.GetSubVector(vdofs, loc_data);
+
+      ElementTransformation *T = pfes->GetElementTransformation(e);
+      const FiniteElement   *el = pfes->GetFE(e);
+
+      const int elndofs = el->GetDof();
+      const int vdim    = pfes->GetVDim();
+      const int dim     = 3;
+
+      const int ir_order = 2*el->GetOrder() + 2;
+      const IntegrationRule &ir = IntRules.Get(el->GetGeomType(), ir_order);
+
+      dshape.SetSize(elndofs, dim);
+      DenseMatrix loc_data_mat(loc_data.GetData(), elndofs, vdim);
+
+      for (int i = 0; i < ir.GetNPoints(); ++i)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(i);
+         T->SetIntPoint(&ip);
+
+         el->CalcDShape(ip, dshape);
+
+         grad_hat.SetSize(vdim, dim);
+         MultAtB(loc_data_mat, dshape, grad_hat);
+
+         const DenseMatrix &Jinv = T->InverseJacobian();
+
+         grad.SetSize(vdim, dim);
+         Mult(grad_hat, Jinv, grad); 
+
+         const double wx = grad(2,1) - grad(1,2);
+         const double wy = grad(0,2) - grad(2,0);
+         const double wz = grad(1,0) - grad(0,1);
+         const double w2 = wx*wx + wy*wy + wz*wz;
+
+         const double dV = ip.weight * T->Weight();
+
+         local_half_w2_int += 0.5 * w2 * dV;
+         local_vol         += dV;        
+      }
+   }
+
+   double global_half_w2_int = 0.0;
+   double global_vol         = 0.0;
+   MPI_Comm comm = pfes->GetComm();
+   MPI_Allreduce(&local_half_w2_int, &global_half_w2_int, 1, MPI_DOUBLE, MPI_SUM, comm);
+   MPI_Allreduce(&local_vol,         &global_vol,         1, MPI_DOUBLE, MPI_SUM, comm);
+
+   return global_half_w2_int / global_vol;
+
+   }
+
 
   void ComputeGridPtsRequirementsTurb(ParGridFunction &u, real_t Kolmogorov_length, real_t *hmin_eta , real_t *kmax_eta, real_t *kmax_return, real_t *hmin_return)
   {
@@ -571,6 +650,7 @@ public:
       *max_diss = global_max_dissipation;
   }
 
+  /*
   real_t ComputeAveragedDissipation(ParGridFunction &d)
   {
       Vector d_vec;
@@ -633,7 +713,83 @@ public:
                     MPI_COMM_WORLD);
 
       return globalDissipation/globalVolume;
+  }*/
+
+  template<typename T>
+  T sq(T x)
+  {
+     return x * x;
   }
+
+  // Computes \eta = 2*\nu*(\nabla u + trans(\nabla u))^2
+  real_t ComputeAveragedDissipation(ParGridFunction &u)
+  {
+     
+    const ParFiniteElementSpace *pfes = u.ParFESpace();
+  
+     double local_diss = 0.0; 
+     double local_vol        = 0.0;  
+  
+     Array<int> vdofs;
+     Vector loc_data;                 
+     DenseMatrix dshape;              
+     DenseMatrix grad_hat;            
+     DenseMatrix grad;                
+  
+     const int ne = pfes->GetNE();
+     for (int e = 0; e < ne; ++e)
+     {
+        pfes->GetElementVDofs(e, vdofs);
+        u.GetSubVector(vdofs, loc_data);
+  
+        ElementTransformation *T = pfes->GetElementTransformation(e);
+        const FiniteElement   *el = pfes->GetFE(e);
+  
+        const int elndofs = el->GetDof();
+        const int vdim    = pfes->GetVDim();
+        const int dim     = 3;
+  
+        const int ir_order = 2*el->GetOrder() + 2;
+        const IntegrationRule &ir = IntRules.Get(el->GetGeomType(), ir_order);
+  
+        dshape.SetSize(elndofs, dim);
+        DenseMatrix loc_data_mat(loc_data.GetData(), elndofs, vdim);
+  
+        for (int i = 0; i < ir.GetNPoints(); ++i)
+        {
+           const IntegrationPoint &ip = ir.IntPoint(i);
+           T->SetIntPoint(&ip);
+  
+           el->CalcDShape(ip, dshape);
+  
+           grad_hat.SetSize(vdim, dim);
+           MultAtB(loc_data_mat, dshape, grad_hat);
+  
+           const DenseMatrix &Jinv = T->InverseJacobian();
+  
+           grad.SetSize(vdim, dim);
+           Mult(grad_hat, Jinv, grad); 
+  
+           real_t d_val =   sq(grad(0, 0)) + sq(grad(1, 1)) + sq(grad(2, 2))
+                          + 0.5*(sq(grad(0,1) + grad(1,0)) + sq(grad(0,2) + grad(2,0))  
+                          + sq(grad(1,2) + grad(2,1))); 
+  
+           const double dV = ip.weight * T->Weight();
+  
+           local_diss += 2.0*ctx.kinvis * d_val * dV;
+           local_vol         += dV;        
+        }
+     }
+  
+     double global_diss = 0.0;
+     double global_vol         = 0.0;
+     MPI_Comm comm = pfes->GetComm();
+     MPI_Allreduce(&local_diss, &global_diss, 1, MPI_DOUBLE, MPI_SUM, comm);
+     MPI_Allreduce(&local_vol,         &global_vol,         1, MPI_DOUBLE, MPI_SUM, comm);
+  
+     return global_diss / global_vol;
+  
+     }
   
    
 
@@ -645,12 +801,12 @@ private:
    real_t volume;
 };
 
+
 template<typename T>
 T sq(T x)
 {
    return x * x;
 }
-
 // Computes Q = 0.5*(tr(\nabla u)^2 - tr(\nabla u \cdot \nabla u))
 void ComputeQCriterion(ParGridFunction &u, ParGridFunction &q)
 {
@@ -1030,7 +1186,6 @@ void ComputeDissipation(ParGridFunction &u, ParGridFunction &d)
    DenseMatrix dshape;
    DenseMatrix grad;
 
-
    for (int e = 0; e < fes->GetNE(); ++e)
    {
       fes->GetElementVDofs(e, dofs);
@@ -1398,7 +1553,7 @@ int main(int argc, char *argv[])
       "-no-cr",
       "--no-checkresult",
       "Enable or disable checking of the result. Returns -1 on failure.");
-   args.AddOption(&ctx.reynum, "-Re", "--Renolds-number", "Reynolds Number.");
+   args.AddOption(&ctx.reynum, "-Re", "--Reynolds-number", "Reynolds Number.");
    args.AddOption(&ctx.element_center_cycle, "-ecc", "--Element-Center-Cycle", "Element Center Cycle.");
    args.AddOption(&ctx.data_dump_cycle, "-ddc", "--Data-Dump-Cycle", "Data Dump Cycle.");
    args.AddOption(
@@ -1420,6 +1575,16 @@ int main(int argc, char *argv[])
    args.AddOption(&ctx.problem1, "-problem1", "--Problem-1", "-no-problem1",
                   "--no-Problem-1",
                   "Domain length will be 2pi, otherwise 1.0");
+   args.AddOption(&ctx.time_based_output,
+                  "-time-out",
+                  "--time-based-output", 
+                  "-no-time-out",
+                  "--no-time-based-output",
+                  "Enable time-based output instead of cycle-based.");
+   args.AddOption(&ctx.num_snapshots,
+                  "-nsnap",
+                  "--num-snapshots",
+                  "Number of evenly-spaced snapshots to output.");   
    args.Parse();
    if (!args.Good())
    {
@@ -1434,19 +1599,69 @@ int main(int argc, char *argv[])
       args.PrintOptions(mfem::out);
    }
 
+   ctx.num_snapshots += 1;
+   if (ctx.time_based_output)
+   {
+      ctx.snapshot_interval = ctx.t_final / (ctx.num_snapshots - 1);
+      ctx.snapshot_times.resize(ctx.num_snapshots);
+
+      for (int i = 0; i < ctx.num_snapshots; i++)
+      {
+         ctx.snapshot_times[i] = i * ctx.snapshot_interval;
+      }
+
+      if (Mpi::Root())
+      {
+         std::cout << "Time-based output enabled:" << std::endl;
+         std::cout << "  Number of snapshots: " << ctx.num_snapshots << std::endl;
+         std::cout << "  Time interval: " << ctx.snapshot_interval << std::endl;
+         std::cout << "  Target times: ";
+         for (auto t : ctx.snapshot_times) std::cout << t << " ";
+         std::cout << std::endl;
+      }
+   }
+
+   if (ctx.time_based_output && ctx.snapshot_times.empty()) 
+   {
+       ctx.snapshot_interval = ctx.t_final / (ctx.num_snapshots - 1);
+       ctx.snapshot_times.resize(ctx.num_snapshots);
+       for (int i = 0; i < ctx.num_snapshots; i++) 
+       {
+           ctx.snapshot_times[i] = i * ctx.snapshot_interval;
+       }
+   }
+
+   // This is only for setting up the initial velocity to compare with 
+   // compressible codes!!
+   // Can adjust this for different Mach number comparisions
+   // Specify manually on purpose
+   double Mach0 = 0.1;
+   double gamma = 5.0/3.0;
+   double p0    = 1.0;
+   double rho0  = 1.0;
+   ctx.u0 = 2.0*Mach0*sqrt(gamma*p0/rho0);
+
    // K0 = 1.0/L0
    double L0 = (ctx.problem1) ? 1.0 : 1.0/(2.0*M_PI);
-   double dt_scale = (ctx.problem1) ? 1.0 : 1.0/L0;
+
+   // t*=u0/L*t
+   double t_star_final = (ctx.problem1) ? 1.0 : L0/ctx.u0*ctx.t_final;
+
+   // t = u0/L*t* (we are solving the for rescaled time based on velocity)
+   double dt_scale = (ctx.problem1) ? 1.0 : ctx.u0/L0;
 
    // Update kinematic viscosity
-   ctx.kinvis = L0 / (ctx.reynum);
+   ctx.kinvis = ctx.u0 * L0 / (ctx.reynum);
+
+   // Update the time scales accordingly
    ctx.dt /=dt_scale;
-   ctx.t_final /=dt_scale;
+   ctx.t_final = t_star_final*dt_scale;
 
    if (Mpi::Root())
    {
-      double Re_eff = L0 / (ctx.kinvis);
+      double Re_eff = ctx.u0*L0 / (ctx.kinvis);
       std::cout << "Configured L0 =" << L0 
+                << ", u0 = " << ctx.u0
                 << ", nu=" << ctx.kinvis
                 << ", dt=" << ctx.dt
                 << ", t_final=" << ctx.t_final
@@ -1473,14 +1688,37 @@ int main(int argc, char *argv[])
       {
          if (Mpi::Root())
          {
-            std::cout << "Restart files found. Continuing from checkpoint at time t = " << t << std::endl;
+            std::cout << "Restart files found. Continuing from checkpoint at time t = " 
+                      << t << ", step = " << step << std::endl;
          }
-         // Store the initial step number at restart
-         global_cycle = step;
 
-         // Reset step from restart for flow solver
+         // Store the initial step number at restart
+         global_cycle = step + 1; // Acount for the cycle shift when restarting
+
+         // Reset step counter for the new run segment
          step = 0;
 
+         if (ctx.time_based_output)
+         {
+             ctx.snapshot_index = 0;
+             // Find the first snapshot time that's GREATER than current time
+             // (we've already passed any that are <= current time)
+             while (ctx.snapshot_index < ctx.num_snapshots && 
+                    t >= ctx.snapshot_times[ctx.snapshot_index] - ctx.dt * 0.01)
+             {
+                 ctx.snapshot_index++;
+             }
+
+             if (Mpi::Root())
+             {
+                 std::cout << "Restart: starting snapshot index = " << ctx.snapshot_index;
+                 if (ctx.snapshot_index < ctx.num_snapshots)
+                 {
+                     std::cout << " (next target time = " << ctx.snapshot_times[ctx.snapshot_index] << ")";
+                 }
+                 std::cout << std::endl;
+             }
+         }
       }
       else
       {
@@ -1488,8 +1726,12 @@ int main(int argc, char *argv[])
          {
             std::cout << "Restart files not found. Starting from initial conditions." << std::endl;
          }
+         global_cycle = 0;
       }
-
+   }
+   else
+   {
+      global_cycle = 0;
    }
 
    if (!ctx.restart || !restart_files_found)
@@ -1661,7 +1903,7 @@ int main(int argc, char *argv[])
    ParGridFunction q_gf(pressure_fespace);
    ParGridFunction d_gf(pressure_fespace);
    ParGridFunction lambda2_gf(pressure_fespace);
-   ParGridFunction ke_gf(pressure_fespace);
+   // ParGridFunction ke_gf(pressure_fespace);
 
    flowsolver->ComputeCurl3D(*u_gf, w_gf);
    ComputeQCriterion(*u_gf, q_gf);
@@ -1753,7 +1995,8 @@ int main(int argc, char *argv[])
    */
 
    QuantitiesOfInterest kin_energy(pmesh);
-   real_t ke = kin_energy.ComputeKineticEnergy(*u_gf, ke_gf);
+   // jreal_t ke = kin_energy.ComputeKineticEnergy(*u_gf, ke_gf);
+   real_t ke = kin_energy.ComputeKineticEnergy(*u_gf);
 
    ParaViewDataCollection *pvdc = NULL;
    if (ctx.paraview)
@@ -1825,6 +2068,7 @@ int main(int argc, char *argv[])
    }
 
 
+   /*
    ConduitDataCollection *cdc = NULL;
    if (ctx.conduit)
    {
@@ -1862,7 +2106,7 @@ int main(int argc, char *argv[])
          MFEM_ABORT("Must build with MFEM_USE_CONDUIT=YES for binary output.");
 #endif
 
-   }
+   }*/
 
    real_t u_inf_loc = u_gf->Normlinf();
    real_t p_inf_loc = p_gf->Normlinf();
@@ -1872,7 +2116,7 @@ int main(int argc, char *argv[])
 
    // real_t ke = kin_energy.ComputeKineticEnergy(*u_gf);
    real_t vel_curl_ke = kin_energy.ComputeInertialRangeEnergy(*u_gf);
-   real_t enstrophy = kin_energy.ComputeEnstrophy(w_gf);
+   real_t enstrophy = kin_energy.ComputeEnstrophy(*u_gf);
 
    real_t kolmLenScl = 0.0;
    real_t avg_kolmLenScl = 0.0;
@@ -1887,7 +2131,7 @@ int main(int argc, char *argv[])
    real_t kmax = 0.0;
    real_t hmin = 0.0;
 
-   real_t avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
+   real_t avg_diss = kin_energy.ComputeAveragedDissipation(*u_gf);
    kin_energy.ComputeKolmogorovAndTaylorMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, &avg_kolmTimeScl, &max_diss, ke);
    kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta, &kmax, &hmin);
 
@@ -1993,11 +2237,11 @@ int main(int argc, char *argv[])
           fprintf(f, "order = %d\n", ctx.order);
           fprintf(f, "grid = %d x %d x %d\n", nel1d, nel1d, nel1d);
           fprintf(f, "dofs per component = %d\n", ngridpts);
-          fprintf(f, "=========================================================================================\n");
-          fprintf(f, "        time                      cycle                 kinetic energy               enstrophy\n");
+          fprintf(f, "==============================================================================================================================\n");
+          fprintf(f, "        time                      cycle                 kinetic energy               enstrophy               cfl\n");
 
           // Write the initial data point
-           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e\n", t, static_cast<real_t>(global_cycle + step), ke, enstrophy);
+           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e      %20.16e\n", t, static_cast<real_t>(global_cycle + step), ke, enstrophy, cfl);
 
           // Write header only if not restarting
           fprintf(f_turb, "3D Taylor Green Vortex (turbulence metrics)\n");
@@ -2008,13 +2252,13 @@ int main(int argc, char *argv[])
           fprintf(f_turb, "===============================================================================");
           fprintf(f_turb, "===============================================================================");
           fprintf(f_turb, "===============================================================================");
-          fprintf(f_turb, "=============================================================================\n");
+          fprintf(f_turb, "===================================================================================\n");
           fprintf(f_turb, "        time                        cycle                Max Dissipation       Average Dissipation     Min Kolmogorov Length Scale    Taylor Length Scale");
-          fprintf(f_turb, "        Taylor Length Scale (aniso)          Average Kolm Len          Kolmogorov Time Scale            Average Kolm Time Scale       Taylor Re (Avg)");
+          fprintf(f_turb, "        Taylor Length Scale (aniso)      Average Kolm Len    Kolmogorov Time Scale       Average Kolm Time Scale       Taylor Re (Avg)");
           fprintf(f_turb, "               u_rms    \n");
 
           // Write the initial data point
-           fprintf(f_turb, "%20.16e     %20.16e     %20.16e    %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
+           fprintf(f_turb, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
                        t, static_cast<real_t>(global_cycle + step), max_diss, avg_diss, kolmLenScl, 
                        avg_lambda, avg_lambda_iso, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
                        Re_taylor, u_rms);
@@ -2026,7 +2270,8 @@ int main(int argc, char *argv[])
           fprintf(f_turb_grid, "grid = %d x %d x %d\n", nel1d, nel1d, nel1d);
           fprintf(f_turb_grid, "dofs per component = %d\n", ngridpts);
           fprintf(f_turb_grid, "===============================================================================");
-          fprintf(f_turb_grid, "=================================================================\n");
+          fprintf(f_turb_grid, "==============================================================================");
+          fprintf(f_turb_grid, "==============================================================================\n");
           fprintf(f_turb_grid, "        time                       cycle                  K_max*eta (>1.5)              hmin/eta (<2.1)");
           fprintf(f_turb_grid, "        Average PI_NU              Min PI_NU        ");
           fprintf(f_turb_grid, "        K_max*eta(Avg)             hmin/eta(Avg)    \n");
@@ -2048,14 +2293,16 @@ int main(int argc, char *argv[])
 
    for (; !last_step; ++step)
    {
+      bool should_dump_data = false;
       if (t + dt >= t_final - dt / 2)
       {
          last_step = true;
+         should_dump_data=true;
       }
 
       // Adjust alpha for restart
       real_t effective_alpha = ctx.alpha;  // Default to the original alpha
-      if (ctx.restart && restart_files_found && step <= 500)  // Ramp over first 10 steps
+      if (ctx.filter && ctx.restart && restart_files_found && step <= 500)  // Ramp over first 10 steps
       {
    
          // Gradual ramp up
@@ -2078,7 +2325,36 @@ int main(int argc, char *argv[])
 
       cfl = flowsolver->ComputeCFL(*u_gf, ctx.dt);
 
-      if ((global_cycle + step) % ctx.data_dump_cycle == 0 || last_step)
+      if (ctx.time_based_output)
+      {
+         // Check if we should output based on current time and snapshot schedule
+         if (ctx.snapshot_index < ctx.num_snapshots)
+         {
+            // Check if current time is within a small tolerance of the target snapshot time
+            if (t >= ctx.snapshot_times[ctx.snapshot_index] - ctx.dt * 0.01)
+            {
+               should_dump_data = true;
+               if (Mpi::Root())
+               {
+                  std::cout << "Time-based output triggered at t = " << t 
+                            << ", target time = " << ctx.snapshot_times[ctx.snapshot_index] 
+                            << std::endl;
+               }
+            }
+         }
+         // Also output on last step
+         if (last_step && !should_dump_data)
+         {
+            should_dump_data = true;
+         }
+      }
+      else
+      {
+         should_dump_data = ((global_cycle + step) % ctx.data_dump_cycle == 0) || last_step;
+      }
+
+      // Skip output on the very first step after restart to avoid duplicates
+      if (should_dump_data)
       {
          // If restarting, skip the first saved checkpoint
          if (!(ctx.restart && step == 0 && restart_files_found))
@@ -2087,54 +2363,12 @@ int main(int argc, char *argv[])
             ComputeLambda2Nodal(*u_gf, lambda2_gf);
             flowsolver->ComputeCurl3D(*u_gf, w_gf);
 
-            /*
-            // Vector decomposition
-            solve_vector_potential(ops, *u_gf, curl_Ah_h1, pmesh, ctx.pa);
-            ops.projectorH1ToL2.Apply(curl_Ah_l2, curl_Ah_h1);
-
-            solve_scalar_potential(ops, *u_gf, grad_phi_h1, pmesh, ctx.pa);
-
-            ops.projectorH1ToL2.Apply(grad_phi_l2, grad_phi_h1);
-
-            ops.projectorH1ToL2.Apply(u_l2, *u_gf);
-
-            vel_error = grad_phi_l2;
-            vel_error += curl_Ah_l2;
-            vel_error -= u_l2;
-
-            // Subtract grad phi from u -- do we get a better curl Ah field?
-            curl_Ah_l2 = u_l2;
-            curl_Ah_l2 -= grad_phi_l2;
-
-            ops.projectorL2ToH1.Apply(curl_Ah_h1_from_grad_phi, curl_Ah_l2);
-
-            // 15. Compute and print the L^2 norm of the error.
-            {
-
-               ConstantCoefficient zero(0.0);
-
-               Vector zero_v(dim);
-               zero_v = 0.0;
-               VectorConstantCoefficient zero_vec(zero_v);
-
-               // double curl_grad_phi_computed_error_project = curl_grad_phi_hdiv.ComputeL2Error(zero_vec);
-               // double div_curl_A_error_l2 = div_curl_Ah_l2.ComputeL2Error(zero);
-               double total_vel_error = vel_error.ComputeL2Error(zero);
-   
-
-               if (myid == 0)
-               {
-                  // cout << "curl(grad phi) project L2 error (should be ~0): " << curl_grad_phi_computed_error_project << endl;
-                  std::cout << "vel error from reconstruction: " << total_vel_error << std::endl;
-               }
-            }
-            */
-
-
+            // For all output types, use this consistent output_cycle calculation:
+            int output_cycle = global_cycle + step;
 
             if (ctx.paraview)
             {
-               pvdc->SetCycle(global_cycle + step);
+               pvdc->SetCycle(output_cycle);
                pvdc->SetTime(t);
                pvdc->Save();
                if (Mpi::Root())
@@ -2145,7 +2379,7 @@ int main(int argc, char *argv[])
 
             if (ctx.visit)
             {
-               dc->SetCycle(global_cycle + step);
+               dc->SetCycle(output_cycle);
                dc->SetTime(t);
                dc->Save();
 
@@ -2170,9 +2404,10 @@ int main(int argc, char *argv[])
                }
             }
 
+            /*
             if (ctx.conduit)
             {
-               cdc->SetCycle(global_cycle + step);
+               cdc->SetCycle(output_cycle);
                cdc->SetTime(t);
                cdc->Save();
 
@@ -2196,28 +2431,41 @@ int main(int argc, char *argv[])
                    std::cout << "After loading from checkpoint in LoadCheckpoint: u_gf Norml2 = "
                              << u_inf << ", p_gf Norml2 = " << p_inf << std::endl;
                }
+
+            }*/
+                
+            if (ctx.time_based_output && ctx.snapshot_index < ctx.num_snapshots)
+            {
+               ctx.snapshot_index++;
             }
          }
       }
 
-      if ((global_cycle + step) % ctx.element_center_cycle == 0 || last_step)
+
+      bool should_dump_element_centers = false;
+      if (ctx.time_based_output)
+      {
+         should_dump_element_centers = should_dump_data;
+      }
+      else
+      {
+         should_dump_element_centers = ((global_cycle + step) % ctx.element_center_cycle == 0) || last_step;
+      }
+   
+      if (should_dump_element_centers)
       {
          // If restarting, skip the first saved checkpoint
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
-            SamplePoints( u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
+            SamplePoints(u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
             SamplePointsAtDoFs(u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
-            // SamplePointsAdios( u_gf, pmesh, global_cycle + step, t, "Velocity",ctx.oversample, &ctx);
-            // ComputeElementCenterValues(&w_gf, pmesh, global_cycle + step, t, "Vorticity");
-
             if (Mpi::Root())
             {
                std::cout << "\nOutput element center file saved at cycle " << global_cycle + step << "." << std::endl;
             }
-
          }
       }
-            
+
       u_inf_loc = u_gf->Normlinf();
       p_inf_loc = p_gf->Normlinf();
 
@@ -2226,17 +2474,19 @@ int main(int argc, char *argv[])
 
       flowsolver->ComputeCurl3D(*u_gf, w_gf);
 
-      ke = kin_energy.ComputeKineticEnergy(*u_gf, ke_gf);
-      // ke = kin_energy.ComputeKineticEnergy(*u_gf);
+      // ke = kin_energy.ComputeKineticEnergy(*u_gf, ke_gf);
+      ke = kin_energy.ComputeKineticEnergy(*u_gf);
       vel_curl_ke = kin_energy.ComputeInertialRangeEnergy(*u_gf);
-      enstrophy = kin_energy.ComputeEnstrophy(w_gf);
+      enstrophy = kin_energy.ComputeEnstrophy(*u_gf);
 
       ComputeDissipation(*u_gf, d_gf);
-      avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
+      avg_diss = kin_energy.ComputeAveragedDissipation(*u_gf);
       kin_energy.ComputeKolmogorovAndTaylorMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, &avg_kolmTimeScl, &max_diss, ke);
       kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta, &kmax, &hmin);
-      Re_taylor = u_rms*avg_lambda/ctx.kinvis;
-      u_rms =  pow(2.0/3.0*ke,0.5);
+      avg_lambda_iso = kin_energy.ComputeTaylorMicroscale(*u_gf, nullptr, nullptr);
+      u_rms =  pow(2.0/3.0*ke, 0.5);
+      // Re_taylor = u_rms*avg_lambda/ctx.kinvis;
+      Re_taylor = u_rms*avg_lambda_iso/ctx.kinvis;
 
       PI_nu = pow(avg_diss,0.5)/(avg_kolmLenScl*pow(vel_curl_ke,0.75));
       PI_nu_min = pow(max_diss,0.5)/(kolmLenScl*pow(vel_curl_ke,0.75));
@@ -2244,7 +2494,6 @@ int main(int argc, char *argv[])
       avg_hmin_eta = hmin/avg_kolmLenScl;
       avg_kmax_eta = kmax*avg_kolmLenScl;
 
-      avg_lambda_iso = kin_energy.ComputeTaylorMicroscale(*u_gf, nullptr, nullptr);
 
       // if (Mpi::Root())
       // {
@@ -2260,10 +2509,10 @@ int main(int argc, char *argv[])
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
            printf("%.5E %.5E %.5E %.5E %.5E %.5E %.5E\n", t, ctx.dt, u_inf, p_inf, ke, enstrophy, cfl);
-           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e\n", t, static_cast<real_t>(step + global_cycle), ke, enstrophy);
-           fprintf(f_turb, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
+           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e      %20.16e\n", t, static_cast<real_t>(step + global_cycle), ke, enstrophy, cfl);
+           fprintf(f_turb, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
                        t, static_cast<real_t>(global_cycle + step), max_diss, avg_diss, kolmLenScl, 
-                       avg_lambda, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
+                       avg_lambda, avg_lambda_iso, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
                        Re_taylor, u_rms);
            fprintf(f_turb_grid, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e    %20.16e    %20.16e\n",
                        t, static_cast<real_t>(global_cycle + step), kmax_eta, hmin_eta, PI_nu, PI_nu_min, avg_kmax_eta, avg_hmin_eta);

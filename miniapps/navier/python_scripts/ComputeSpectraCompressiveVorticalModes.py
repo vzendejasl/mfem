@@ -187,18 +187,18 @@ def compute_curl(vx, vy, vz, KX, KY, KZ):
 #  Step 5: Helmholtz-Hodge decomposition
 # ------------------------------------------------------------------ #
 def compute_compressive_part(vx, vy, vz, KX, KY, KZ, K_squared, nonzero_mask):
-    """Compute compressive (irrotational) part: v_c = -∇φ"""
+    """Compute compressive (irrotational) part: v_c = -??"""
     print("Computing compressive component...")
     
     # Step 1: Compute divergence
     divergence = compute_divergence(vx, vy, vz, KX, KY, KZ)
     
-    # Step 2: Solve for scalar potential φ: ∇²φ = -div
+    # Step 2: Solve for scalar potential ?: ?²? = -div
     div_k = fft.fftn(divergence)
     phi_k = np.zeros_like(div_k, dtype=complex)
     phi_k[nonzero_mask] = div_k[nonzero_mask] / K_squared[nonzero_mask]
     
-    # Step 3: Compute compressive velocity: v_c = -∇φ
+    # Step 3: Compute compressive velocity: v_c = -??
     vx_c_k = -1j * KX * phi_k
     vy_c_k = -1j * KY * phi_k
     vz_c_k = -1j * KZ * phi_k
@@ -216,13 +216,13 @@ def compute_compressive_part(vx, vy, vz, KX, KY, KZ, K_squared, nonzero_mask):
 
 
 def compute_rotational_part(vx, vy, vz, KX, KY, KZ, K_squared, nonzero_mask):
-    """Compute rotational (solenoidal) part: v_r = ∇×A"""
+    """Compute rotational (solenoidal) part: v_r = ?×A"""
     print("Computing rotational component...")
     
     # Step 1: Compute curl
     curl_x, curl_y, curl_z = compute_curl(vx, vy, vz, KX, KY, KZ)
     
-    # Step 2: Solve for vector potential A: ∇²A = -curl
+    # Step 2: Solve for vector potential A: ?²A = -curl
     curl_x_k = fft.fftn(curl_x)
     curl_y_k = fft.fftn(curl_y)
     curl_z_k = fft.fftn(curl_z)
@@ -235,7 +235,7 @@ def compute_rotational_part(vx, vy, vz, KX, KY, KZ, K_squared, nonzero_mask):
     Ay_k[nonzero_mask] = curl_y_k[nonzero_mask] / K_squared[nonzero_mask]
     Az_k[nonzero_mask] = curl_z_k[nonzero_mask] / K_squared[nonzero_mask]
     
-    # Step 3: Compute rotational velocity: v_r = ∇×A
+    # Step 3: Compute rotational velocity: v_r = ?×A
     vx_r_k = 1j * (KY * Az_k - KZ * Ay_k)
     vy_r_k = 1j * (KZ * Ax_k - KX * Az_k)
     vz_r_k = 1j * (KX * Ay_k - KY * Ax_k)
@@ -253,7 +253,7 @@ def compute_rotational_part(vx, vy, vz, KX, KY, KZ, K_squared, nonzero_mask):
     div_A_r = compute_divergence(Ax_r, Ay_r, Az_r, KX, KY, KZ)
     max_div_A_r = np.abs(div_A_r).max()
     
-    print(f"  Max |∇·A_r|:  {max_div_A_r:.2e} (should be ~0)")
+    print(f"  Max |?·A_r|:  {max_div_A_r:.2e} (should be ~0)")
     
     # Calculate kinetic energy
     ke_rot = 0.5 * np.mean(vx_r**2 + vy_r**2 + vz_r**2)
@@ -294,8 +294,8 @@ def verify_decomposition(vx_c, vy_c, vz_c, vx_r, vy_r, vz_r, KX, KY, KZ):
     div_r = compute_divergence(vx_r, vy_r, vz_r, KX, KY, KZ)
     max_div_r = np.abs(div_r).max()
     
-    print(f"  Max |∇×v_compressive|: {max_curl_c:.2e} (should be ~0)")
-    print(f"  Max |∇·v_rotational|:  {max_div_r:.2e} (should be ~0)")
+    print(f"  Max |?×v_compressive|: {max_curl_c:.2e} (should be ~0)")
+    print(f"  Max |?·v_rotational|:  {max_div_r:.2e} (should be ~0)")
 
 
 # ------------------------------------------------------------------ #
@@ -380,7 +380,7 @@ def compute_energy_dissipation_enstophy(vx, vy, vz, nx, ny, nz, dx, dy, dz):
     k_squared = KX_int**2 + KY_int**2 + KZ_int**2
     
     # Compute dissipation (convert integer k to physical)
-    # Physical wavenumber = 2π * integer_k / L, where L=1 for your domain
+    # Physical wavenumber = 2? * integer_k / L, where L=1 for your domain
     k_phys_squared = (2*np.pi)**2 * k_squared  
     total_energy_dissipation = np.sum(energy_density * k_phys_squared)
     print(f"  Total dissipative energy: {total_energy_dissipation:.6f}")
@@ -627,3 +627,4 @@ if __name__ == "__main__":
     
     # Plot all spectra together
     plot_spectra(results)
+

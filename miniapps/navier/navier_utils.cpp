@@ -352,111 +352,111 @@ void SamplePoints(mfem::ParGridFunction* sol,
 // Your local buffer is always row-major: n_local_rows contiguous rows of length ncols.
 
 
-#ifndef H5_HAVE_PARALLEL
-#error "Parallel HDF5 not found. Rebuild/point HDF5 to a build configured with MPI (H5_HAVE_PARALLEL)."
-#endif
-
-static herr_t WriteH5Parallel2D(MPI_Comm           comm,
-                                const std::string &path,
-                                const std::string &dset_name,
-                                const double      *local_rows,   // row-major buffer
-                                hsize_t            n_local_rows,
-                                int                ncols,
-                                bool               row_major)
-{
-    int rank; MPI_Comm_rank(comm, &rank);
-
-    // Global rows and my starting row (exclusive scan)
-    hsize_t N_total = 0, my_start = 0;
-    MPI_Allreduce(&n_local_rows, &N_total, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
-    MPI_Exscan(&n_local_rows, &my_start, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
-    if (rank == 0) my_start = 0;
-
-    // Parallel file driver
-    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
-    H5Pset_fapl_mpio(fapl, comm, MPI_INFO_NULL);
-
-    // Create/truncate file
-    hid_t file = H5Fcreate(path.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
-    H5Pclose(fapl);
-    if (file < 0) return file;
-
-    herr_t st = 0;
-    hid_t fspace = -1, mspace = -1, dset = -1;
-
-    if (row_major) {
-        // Dataset [N_total, ncols]; write my row slab
-        const hsize_t dims[2]   = { N_total, (hsize_t)ncols };
-        const hsize_t offset[2] = { my_start, 0 };
-        const hsize_t count[2]  = { n_local_rows, (hsize_t)ncols };
-
-        fspace = H5Screate_simple(2, dims, nullptr);
-        dset   = H5Dcreate2(file, dset_name.c_str(), H5T_NATIVE_DOUBLE,
-                            fspace, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-
-        if (n_local_rows > 0) H5Sselect_hyperslab(fspace, H5S_SELECT_SET, offset, nullptr, count, nullptr);
-        else                  H5Sselect_none(fspace);
-
-        if (n_local_rows > 0) {
-            const hsize_t mdims[2] = { n_local_rows, (hsize_t)ncols };
-            mspace = H5Screate_simple(2, mdims, nullptr);
-            H5Sselect_all(mspace);
-        } else {
-            const hsize_t mdims[2] = { 1, (hsize_t)ncols };
-            mspace = H5Screate_simple(2, mdims, nullptr);
-            H5Sselect_none(mspace);
-        }
-
-        // Collective write
-        hid_t dxpl = H5Pcreate(H5P_DATASET_XFER);
-        H5Pset_dxpl_mpio(dxpl, H5FD_MPIO_COLLECTIVE);
-        const void *buf = (n_local_rows > 0) ? (const void*)local_rows : nullptr;
-        st = H5Dwrite(dset, H5T_NATIVE_DOUBLE, mspace, fspace, dxpl, buf);
-        H5Pclose(dxpl);
-    } else {
-        // Dataset [ncols, N_total]; write column slab by locally transposing
-        std::vector<double> tmp((size_t)ncols * (size_t)std::max<hsize_t>(n_local_rows, 1));
-        for (hsize_t r = 0; r < n_local_rows; ++r) {
-            const double *src = local_rows + (size_t)r * (size_t)ncols;
-            for (int c = 0; c < ncols; ++c)
-                tmp[(size_t)c * (size_t)std::max<hsize_t>(n_local_rows,1) + (size_t)r] = src[c];
-        }
-
-        const hsize_t dims[2]   = { (hsize_t)ncols, N_total };
-        const hsize_t offset[2] = { 0, my_start };
-        const hsize_t count[2]  = { (hsize_t)ncols, n_local_rows };
-
-        fspace = H5Screate_simple(2, dims, nullptr);
-        dset   = H5Dcreate2(file, dset_name.c_str(), H5T_NATIVE_DOUBLE,
-                            fspace, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-
-        if (n_local_rows > 0) H5Sselect_hyperslab(fspace, H5S_SELECT_SET, offset, nullptr, count, nullptr);
-        else                  H5Sselect_none(fspace);
-
-        if (n_local_rows > 0) {
-            const hsize_t mdims[2] = { (hsize_t)ncols, n_local_rows };
-            mspace = H5Screate_simple(2, mdims, nullptr);
-            H5Sselect_all(mspace);
-        } else {
-            const hsize_t mdims[2] = { (hsize_t)ncols, 1 };
-            mspace = H5Screate_simple(2, mdims, nullptr);
-            H5Sselect_none(mspace);
-        }
-
-        hid_t dxpl = H5Pcreate(H5P_DATASET_XFER);
-        H5Pset_dxpl_mpio(dxpl, H5FD_MPIO_COLLECTIVE);
-        const void *buf = (n_local_rows > 0) ? (const void*)tmp.data() : nullptr;
-        st = H5Dwrite(dset, H5T_NATIVE_DOUBLE, mspace, fspace, dxpl, buf);
-        H5Pclose(dxpl);
-    }
-
-    // Cleanup
-    if (dset   >= 0) H5Dclose(dset);
-    if (mspace >= 0) H5Sclose(mspace);
-    if (fspace >= 0) H5Sclose(fspace);
-    H5Fclose(file);
-    return st;  // >=0 on success, <0 on error
-}
+// #ifndef H5_HAVE_PARALLEL
+// #error "Parallel HDF5 not found. Rebuild/point HDF5 to a build configured with MPI (H5_HAVE_PARALLEL)."
+// #endif
+// 
+// static herr_t WriteH5Parallel2D(MPI_Comm           comm,
+//                                 const std::string &path,
+//                                 const std::string &dset_name,
+//                                 const double      *local_rows,   // row-major buffer
+//                                 hsize_t            n_local_rows,
+//                                 int                ncols,
+//                                 bool               row_major)
+// {
+//     int rank; MPI_Comm_rank(comm, &rank);
+// 
+//     // Global rows and my starting row (exclusive scan)
+//     hsize_t N_total = 0, my_start = 0;
+//     MPI_Allreduce(&n_local_rows, &N_total, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
+//     MPI_Exscan(&n_local_rows, &my_start, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
+//     if (rank == 0) my_start = 0;
+// 
+//     // Parallel file driver
+//     hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+//     H5Pset_fapl_mpio(fapl, comm, MPI_INFO_NULL);
+// 
+//     // Create/truncate file
+//     hid_t file = H5Fcreate(path.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+//     H5Pclose(fapl);
+//     if (file < 0) return file;
+// 
+//     herr_t st = 0;
+//     hid_t fspace = -1, mspace = -1, dset = -1;
+// 
+//     if (row_major) {
+//         // Dataset [N_total, ncols]; write my row slab
+//         const hsize_t dims[2]   = { N_total, (hsize_t)ncols };
+//         const hsize_t offset[2] = { my_start, 0 };
+//         const hsize_t count[2]  = { n_local_rows, (hsize_t)ncols };
+// 
+//         fspace = H5Screate_simple(2, dims, nullptr);
+//         dset   = H5Dcreate2(file, dset_name.c_str(), H5T_NATIVE_DOUBLE,
+//                             fspace, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+// 
+//         if (n_local_rows > 0) H5Sselect_hyperslab(fspace, H5S_SELECT_SET, offset, nullptr, count, nullptr);
+//         else                  H5Sselect_none(fspace);
+// 
+//         if (n_local_rows > 0) {
+//             const hsize_t mdims[2] = { n_local_rows, (hsize_t)ncols };
+//             mspace = H5Screate_simple(2, mdims, nullptr);
+//             H5Sselect_all(mspace);
+//         } else {
+//             const hsize_t mdims[2] = { 1, (hsize_t)ncols };
+//             mspace = H5Screate_simple(2, mdims, nullptr);
+//             H5Sselect_none(mspace);
+//         }
+// 
+//         // Collective write
+//         hid_t dxpl = H5Pcreate(H5P_DATASET_XFER);
+//         H5Pset_dxpl_mpio(dxpl, H5FD_MPIO_COLLECTIVE);
+//         const void *buf = (n_local_rows > 0) ? (const void*)local_rows : nullptr;
+//         st = H5Dwrite(dset, H5T_NATIVE_DOUBLE, mspace, fspace, dxpl, buf);
+//         H5Pclose(dxpl);
+//     } else {
+//         // Dataset [ncols, N_total]; write column slab by locally transposing
+//         std::vector<double> tmp((size_t)ncols * (size_t)std::max<hsize_t>(n_local_rows, 1));
+//         for (hsize_t r = 0; r < n_local_rows; ++r) {
+//             const double *src = local_rows + (size_t)r * (size_t)ncols;
+//             for (int c = 0; c < ncols; ++c)
+//                 tmp[(size_t)c * (size_t)std::max<hsize_t>(n_local_rows,1) + (size_t)r] = src[c];
+//         }
+// 
+//         const hsize_t dims[2]   = { (hsize_t)ncols, N_total };
+//         const hsize_t offset[2] = { 0, my_start };
+//         const hsize_t count[2]  = { (hsize_t)ncols, n_local_rows };
+// 
+//         fspace = H5Screate_simple(2, dims, nullptr);
+//         dset   = H5Dcreate2(file, dset_name.c_str(), H5T_NATIVE_DOUBLE,
+//                             fspace, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+// 
+//         if (n_local_rows > 0) H5Sselect_hyperslab(fspace, H5S_SELECT_SET, offset, nullptr, count, nullptr);
+//         else                  H5Sselect_none(fspace);
+// 
+//         if (n_local_rows > 0) {
+//             const hsize_t mdims[2] = { (hsize_t)ncols, n_local_rows };
+//             mspace = H5Screate_simple(2, mdims, nullptr);
+//             H5Sselect_all(mspace);
+//         } else {
+//             const hsize_t mdims[2] = { (hsize_t)ncols, 1 };
+//             mspace = H5Screate_simple(2, mdims, nullptr);
+//             H5Sselect_none(mspace);
+//         }
+// 
+//         hid_t dxpl = H5Pcreate(H5P_DATASET_XFER);
+//         H5Pset_dxpl_mpio(dxpl, H5FD_MPIO_COLLECTIVE);
+//         const void *buf = (n_local_rows > 0) ? (const void*)tmp.data() : nullptr;
+//         st = H5Dwrite(dset, H5T_NATIVE_DOUBLE, mspace, fspace, dxpl, buf);
+//         H5Pclose(dxpl);
+//     }
+// 
+//     // Cleanup
+//     if (dset   >= 0) H5Dclose(dset);
+//     if (mspace >= 0) H5Sclose(mspace);
+//     if (fspace >= 0) H5Sclose(fspace);
+//     H5Fclose(file);
+//     return st;  // >=0 on success, <0 on error
+// }
 
 
 

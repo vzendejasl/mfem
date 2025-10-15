@@ -2,7 +2,7 @@
 """
 run_analysis.py
 Compute raw dk/dt, effective viscosity and Re, plus insert
-placeholders for non‐dimensional (%_star) quantities.
+placeholders for non?dimensional (%_star) quantities.
 
 Usage:
     python run_analysis.py --U0 1.0 --domain-length 6.28318 path/to/tgv_data.csv [...]
@@ -34,7 +34,7 @@ def process_file(fname: str, U0: float, domain_length: float) -> None:
     df['time'] = df['time'].astype(float)
     
     # --- 2) Raw derivatives
-    dt = df['time'].diff()                    # Δt, first row = NaN
+    dt = df['time'].diff()                    # ?t, first row = NaN
     df['dk_dt'] = df['kinetic_energy'].diff() / dt
     # I believe this is correct
     df['effective_nu_half'] = -df['dk_dt'] / (2.0 * df['enstrophy'])
@@ -42,7 +42,7 @@ def process_file(fname: str, U0: float, domain_length: float) -> None:
     # I believe this is not correct but standard in definitions
     df['effective_nu'] = -df['dk_dt'] / (df['enstrophy'])
     
-    # back‐fill first‐row NaNs so nothing is missing
+    # back?fill first?row NaNs so nothing is missing
     df[['dk_dt','effective_nu']] = df[['dk_dt','effective_nu']].bfill()
     df[['dk_dt','effective_nu_half']] = df[['dk_dt','effective_nu_half']].bfill()
     
@@ -59,7 +59,7 @@ def process_file(fname: str, U0: float, domain_length: float) -> None:
     denom = df['dk_dt']**2 - eps
     df['ReL'] = 2.0 * df['enstrophy'] * (df['kinetic_energy']**2) / denom
     
-    # Example non‐dimensional quantities:
+    # Example non?dimensional quantities:
     # t* = t * U0 / L
     df['t_star'] = df['time'] * U0 / L
 
@@ -86,12 +86,12 @@ def process_file(fname: str, U0: float, domain_length: float) -> None:
         # Write the data (without header since we already wrote it)
         df.to_csv(f, index=False, header=False, float_format="%.12e")
     
-    print(f"[✔] Processed {fname} → {out_path}")
+    print(f"[?] Processed {fname} ? {out_path}")
     print(f"    Output columns: {list(df.columns)}", file=sys.stderr)
 
 def main():
     p = argparse.ArgumentParser(
-        description="Compute raw & placeholder‐normalized metrics from tgv_data.csv"
+        description="Compute raw & placeholder?normalized metrics from tgv_data.csv"
     )
     p.add_argument(
         "--U0", type=float, required=True,
@@ -118,3 +118,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
