@@ -55,7 +55,7 @@ struct s_NavierContext
    int element_center_cycle = 100;
    int data_dump_cycle = 100;
    bool filter = false;
-   bool oversample = true;
+   bool oversample = false;
    real_t alpha = 0.3;
    real_t delta_const = 1e-8;
    bool problem1 = true;
@@ -133,10 +133,9 @@ public:
       volume = mass_lf->operator()(one_gf);
    };
 
-   real_t ComputeKineticEnergy(ParGridFunction &v, ParGridFunction &ke_gf)
-   // real_t ComputeKineticEnergy(ParGridFunction &v)
+   // real_t ComputeKineticEnergy(ParGridFunction &v, ParGridFunction &ke_gf)
+   real_t ComputeKineticEnergy(ParGridFunction &v)
    {
-     /*
       Vector velx, vely, velz;
       real_t integ = 0.0;
       const FiniteElement *fe;
@@ -175,29 +174,28 @@ public:
                     MPI_COMM_WORLD);
 
       return 0.5 * global_integral / volume;
-      */
 
-    ParFiniteElementSpace *vfes = v.ParFESpace();
-    ParBilinearForm mass(vfes);
-    ConstantCoefficient ones(1.0);
-    mass.AddDomainIntegrator(new VectorMassIntegrator(ones));
+    // ParFiniteElementSpace *vfes = v.ParFESpace();
+    // ParBilinearForm mass(vfes);
+    // ConstantCoefficient ones(1.0);
+    // mass.AddDomainIntegrator(new VectorMassIntegrator(ones));
   
-    mass.Assemble();
-    mass.Finalize();
+    // mass.Assemble();
+    // mass.Finalize();
 
-    // Create KE grid function
-    VectorGridFunctionCoefficient U(&v);     
+    // // Create KE grid function
+    // VectorGridFunctionCoefficient U(&v);     
 
-    InnerProductCoefficient uu(U, U);          
+    // InnerProductCoefficient uu(U, U);          
 
-    ConstantCoefficient half(0.5);
+    // ConstantCoefficient half(0.5);
 
-    ProductCoefficient kcoeff(half, uu);       
+    // ProductCoefficient kcoeff(half, uu);       
 
-    ke_gf.ProjectCoefficient(kcoeff);
+    // ke_gf.ProjectCoefficient(kcoeff);
 
-    const double ke = 0.5*mass.ParInnerProduct(v,v);
-    return ke / volume;
+    // const double ke = 0.5*mass.ParInnerProduct(v,v);
+    // return ke / volume;
    };
 
    // This is the version we want to work because 
@@ -652,6 +650,7 @@ public:
       *max_diss = global_max_dissipation;
   }
 
+  /*
   real_t ComputeAveragedDissipation(ParGridFunction &d)
   {
       Vector d_vec;
@@ -714,7 +713,83 @@ public:
                     MPI_COMM_WORLD);
 
       return globalDissipation/globalVolume;
+  }*/
+
+  template<typename T>
+  T sq(T x)
+  {
+     return x * x;
   }
+
+  // Computes \eta = 2*\nu*(\nabla u + trans(\nabla u))^2
+  real_t ComputeAveragedDissipation(ParGridFunction &u)
+  {
+     
+    const ParFiniteElementSpace *pfes = u.ParFESpace();
+  
+     double local_diss = 0.0; 
+     double local_vol        = 0.0;  
+  
+     Array<int> vdofs;
+     Vector loc_data;                 
+     DenseMatrix dshape;              
+     DenseMatrix grad_hat;            
+     DenseMatrix grad;                
+  
+     const int ne = pfes->GetNE();
+     for (int e = 0; e < ne; ++e)
+     {
+        pfes->GetElementVDofs(e, vdofs);
+        u.GetSubVector(vdofs, loc_data);
+  
+        ElementTransformation *T = pfes->GetElementTransformation(e);
+        const FiniteElement   *el = pfes->GetFE(e);
+  
+        const int elndofs = el->GetDof();
+        const int vdim    = pfes->GetVDim();
+        const int dim     = 3;
+  
+        const int ir_order = 2*el->GetOrder() + 2;
+        const IntegrationRule &ir = IntRules.Get(el->GetGeomType(), ir_order);
+  
+        dshape.SetSize(elndofs, dim);
+        DenseMatrix loc_data_mat(loc_data.GetData(), elndofs, vdim);
+  
+        for (int i = 0; i < ir.GetNPoints(); ++i)
+        {
+           const IntegrationPoint &ip = ir.IntPoint(i);
+           T->SetIntPoint(&ip);
+  
+           el->CalcDShape(ip, dshape);
+  
+           grad_hat.SetSize(vdim, dim);
+           MultAtB(loc_data_mat, dshape, grad_hat);
+  
+           const DenseMatrix &Jinv = T->InverseJacobian();
+  
+           grad.SetSize(vdim, dim);
+           Mult(grad_hat, Jinv, grad); 
+  
+           real_t d_val =   sq(grad(0, 0)) + sq(grad(1, 1)) + sq(grad(2, 2))
+                          + 0.5*(sq(grad(0,1) + grad(1,0)) + sq(grad(0,2) + grad(2,0))  
+                          + sq(grad(1,2) + grad(2,1))); 
+  
+           const double dV = ip.weight * T->Weight();
+  
+           local_diss += 2.0*ctx.kinvis * d_val * dV;
+           local_vol         += dV;        
+        }
+     }
+  
+     double global_diss = 0.0;
+     double global_vol         = 0.0;
+     MPI_Comm comm = pfes->GetComm();
+     MPI_Allreduce(&local_diss, &global_diss, 1, MPI_DOUBLE, MPI_SUM, comm);
+     MPI_Allreduce(&local_vol,         &global_vol,         1, MPI_DOUBLE, MPI_SUM, comm);
+  
+     return global_diss / global_vol;
+  
+     }
   
    
 
@@ -726,12 +801,12 @@ private:
    real_t volume;
 };
 
+
 template<typename T>
 T sq(T x)
 {
    return x * x;
 }
-
 // Computes Q = 0.5*(tr(\nabla u)^2 - tr(\nabla u \cdot \nabla u))
 void ComputeQCriterion(ParGridFunction &u, ParGridFunction &q)
 {
@@ -1110,7 +1185,6 @@ void ComputeDissipation(ParGridFunction &u, ParGridFunction &d)
    DenseMatrix grad_hat;
    DenseMatrix dshape;
    DenseMatrix grad;
-
 
    for (int e = 0; e < fes->GetNE(); ++e)
    {
@@ -1829,7 +1903,7 @@ int main(int argc, char *argv[])
    ParGridFunction q_gf(pressure_fespace);
    ParGridFunction d_gf(pressure_fespace);
    ParGridFunction lambda2_gf(pressure_fespace);
-   ParGridFunction ke_gf(pressure_fespace);
+   // ParGridFunction ke_gf(pressure_fespace);
 
    flowsolver->ComputeCurl3D(*u_gf, w_gf);
    ComputeQCriterion(*u_gf, q_gf);
@@ -1921,7 +1995,8 @@ int main(int argc, char *argv[])
    */
 
    QuantitiesOfInterest kin_energy(pmesh);
-   real_t ke = kin_energy.ComputeKineticEnergy(*u_gf, ke_gf);
+   // jreal_t ke = kin_energy.ComputeKineticEnergy(*u_gf, ke_gf);
+   real_t ke = kin_energy.ComputeKineticEnergy(*u_gf);
 
    ParaViewDataCollection *pvdc = NULL;
    if (ctx.paraview)
@@ -1993,6 +2068,7 @@ int main(int argc, char *argv[])
    }
 
 
+   /*
    ConduitDataCollection *cdc = NULL;
    if (ctx.conduit)
    {
@@ -2030,7 +2106,7 @@ int main(int argc, char *argv[])
          MFEM_ABORT("Must build with MFEM_USE_CONDUIT=YES for binary output.");
 #endif
 
-   }
+   }*/
 
    real_t u_inf_loc = u_gf->Normlinf();
    real_t p_inf_loc = p_gf->Normlinf();
@@ -2055,7 +2131,7 @@ int main(int argc, char *argv[])
    real_t kmax = 0.0;
    real_t hmin = 0.0;
 
-   real_t avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
+   real_t avg_diss = kin_energy.ComputeAveragedDissipation(*u_gf);
    kin_energy.ComputeKolmogorovAndTaylorMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, &avg_kolmTimeScl, &max_diss, ke);
    kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta, &kmax, &hmin);
 
@@ -2176,13 +2252,13 @@ int main(int argc, char *argv[])
           fprintf(f_turb, "===============================================================================");
           fprintf(f_turb, "===============================================================================");
           fprintf(f_turb, "===============================================================================");
-          fprintf(f_turb, "=============================================================================\n");
+          fprintf(f_turb, "===================================================================================\n");
           fprintf(f_turb, "        time                        cycle                Max Dissipation       Average Dissipation     Min Kolmogorov Length Scale    Taylor Length Scale");
-          fprintf(f_turb, "        Taylor Length Scale (aniso)          Average Kolm Len          Kolmogorov Time Scale            Average Kolm Time Scale       Taylor Re (Avg)");
+          fprintf(f_turb, "        Taylor Length Scale (aniso)      Average Kolm Len    Kolmogorov Time Scale       Average Kolm Time Scale       Taylor Re (Avg)");
           fprintf(f_turb, "               u_rms    \n");
 
           // Write the initial data point
-           fprintf(f_turb, "%20.16e     %20.16e     %20.16e    %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
+           fprintf(f_turb, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
                        t, static_cast<real_t>(global_cycle + step), max_diss, avg_diss, kolmLenScl, 
                        avg_lambda, avg_lambda_iso, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
                        Re_taylor, u_rms);
@@ -2194,7 +2270,8 @@ int main(int argc, char *argv[])
           fprintf(f_turb_grid, "grid = %d x %d x %d\n", nel1d, nel1d, nel1d);
           fprintf(f_turb_grid, "dofs per component = %d\n", ngridpts);
           fprintf(f_turb_grid, "===============================================================================");
-          fprintf(f_turb_grid, "=================================================================\n");
+          fprintf(f_turb_grid, "==============================================================================");
+          fprintf(f_turb_grid, "==============================================================================\n");
           fprintf(f_turb_grid, "        time                       cycle                  K_max*eta (>1.5)              hmin/eta (<2.1)");
           fprintf(f_turb_grid, "        Average PI_NU              Min PI_NU        ");
           fprintf(f_turb_grid, "        K_max*eta(Avg)             hmin/eta(Avg)    \n");
@@ -2327,6 +2404,7 @@ int main(int argc, char *argv[])
                }
             }
 
+            /*
             if (ctx.conduit)
             {
                cdc->SetCycle(output_cycle);
@@ -2354,7 +2432,7 @@ int main(int argc, char *argv[])
                              << u_inf << ", p_gf Norml2 = " << p_inf << std::endl;
                }
 
-            }
+            }*/
                 
             if (ctx.time_based_output && ctx.snapshot_index < ctx.num_snapshots)
             {
@@ -2396,17 +2474,19 @@ int main(int argc, char *argv[])
 
       flowsolver->ComputeCurl3D(*u_gf, w_gf);
 
-      ke = kin_energy.ComputeKineticEnergy(*u_gf, ke_gf);
-      // ke = kin_energy.ComputeKineticEnergy(*u_gf);
+      // ke = kin_energy.ComputeKineticEnergy(*u_gf, ke_gf);
+      ke = kin_energy.ComputeKineticEnergy(*u_gf);
       vel_curl_ke = kin_energy.ComputeInertialRangeEnergy(*u_gf);
       enstrophy = kin_energy.ComputeEnstrophy(*u_gf);
 
       ComputeDissipation(*u_gf, d_gf);
-      avg_diss = kin_energy.ComputeAveragedDissipation(d_gf);
+      avg_diss = kin_energy.ComputeAveragedDissipation(*u_gf);
       kin_energy.ComputeKolmogorovAndTaylorMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, &avg_kolmTimeScl, &max_diss, ke);
       kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta, &kmax, &hmin);
-      Re_taylor = u_rms*avg_lambda/ctx.kinvis;
-      u_rms =  pow(2.0/3.0*ke,0.5);
+      avg_lambda_iso = kin_energy.ComputeTaylorMicroscale(*u_gf, nullptr, nullptr);
+      u_rms =  pow(2.0/3.0*ke, 0.5);
+      // Re_taylor = u_rms*avg_lambda/ctx.kinvis;
+      Re_taylor = u_rms*avg_lambda_iso/ctx.kinvis;
 
       PI_nu = pow(avg_diss,0.5)/(avg_kolmLenScl*pow(vel_curl_ke,0.75));
       PI_nu_min = pow(max_diss,0.5)/(kolmLenScl*pow(vel_curl_ke,0.75));
@@ -2414,7 +2494,6 @@ int main(int argc, char *argv[])
       avg_hmin_eta = hmin/avg_kolmLenScl;
       avg_kmax_eta = kmax*avg_kolmLenScl;
 
-      avg_lambda_iso = kin_energy.ComputeTaylorMicroscale(*u_gf, nullptr, nullptr);
 
       // if (Mpi::Root())
       // {
@@ -2431,9 +2510,9 @@ int main(int argc, char *argv[])
          {
            printf("%.5E %.5E %.5E %.5E %.5E %.5E %.5E\n", t, ctx.dt, u_inf, p_inf, ke, enstrophy, cfl);
            fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e      %20.16e\n", t, static_cast<real_t>(step + global_cycle), ke, enstrophy, cfl);
-           fprintf(f_turb, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
+           fprintf(f_turb, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
                        t, static_cast<real_t>(global_cycle + step), max_diss, avg_diss, kolmLenScl, 
-                       avg_lambda, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
+                       avg_lambda, avg_lambda_iso, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
                        Re_taylor, u_rms);
            fprintf(f_turb_grid, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e    %20.16e    %20.16e\n",
                        t, static_cast<real_t>(global_cycle + step), kmax_eta, hmin_eta, PI_nu, PI_nu_min, avg_kmax_eta, avg_hmin_eta);
