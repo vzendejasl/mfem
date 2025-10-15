@@ -187,18 +187,18 @@ def compute_curl(vx, vy, vz, KX, KY, KZ):
 #  Step 5: Helmholtz-Hodge decomposition
 # ------------------------------------------------------------------ #
 def compute_compressive_part(vx, vy, vz, KX, KY, KZ, K_squared, nonzero_mask):
-    """Compute compressive (irrotational) part: v_c = -∇φ"""
+    """Compute compressive (irrotational) part: v_c = -??"""
     print("Computing compressive component...")
     
     # Step 1: Compute divergence
     divergence = compute_divergence(vx, vy, vz, KX, KY, KZ)
     
-    # Step 2: Solve for scalar potential φ: ∇²φ = -div
+    # Step 2: Solve for scalar potential ?: ?²? = -div
     div_k = fft.fftn(divergence)
     phi_k = np.zeros_like(div_k, dtype=complex)
     phi_k[nonzero_mask] = div_k[nonzero_mask] / K_squared[nonzero_mask]
     
-    # Step 3: Compute compressive velocity: v_c = -∇φ
+    # Step 3: Compute compressive velocity: v_c = -??
     vx_c_k = -1j * KX * phi_k
     vy_c_k = -1j * KY * phi_k
     vz_c_k = -1j * KZ * phi_k
@@ -216,13 +216,13 @@ def compute_compressive_part(vx, vy, vz, KX, KY, KZ, K_squared, nonzero_mask):
 
 
 def compute_rotational_part(vx, vy, vz, KX, KY, KZ, K_squared, nonzero_mask):
-    """Compute rotational (solenoidal) part: v_r = ∇×A"""
+    """Compute rotational (solenoidal) part: v_r = ?×A"""
     print("Computing rotational component...")
     
     # Step 1: Compute curl
     curl_x, curl_y, curl_z = compute_curl(vx, vy, vz, KX, KY, KZ)
     
-    # Step 2: Solve for vector potential A: ∇²A = -curl
+    # Step 2: Solve for vector potential A: ?²A = -curl
     curl_x_k = fft.fftn(curl_x)
     curl_y_k = fft.fftn(curl_y)
     curl_z_k = fft.fftn(curl_z)
@@ -235,7 +235,7 @@ def compute_rotational_part(vx, vy, vz, KX, KY, KZ, K_squared, nonzero_mask):
     Ay_k[nonzero_mask] = curl_y_k[nonzero_mask] / K_squared[nonzero_mask]
     Az_k[nonzero_mask] = curl_z_k[nonzero_mask] / K_squared[nonzero_mask]
     
-    # Step 3: Compute rotational velocity: v_r = ∇×A
+    # Step 3: Compute rotational velocity: v_r = ?×A
     vx_r_k = 1j * (KY * Az_k - KZ * Ay_k)
     vy_r_k = 1j * (KZ * Ax_k - KX * Az_k)
     vz_r_k = 1j * (KX * Ay_k - KY * Ax_k)
@@ -253,7 +253,7 @@ def compute_rotational_part(vx, vy, vz, KX, KY, KZ, K_squared, nonzero_mask):
     div_A_r = compute_divergence(Ax_r, Ay_r, Az_r, KX, KY, KZ)
     max_div_A_r = np.abs(div_A_r).max()
     
-    print(f"  Max |∇·A_r|:  {max_div_A_r:.2e} (should be ~0)")
+    print(f"  Max |?·A_r|:  {max_div_A_r:.2e} (should be ~0)")
     
     # Calculate kinetic energy
     ke_rot = 0.5 * np.mean(vx_r**2 + vy_r**2 + vz_r**2)
@@ -294,8 +294,8 @@ def verify_decomposition(vx_c, vy_c, vz_c, vx_r, vy_r, vz_r, KX, KY, KZ):
     div_r = compute_divergence(vx_r, vy_r, vz_r, KX, KY, KZ)
     max_div_r = np.abs(div_r).max()
     
-    print(f"  Max |∇×v_compressive|: {max_curl_c:.2e} (should be ~0)")
-    print(f"  Max |∇·v_rotational|:  {max_div_r:.2e} (should be ~0)")
+    print(f"  Max |?×v_compressive|: {max_curl_c:.2e} (should be ~0)")
+    print(f"  Max |?·v_rotational|:  {max_div_r:.2e} (should be ~0)")
 
 
 # ------------------------------------------------------------------ #
@@ -380,7 +380,7 @@ def compute_energy_dissipation_enstophy(vx, vy, vz, nx, ny, nz, dx, dy, dz):
     k_squared = KX_int**2 + KY_int**2 + KZ_int**2
     
     # Compute dissipation (convert integer k to physical)
-    # Physical wavenumber = 2π * integer_k / L, where L=1 for your domain
+    # Physical wavenumber = 2? * integer_k / L, where L=1 for your domain
     k_phys_squared = (2*np.pi)**2 * k_squared  
     total_energy_dissipation = np.sum(energy_density * k_phys_squared)
     print(f"  Total dissipative energy: {total_energy_dissipation:.6f}")
@@ -477,26 +477,38 @@ def plot_velocity_slice(x_coords, y_coords, z_coords, vx, vy, vz,
 # ------------------------------------------------------------------ #
 def save_spectra(k_centers, E_total, E_comp, E_rot, filename, step_number, time_value,
                  nx, ny, nz, total_ke, comp_ke, rot_ke):
-    """Save all spectra to a single file"""
+    """Save all spectra to a single file, including compensated spectra"""
+    import numpy as np
+
     E_sum = E_comp + E_rot
-    
+    k_power = np.power(k_centers, 5.0/3.0)
+
+    # Compensated spectra
+    E_total_compensated = E_total * k_power
+    E_comp_compensated  = E_comp  * k_power
+    E_rot_compensated   = E_rot   * k_power
+    E_sum_compensated   = E_sum   * k_power
+
     output_filename = os.path.join(os.path.dirname(filename), 
-                                   f'energy_spectrum_library_match_step_{step_number}.txt')
+                                   f'energy_spectrum_step_{step_number}.txt')
     
     with open(output_filename, 'w') as f:
         f.write(f"# Energy Spectra for Step {step_number}, Time {time_value:.6e}\n")
         f.write(f"# Domain: [0,1]³, Grid: {nx}x{ny}x{nz}\n")
         f.write(f"# Total KE: {total_ke:.6f}, Compressive KE: {comp_ke:.6f}, Rotational KE: {rot_ke:.6f}\n")
-        f.write(f"# FIXED: Integer wavenumber binning to match library approach\n")
-        f.write("# Columns: wavenumber, E_total, E_compressive, E_rotational, E_sum\n")
-        f.write("# wavenumber,E_total,E_compressive,E_rotational,E_sum\n")
+        f.write("# Columns: wavenumber, E_total, E_compressive, E_rotational, E_sum, "
+                "E_total*k^(5/3), E_compressive*k^(5/3), E_rotational*k^(5/3), E_sum*k^(5/3)\n")
+        f.write("# wavenumber,E_total,E_compressive,E_rotational,E_sum,"
+                "E_total_compensated,E_compressive_compensated,E_rotational_compensated,E_sum_compensated\n")
         
-        for k, e_tot, e_comp, e_rot, e_sum in zip(k_centers, E_total, E_comp, E_rot, E_sum):
-            f.write(f"{k:.6e},{e_tot:.6e},{e_comp:.6e},{e_rot:.6e},{e_sum:.6e}\n")
+        for k, e_tot, e_comp, e_rot, e_sum, e_tot_c, e_comp_c, e_rot_c, e_sum_c in zip(
+                k_centers, E_total, E_comp, E_rot, E_sum,
+                E_total_compensated, E_comp_compensated, E_rot_compensated, E_sum_compensated):
+            f.write(f"{k:.6e},{e_tot:.6e},{e_comp:.6e},{e_rot:.6e},{e_sum:.6e},"
+                    f"{e_tot_c:.6e},{e_comp_c:.6e},{e_rot_c:.6e},{e_sum_c:.6e}\n")
     
     print(f"Saved library-matched spectra to: {output_filename}")
     return output_filename
-
 
 # ------------------------------------------------------------------ #
 #  Main function - puts it all together
@@ -615,3 +627,4 @@ if __name__ == "__main__":
     
     # Plot all spectra together
     plot_spectra(results)
+
