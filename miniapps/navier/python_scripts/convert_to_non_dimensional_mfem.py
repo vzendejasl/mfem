@@ -12,17 +12,40 @@ import sys
 import argparse
 import pandas as pd
 import numpy as np
+import re
 
 def process_file(fname: str, U0: float, domain_length: float) -> None:
     L = domain_length/(2*np.pi)
+
+    # Find the header line
+    header_idx, header_line = None, None
+    with open(fname, "r") as fh:
+        for i, line in enumerate(fh):
+            s = line.strip().lower()
+            if s.startswith("time") and "kinetic" in s and "enstrophy" in s:
+                header_idx, header_line = i, line.strip()
+                break
+    if header_idx is None:
+        print(f"ERROR: Could not find table header in {fname}", file=sys.stderr)
+        return
     
-    # --- 1) Read and clean up
-    df = pd.read_csv(fname, skipinitialspace=True)
-    df.columns = df.columns.str.strip()
+    # Build clean column names from the raw header
+    hdr = header_line.lower()
+    hdr = hdr.replace("kinetic energy", "kinetic_energy")  # <- key fix
+    hdr = re.sub(r"\s+", " ", hdr).strip()
+    names = hdr.split(" ")  # e.g., ['time','cycle','kinetic_energy','enstrophy','cfl']
     
-    # FIX: Handle column names with spaces by replacing with underscores
-    df.columns = df.columns.str.replace(' ', '_')
-    
+    # Read the table rows only (skip the header we just parsed)
+    df = pd.read_csv(
+        fname,
+        sep=r"\s+",
+        engine="python",
+        header=None,
+        skiprows=header_idx + 1,
+        names=names
+    )
+
+
     # Verify we have the required columns
     required_cols = ['time', 'kinetic_energy', 'enstrophy']
     missing_cols = [col for col in required_cols if col not in df.columns]
@@ -71,11 +94,10 @@ def process_file(fname: str, U0: float, domain_length: float) -> None:
 
     df['kinetic_energy_star'] = df['kinetic_energy']/ (U0)**2
 
-    # --- 4) Write out
-    out_dir   = os.path.dirname(os.path.abspath(fname))
-    base, ext = os.path.splitext(os.path.basename(fname))
-    out_name  = f"{base}_processed{ext}"
-    out_path  = os.path.join(out_dir, out_name)
+    # After building df with the right columns...
+    out_dir = os.path.dirname(os.path.abspath(fname))
+    base, _ = os.path.splitext(os.path.basename(fname))
+    out_path = os.path.join(out_dir, f"{base}_processed.csv")
     
     # Write CSV with spaced headers
     with open(out_path, 'w') as f:

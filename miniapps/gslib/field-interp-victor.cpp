@@ -38,6 +38,19 @@
 using namespace mfem;
 using namespace std;
 
+
+// static double g_amp = 0.1;
+// void PerturbMeshTransform(const Vector &x_in, Vector &x_out)
+// {
+//     const double k = 2.0*M_PI; // use L if not 1
+//     x_out = x_in;
+//     // multiply each component by a sin(k*normal_coord) factor so it’s 0 at 0 and L
+//     x_out[0] += g_amp * std::sin(k*x_in[0]) * std::sin(k*x_in[1]) * std::cos(k*x_in[2]);
+//     x_out[1] += g_amp * std::sin(k*x_in[1]) * std::cos(k*x_in[0]) * std::sin(k*x_in[2]);
+//     x_out[2] += g_amp * std::sin(k*x_in[2]) * std::sin(k*x_in[0]) * std::cos(k*x_in[1]);
+// }
+
+
 // Mesh transformation for perturbation
 static double g_amp = 0.05;
 void PerturbMeshTransform(const Vector &x_in, Vector &x_out)
@@ -84,6 +97,7 @@ int main (int argc, char *argv[])
    int order           = 3;
    bool visualization  = true;
    int visport         = 19916;
+   bool visit_output = true;
 
    // Parse command-line options.
    OptionsParser args(argc, argv);
@@ -130,14 +144,12 @@ int main (int argc, char *argv[])
    // Mesh mesh_1(src_mesh_file, 1, 1, false);
    // Mesh mesh_2(tar_mesh_file, 1, 1, false);
 
-   int nx = 8;
+   int nx = 32;
    double L = 1.0;
 
    Mesh mesh_1_init = Mesh::MakeCartesian3D(nx, nx, nx, Element::HEXAHEDRON, 
                                           L, L, L, false);
    
-   Mesh mesh_2 = Mesh::MakeCartesian3D(nx, nx, nx, Element::HEXAHEDRON, 
-                                          L, L, L, false);
    Vector x_trans({L, 0.0, 0.0});
    Vector y_trans({0.0, L, 0.0});
    Vector z_trans({0.0, 0.0, L});
@@ -146,6 +158,7 @@ int main (int argc, char *argv[])
    std::vector<int> v2v = mesh_1_init.CreatePeriodicVertexMapping(translations);
    
    Mesh mesh_1 = Mesh::MakePeriodic(mesh_1_init, v2v);
+   Mesh mesh_2 = Mesh::MakePeriodic(mesh_1_init, v2v);
    mesh_1.Transform(PerturbMeshTransform);         // Apply perturbation
 
    const int dim = mesh_1.Dimension();
@@ -170,7 +183,9 @@ int main (int argc, char *argv[])
    int src_vdim = src_ncomp;
    FiniteElementCollection *src_fec = NULL;
    FiniteElementSpace *src_fes = NULL;
+   FiniteElementSpace *des_fes = NULL;
    GridFunction *func_source = NULL;
+   GridFunction *func_desired = NULL;
    if (src_fieldtype < 0) // use src_sltn_file
    {
       ifstream mat_stream_1(src_sltn_file);
@@ -213,6 +228,10 @@ int main (int argc, char *argv[])
       // Project the grid function using VectorFunctionCoefficient.
       VectorFunctionCoefficient F(src_vdim, vector_func);
       func_source->ProjectCoefficient(F);
+
+      des_fes = new FiniteElementSpace(&mesh_2, src_fec, src_ncomp, src_gf_ordering);
+      func_desired = new GridFunction(des_fes);
+      func_desired->ProjectCoefficient(F);
    }
 
    // Display the starting mesh and the field.
@@ -229,14 +248,37 @@ int main (int argc, char *argv[])
       else
       {
          sout1.precision(8);
-         sout1 << "solution\n" << mesh_1 << *func_source
-               << "window_title 'Source mesh and solution'"
+         sout1 << "solution\n" << mesh_1 << *func_desired
+               << "window_title 'Desired mesh and solution'"
                << "window_geometry 0 0 600 600";
          if (dim == 2) { sout1 << "keys RmjAc"; }
          if (dim == 3) { sout1 << "keys mA\n"; }
          sout1 << flush;
       }
    }
+
+   // // Display the target mesh and the field.
+   // if (visualization)
+   // {
+   //    char vishost[] = "localhost";
+   //    socketstream sout1;
+   //    sout1.open(vishost, visport);
+   //    if (!sout1)
+   //    {
+   //       cout << "Unable to connect to GLVis server at "
+   //            << vishost << ':' << visport << endl;
+   //    }
+   //    else
+   //    {
+   //       sout1.precision(8);
+   //       sout1 << "solution\n" << mesh_2 << *func_desired
+   //             << "window_title 'Source mesh and solution'"
+   //             << "window_geometry 600 600 600 600";
+   //       if (dim == 2) { sout1 << "keys RmjAc"; }
+   //       if (dim == 3) { sout1 << "keys mA\n"; }
+   //       sout1 << flush;
+   //    }
+   // }
 
    const Geometry::Type gt = mesh_2.GetTypicalElementGeometry();
    MFEM_VERIFY(gt != Geometry::PRISM, "Wedge elements are not currently "
@@ -342,7 +384,11 @@ int main (int argc, char *argv[])
    // Evaluate source grid function.
    Vector interp_vals(nodes_cnt*tar_ncomp);
    FindPointsGSLIB finder;
-   finder.Setup(mesh_1);
+   // finder.Setup(mesh_1, 0.9, 1.0e-12, 256);
+   finder.Setup(mesh_1, 0.9, 1.0e-12, 256);
+   // finder.SetDistanceToleranceForPointsFoundOnBoundary(std::max(1e-12 * L, 2.0 * g_amp));
+   finder.SetDistanceToleranceForPointsFoundOnBoundary(1);
+
    finder.Interpolate(vxyz, *func_source, interp_vals, point_ordering);
 
    // Project the interpolated values to the target FiniteElementSpace.
@@ -436,6 +482,27 @@ int main (int argc, char *argv[])
    rho_ofs.precision(8);
    func_target.Save(rho_ofs);
    rho_ofs.close();
+
+   // VisIt output
+   if (visit_output)
+   {
+      
+      VisItDataCollection src_dc("SourceMesh", &mesh_1);
+      src_dc.SetPrecision(8);
+      src_dc.RegisterField("u_src", func_source);
+      src_dc.SetCycle(0);
+      src_dc.SetTime(0.0);
+      src_dc.Save();
+      
+      VisItDataCollection tar_dc("TargetMesh", &mesh_2);
+      tar_dc.SetPrecision(8);
+      tar_dc.RegisterField("u_interp", &func_target);
+      tar_dc.RegisterField("u_exact", func_desired);
+      tar_dc.SetCycle(0);
+      tar_dc.SetTime(0.0);
+      tar_dc.Save();
+      
+   }
 
    // Free the internal gslib data.
    finder.FreeData();
