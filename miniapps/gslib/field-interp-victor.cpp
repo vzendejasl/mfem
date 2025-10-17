@@ -98,6 +98,7 @@ int main (int argc, char *argv[])
    bool visualization  = true;
    int visport         = 19916;
    bool visit_output = true;
+   int nx = 8;
 
    // Parse command-line options.
    OptionsParser args(argc, argv);
@@ -125,6 +126,8 @@ int main (int argc, char *argv[])
    args.AddOption(&visualization, "-vis", "--visualization", "-no-vis",
                   "--no-visualization",
                   "Enable or disable GLVis visualization.");
+   args.AddOption(&nx, "-n", "--num_el",
+                  "Number of elements in the i direction.");
    args.AddOption(&visport, "-p", "--send-port", "Socket for GLVis.");
    args.Parse();
    if (!args.Good())
@@ -144,7 +147,6 @@ int main (int argc, char *argv[])
    // Mesh mesh_1(src_mesh_file, 1, 1, false);
    // Mesh mesh_2(tar_mesh_file, 1, 1, false);
 
-   int nx = 32;
    double L = 1.0;
 
    Mesh mesh_1_init = Mesh::MakeCartesian3D(nx, nx, nx, Element::HEXAHEDRON, 
@@ -385,7 +387,7 @@ int main (int argc, char *argv[])
    Vector interp_vals(nodes_cnt*tar_ncomp);
    FindPointsGSLIB finder;
    // finder.Setup(mesh_1, 0.9, 1.0e-12, 256);
-   finder.Setup(mesh_1, 0.9, 1.0e-12, 256);
+   finder.Setup(mesh_1, 5);
    // finder.SetDistanceToleranceForPointsFoundOnBoundary(std::max(1e-12 * L, 2.0 * g_amp));
    finder.SetDistanceToleranceForPointsFoundOnBoundary(1);
 

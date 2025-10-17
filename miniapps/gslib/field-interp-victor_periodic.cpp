@@ -11,8 +11,6 @@
 
 #include "mfem.hpp"
 #include <fstream>
-#include <cmath>
-#include <iomanip>
 
 using namespace mfem;
 using namespace std;
@@ -28,25 +26,13 @@ void PerturbMeshTransform(const Vector &x_in, Vector &x_out)
    x_out[2] += g_amp * std::sin(freq*x_in[0]) * std::cos(freq*x_in[1]) * 0.6;
 }
 
-// Create periodic mesh
-Mesh MakePeriodicMesh(int nx, int ny, int nz, double L)
-{
-   Mesh base_mesh = Mesh::MakeCartesian3D(nx, ny, nz, Element::HEXAHEDRON, 
-                                          L, L, L, false);
-   
-   Vector x_trans({L, 0.0, 0.0});
-   Vector y_trans({0.0, L, 0.0});
-   Vector z_trans({0.0, 0.0, L});
-   std::vector<Vector> translations = {x_trans, y_trans, z_trans};
-   
-   std::vector<int> v2v = base_mesh.CreatePeriodicVertexMapping(translations);
-   return Mesh::MakePeriodic(base_mesh, v2v);
-}
-
 // Scalar function to project
 double scalar_func(const Vector &x)
 {
-   return std::sin(M_PI*x[0]) * std::cos(M_PI*x[1]) * std::sin(0.5*M_PI*x[2]);
+   const int dim = x.Size();
+   double res = 0.0;
+   for (int d = 0; d < dim; d++) { res += x(d) * x(d); }
+   return res;
 }
 
 // Vector field function
@@ -61,15 +47,6 @@ void vector_func(const Vector &p, Vector &F)
    F(2) = 0.0;
 }
 
-// Helper function to ensure mesh has nodes
-void EnsureNodes(Mesh &mesh, int order)
-{
-   if (!mesh.GetNodes())
-   {
-      mesh.SetCurvature(order, false, mesh.Dimension(), Ordering::byNODES);
-   }
-}
-
 int main (int argc, char *argv[])
 {
    // Initialize MPI
@@ -79,27 +56,51 @@ int main (int argc, char *argv[])
    Hypre::Init();
 
    // Set the method's default parameters.
-   int nx = 8;
-   int order = 3;
-   double L = 1.0;
-   bool visualization = false;
-   bool visit_output = true;
-   int visport = 19916;
-   bool vector_field = false;
+   const char *src_mesh_file = "../meshing/square01.mesh";
+   const char *tar_mesh_file = "../../data/inline-tri.mesh";
+   const char *src_sltn_file = "must_be_provided_by_the_user.gf";
+   int src_fieldtype   = 0;
+   int src_ncomp       = 1;
+   int src_gf_ordering = 0;
+   int ref_levels      = 0;
+   int fieldtype       = -1;
+   int order           = 3;
+   bool visualization  = true;
+   int visport         = 19916;
+   bool visit_output   = true;
+   int nx              = 8;
 
    // Parse command-line options.
    OptionsParser args(argc, argv);
-   args.AddOption(&nx, "-nx", "--nx", "Number of elements per dimension.");
-   args.AddOption(&order, "-o", "--order", "Finite element order.");
-   args.AddOption(&g_amp, "-amp", "--amplitude", "Perturbation amplitude.");
-   args.AddOption(&L, "-L", "--domain-size", "Domain size.");
-   args.AddOption(&vector_field, "-vec", "--vector-field", "-no-vec", 
-                  "--no-vector-field", "Use vector field instead of scalar field.");
+   args.AddOption(&src_mesh_file, "-m1", "--mesh1",
+                  "Mesh file for the starting solution.");
+   args.AddOption(&tar_mesh_file, "-m2", "--mesh2",
+                  "Mesh file for interpolation.");
+   args.AddOption(&src_sltn_file, "-s1", "--solution1",
+                  "(optional) GridFunction file compatible with src_mesh_file."
+                  "Set src_fieldtype to -1 if this option is used.");
+   args.AddOption(&src_fieldtype, "-fts", "--field-type-src",
+                  "Source GridFunction type:"
+                  "0 - H1 (default), 1 - L2, 2 - H(div), 3 - H(curl).");
+   args.AddOption(&src_ncomp, "-nc", "--ncomp",
+                  "Number of components for H1 or L2 GridFunctions.");
+   args.AddOption(&src_gf_ordering, "-gfo", "--gfo",
+                  "Node ordering: 0 (byNodes) or 1 (byVDim)");
+   args.AddOption(&ref_levels, "-r", "--refine",
+                  "Number of refinements of the interpolation mesh.");
+   args.AddOption(&fieldtype, "-ft", "--field-type",
+                  "Target GridFunction type: -1 - source GridFunction type (default),"
+                  "0 - H1, 1 - L2, 2 - H(div), 3 - H(curl).");
+   args.AddOption(&order, "-o", "--order",
+                  "Order of the interpolated solution.");
    args.AddOption(&visualization, "-vis", "--visualization", "-no-vis",
-                  "--no-visualization", "Enable or disable GLVis visualization.");
-   args.AddOption(&visit_output, "-visit", "--visit-output", "-no-visit", 
-                  "--no-visit-output", "Enable or disable VisIt output.");
+                  "--no-visualization",
+                  "Enable or disable GLVis visualization.");
+   args.AddOption(&nx, "-n", "--num_el",
+                  "Number of elements in the i direction.");
    args.AddOption(&visport, "-p", "--send-port", "Socket for GLVis.");
+   args.AddOption(&visit_output, "-visit", "--visit-output",
+                  "-no-visit", "--no-visit-output", "VisIt dump on/off.");
    args.Parse();
    if (!args.Good())
    {
@@ -116,304 +117,375 @@ int main (int argc, char *argv[])
    return 2;
 #endif
 
+   // If a grid function is specified, set src_fieldtype to -1
+   if (strcmp(src_sltn_file, "must_be_provided_by_the_user.gf") != 0)
+   {
+      src_fieldtype = -1;
+   }
+
    if (myid == 0)
    {
       cout << "\n=== Parallel FindPoints Interpolation ===\n";
       cout << "MPI ranks: " << nprocs << "\n";
       cout << "Grid: " << nx << " x " << nx << " x " << nx << "\n";
       cout << "Order: " << order << "\n";
-      cout << "Field type: " << (vector_field ? "Vector (3D)" : "Scalar") << "\n";
       cout << "Amplitude: " << g_amp << "\n";
    }
 
+   double L = 1.0;
+
    // Create serial meshes on all ranks (identical)
-   Mesh mesh_1_serial = MakePeriodicMesh(nx, nx, nx, L);  // Source: periodic
-   mesh_1_serial.Transform(PerturbMeshTransform);         // Apply perturbation
+   Mesh mesh_1_init = Mesh::MakeCartesian3D(nx, nx, nx, Element::HEXAHEDRON, 
+                                             L, L, L, false);
    
-   Mesh mesh_2_serial = Mesh::MakeCartesian3D(nx, nx, nx, Element::HEXAHEDRON, 
-                                              L, L, L, false);  // Target: non-periodic
+   Vector x_trans({L, 0.0, 0.0});
+   Vector y_trans({0.0, L, 0.0});
+   Vector z_trans({0.0, 0.0, L});
+   std::vector<Vector> translations = {x_trans, y_trans, z_trans};
+   
+   std::vector<int> v2v = mesh_1_init.CreatePeriodicVertexMapping(translations);
+   
+   Mesh mesh_1_serial = Mesh::MakePeriodic(mesh_1_init, v2v);
+   Mesh mesh_2_serial = Mesh::MakePeriodic(mesh_1_init, v2v);
+   mesh_1_serial.Transform(PerturbMeshTransform);  // Apply perturbation to source
 
    const int dim = mesh_1_serial.Dimension();
-   MFEM_VERIFY(dim == 3, "This code is for 3D meshes");
+   MFEM_ASSERT(dim == mesh_2_serial.Dimension(), "Source and target meshes "
+               "must be in the same dimension.");
+   MFEM_VERIFY(dim > 1, "GSLIB requires a 2D or a 3D mesh");
 
-   EnsureNodes(mesh_1_serial, order);
-   EnsureNodes(mesh_2_serial, order);
+   // Apply refinement to serial target mesh before partitioning
+   for (int lev = 0; lev < ref_levels; lev++)
+   {
+      mesh_2_serial.UniformRefinement();
+   }
 
+   if (mesh_1_serial.GetNodes() == NULL) { mesh_1_serial.SetCurvature(1); }
+   if (mesh_2_serial.GetNodes() == NULL) { mesh_2_serial.SetCurvature(1); }
+   
+   const int mesh_poly_deg = mesh_2_serial.GetNodes()->FESpace()->GetElementOrder(0);
+   
    if (myid == 0)
    {
-      cout << "Source mesh curvature: " << mesh_1_serial.GetNodes()->OwnFEC()->Name() << endl;
-      cout << "Target mesh curvature: " << mesh_2_serial.GetNodes()->OwnFEC()->Name() << endl;
+      cout << "Source mesh curvature: "
+           << mesh_1_serial.GetNodes()->OwnFEC()->Name() << endl
+           << "Target mesh curvature: "
+           << mesh_2_serial.GetNodes()->OwnFEC()->Name() << endl;
    }
 
    // Create parallel meshes
    if (myid == 0) { cout << "Creating parallel meshes...\n"; }
+   ParMesh mesh_1(MPI_COMM_WORLD, mesh_1_serial);
+   ParMesh mesh_2(MPI_COMM_WORLD, mesh_2_serial);
    
-   ParMesh mesh_1(MPI_COMM_WORLD, mesh_1_serial);  // Source
-   ParMesh mesh_2(MPI_COMM_WORLD, mesh_2_serial);  // Target
-   
-   // Clear serial meshes to save memory
+   // Clear serial meshes
    mesh_1_serial.Clear();
    mesh_2_serial.Clear();
 
-   // Setup finite element spaces
-   const int vdim = vector_field ? 3 : 1;
-   H1_FECollection fec(order, dim);
-   ParFiniteElementSpace fes_src(&mesh_1, &fec, vdim);  // Source space
-   ParFiniteElementSpace fes_tar(&mesh_2, &fec, vdim);  // Target space
+   int src_vdim = src_ncomp;
+   FiniteElementCollection *src_fec = NULL;
+   ParFiniteElementSpace *src_fes = NULL;
+   ParFiniteElementSpace *des_fes = NULL;
+   ParGridFunction *func_source = NULL;
+   ParGridFunction *func_desired = NULL;
 
-   HYPRE_BigInt glob_dofs_src = fes_src.GlobalTrueVSize();
-   if (myid == 0)
+   if (src_fieldtype < 0) // use src_sltn_file
    {
-      cout << "Global TRUE DoFs: " << glob_dofs_src 
-           << " (" << (vector_field ? "3 components" : "scalar") << ")\n";
+      // For parallel: would need to handle file loading differently
+      MFEM_ABORT("Loading grid functions from file not implemented in parallel version.");
    }
-
-   // Create source grid function
-   ParGridFunction func_source(&fes_src);
-   if (vector_field)
+   else if (src_fieldtype == 0)
    {
-      VectorFunctionCoefficient vec_coeff(vdim, vector_func);
-      func_source.ProjectCoefficient(vec_coeff);
+      src_fec = new H1_FECollection(order, dim);
+   }
+   else if (src_fieldtype == 1)
+   {
+      src_fec = new L2_FECollection(order, dim);
+   }
+   else if (src_fieldtype == 2)
+   {
+      src_fec = new RT_FECollection(order, dim);
+      src_ncomp = 1;
+      src_vdim = dim;
+   }
+   else if (src_fieldtype == 3)
+   {
+      src_fec = new ND_FECollection(order, dim);
+      src_ncomp = 1;
+      src_vdim = dim;
    }
    else
    {
-      FunctionCoefficient scalar_coeff(scalar_func);
-      func_source.ProjectCoefficient(scalar_coeff);
+      MFEM_ABORT("Invalid FECollection type.");
    }
 
-   // Get target mesh node coordinates
-   ParGridFunction *tar_nodes = dynamic_cast<ParGridFunction*>(mesh_2.GetNodes());
-   MFEM_VERIFY(tar_nodes && tar_nodes->VectorDim() == dim, "Expected mesh nodes.");
-   
-   const int local_ndofs = tar_nodes->FESpace()->GetNDofs();
-   
+   if (src_fieldtype > -1)
+   {
+      MFEM_VERIFY(src_gf_ordering >= 0 && src_gf_ordering <= 1,
+                  "Source grid function ordering must be 0 (byNodes) or 1 (byVDIM).");
+      src_fes = new ParFiniteElementSpace(&mesh_1, src_fec, src_ncomp, src_gf_ordering);
+      func_source = new ParGridFunction(src_fes);
+      // Project the grid function using VectorFunctionCoefficient.
+      VectorFunctionCoefficient F(src_vdim, vector_func);
+      func_source->ProjectCoefficient(F);
+
+      des_fes = new ParFiniteElementSpace(&mesh_2, src_fec, src_ncomp, src_gf_ordering);
+      func_desired = new ParGridFunction(des_fes);
+      func_desired->ProjectCoefficient(F);
+   }
+
+   HYPRE_BigInt glob_dofs_src = src_fes->GlobalTrueVSize();
    if (myid == 0)
    {
-      cout << "Local DOFs per rank (avg): " << local_ndofs << "\n";
+      cout << "Global TRUE DoFs: " << glob_dofs_src << "\n";
    }
 
-   // Pack coordinates in byNODES format
-   Vector vxyz(dim * local_ndofs);
-   for (int d = 0; d < dim; ++d)
+   // Display the starting mesh and the field.
+   if (visualization && myid == 0)
    {
-      const double *comp = tar_nodes->GetData() + d*local_ndofs;
-      for (int i = 0; i < local_ndofs; ++i) 
-      { 
-         vxyz[d*local_ndofs + i] = comp[i]; 
+      char vishost[] = "localhost";
+      socketstream sout1;
+      sout1.open(vishost, visport);
+      if (!sout1)
+      {
+         cout << "Unable to connect to GLVis server at "
+              << vishost << ':' << visport << endl;
+      }
+      else
+      {
+         sout1.precision(8);
+         sout1 << "parallel " << nprocs << " " << myid << "\n";
+         sout1 << "solution\n" << mesh_1 << *func_desired
+               << "window_title 'Desired mesh and solution'"
+               << "window_geometry 0 0 600 600";
+         if (dim == 3) { sout1 << "keys mA\n"; }
+         sout1 << flush;
       }
    }
 
-   // Setup FindPointsGSLIB
-   if (myid == 0) { cout << "\n=== Using Parallel FindPoints ===\n"; }
+   const Geometry::Type gt = mesh_2.GetTypicalElementGeometry();
+   MFEM_VERIFY(gt != Geometry::PRISM, "Wedge elements are not currently supported.");
+   MFEM_VERIFY(mesh_2.GetNumGeometries(mesh_2.Dimension()) == 1, 
+               "Mixed meshes are not currently supported.");
+
+   // Ensure the source grid function can be transferred using GSLIB-FindPoints.
+   const FiniteElementCollection *fec_in = func_source->FESpace()->FEColl();
+   if (myid == 0)
+   {
+      std::cout << "Source FE collection: " << fec_in->Name() << std::endl;
+   }
+
+   if (src_fieldtype < 0)
+   {
+      const H1_FECollection *fec_h1 = dynamic_cast<const H1_FECollection *>(fec_in);
+      const L2_FECollection *fec_l2 = dynamic_cast<const L2_FECollection *>(fec_in);
+      const RT_FECollection *fec_rt = dynamic_cast<const RT_FECollection *>(fec_in);
+      const ND_FECollection *fec_nd = dynamic_cast<const ND_FECollection *>(fec_in);
+      if (fec_h1)      { src_fieldtype = 0; }
+      else if (fec_l2) { src_fieldtype = 1; }
+      else if (fec_rt) { src_fieldtype = 2; }
+      else if (fec_nd) { src_fieldtype = 3; }
+      else { MFEM_ABORT("GridFunction type not supported yet."); }
+   }
+   if (fieldtype < 0) { fieldtype = src_fieldtype; }
+
+   // Setup the FiniteElementSpace and GridFunction on the target mesh.
+   FiniteElementCollection *tar_fec = NULL;
+   ParFiniteElementSpace *tar_fes = NULL;
+
+   int tar_vdim = src_vdim;
+   if (fieldtype == 0)
+   {
+      tar_fec = new H1_FECollection(order, dim);
+      tar_vdim = (src_fieldtype > 1) ? dim : src_vdim;
+   }
+   else if (fieldtype == 1)
+   {
+      tar_fec = new L2_FECollection(order, dim);
+      tar_vdim = (src_fieldtype > 1) ? dim : src_vdim;
+   }
+   else if (fieldtype == 2)
+   {
+      tar_fec = new RT_FECollection(order, dim);
+      tar_vdim = 1;
+      MFEM_VERIFY(src_fieldtype > 1, "Cannot interpolate a scalar "
+                  "grid function to a vector");
+   }
+   else if (fieldtype == 3)
+   {
+      tar_fec = new ND_FECollection(order, dim);
+      tar_vdim = 1;
+      MFEM_VERIFY(src_fieldtype > 1, "Cannot interpolate a scalar "
+                  "grid function to a vector");
+   }
+   else
+   {
+      MFEM_ABORT("GridFunction type not supported.");
+   }
    
+   if (myid == 0)
+   {
+      std::cout << "Target FE collection: " << tar_fec->Name() << std::endl;
+   }
+   
+   tar_fes = new ParFiniteElementSpace(&mesh_2, tar_fec, tar_vdim,
+                                       src_fes->GetOrdering());
+   ParGridFunction func_target(tar_fes);
+
+   const int NE = mesh_2.GetNE(),
+             nsp = tar_fes->GetTypicalFE()->GetNodes().GetNPoints(),
+             tar_ncomp = func_target.VectorDim();
+
+   // Generate list of points where the grid function will be evaluated.
+   Vector vxyz;
+   int point_ordering;
+   if (fieldtype == 0 && order == mesh_poly_deg)
+   {
+      vxyz = *mesh_2.GetNodes();
+      point_ordering = mesh_2.GetNodes()->FESpace()->GetOrdering();
+   }
+   else
+   {
+      vxyz.SetSize(nsp*NE*dim);
+      for (int i = 0; i < NE; i++)
+      {
+         const FiniteElement *fe = tar_fes->GetFE(i);
+         const IntegrationRule ir = fe->GetNodes();
+         ElementTransformation *et = tar_fes->GetElementTransformation(i);
+
+         DenseMatrix pos;
+         et->Transform(ir, pos);
+         Vector rowx(vxyz.GetData() + i*nsp, nsp),
+                rowy(vxyz.GetData() + i*nsp + NE*nsp, nsp),
+                rowz;
+         if (dim == 3)
+         {
+            rowz.SetDataAndSize(vxyz.GetData() + i*nsp + 2*NE*nsp, nsp);
+         }
+         pos.GetRow(0, rowx);
+         pos.GetRow(1, rowy);
+         if (dim == 3) { pos.GetRow(2, rowz); }
+      }
+      point_ordering = Ordering::byNODES;
+   }
+   const int nodes_cnt = vxyz.Size() / dim;
+
+   // Evaluate source grid function using parallel FindPointsGSLIB
+   if (myid == 0)
+   {
+      cout << "\n=== Using Parallel FindPoints ===\n";
+   }
+
+   Vector interp_vals(nodes_cnt*tar_ncomp);
    FindPointsGSLIB finder(MPI_COMM_WORLD);
-   finder.Setup(mesh_1);
-   finder.SetDistanceToleranceForPointsFoundOnBoundary(std::max(1e-12 * L, 2.0 * g_amp));
-   
-   // Find points
-   finder.FindPoints(vxyz, Ordering::byNODES);
+   finder.Setup(mesh_1, 1.0*nx/8);
+   finder.SetDistanceToleranceForPointsFoundOnBoundary(1);
 
-   // Get status information
-   Array<unsigned int> code_out = finder.GetCode();
-   Array<unsigned int> task_id_out = finder.GetProc();
+   finder.Interpolate(vxyz, *func_source, interp_vals, point_ordering);
 
-   // Count results locally
-   int local_inside = 0, local_border = 0, local_miss = 0;
-   for (int i = 0; i < local_ndofs; ++i)
+   // Project the interpolated values to the target FiniteElementSpace.
+   if (fieldtype <= 1) // H1 or L2
    {
-      if (code_out[i] == 0u) ++local_inside;
-      else if (code_out[i] == 1u) ++local_border;
-      else ++local_miss;
+      if ((fieldtype == 0 && order == mesh_poly_deg) || fieldtype == 1)
+      {
+         func_target = interp_vals;
+      }
+      else // H1 - but mesh order != GridFunction order
+      {
+         Array<int> vdofs;
+         Vector vals;
+         Vector elem_dof_vals(nsp*tar_ncomp);
+
+         for (int i = 0; i < mesh_2.GetNE(); i++)
+         {
+            tar_fes->GetElementVDofs(i, vdofs);
+            vals.SetSize(vdofs.Size());
+            for (int j = 0; j < nsp; j++)
+            {
+               for (int d = 0; d < tar_ncomp; d++)
+               {
+                  // Arrange values byNodes
+                  int idx = src_fes->GetOrdering() == Ordering::byNODES ?
+                            d*nsp*NE + i*nsp + j : i*nsp*dim + d + j*dim;
+                  elem_dof_vals(j + d*nsp) = interp_vals(idx);
+               }
+            }
+            func_target.SetSubVector(vdofs, elem_dof_vals);
+         }
+      }
+   }
+   else // H(div) or H(curl)
+   {
+      Array<int> vdofs;
+      Vector vals;
+      Vector elem_dof_vals(nsp*tar_ncomp);
+
+      for (int i = 0; i < mesh_2.GetNE(); i++)
+      {
+         tar_fes->GetElementVDofs(i, vdofs);
+         vals.SetSize(vdofs.Size());
+         for (int j = 0; j < nsp; j++)
+         {
+            for (int d = 0; d < tar_ncomp; d++)
+            {
+               // Arrange values byVDim
+               int idx = src_fes->GetOrdering() == Ordering::byNODES ?
+                         d*nsp*NE + i*nsp + j : i*nsp*dim + d + j*dim;
+               elem_dof_vals(j*tar_ncomp+d) = interp_vals(idx);
+            }
+         }
+         tar_fes->GetFE(i)->ProjectFromNodes(elem_dof_vals,
+                                             *tar_fes->GetElementTransformation(i),
+                                             vals);
+         func_target.SetSubVector(vdofs, vals);
+      }
    }
 
-   // Global reduction
-   int global_inside, global_border, global_miss, global_ndofs;
-   MPI_Allreduce(&local_inside, &global_inside, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-   MPI_Allreduce(&local_border, &global_border, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-   MPI_Allreduce(&local_miss, &global_miss, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-   MPI_Allreduce(&local_ndofs, &global_ndofs, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+   func_target.SetTrueVector();
+   func_target.SetFromTrueVector();
 
+   // Visualize the transferred solution.
+   if (visualization && myid == 0)
+   {
+      char vishost[] = "localhost";
+      socketstream sout1;
+      sout1.open(vishost, visport);
+      if (!sout1)
+      {
+         cout << "Unable to connect to GLVis server at "
+              << vishost << ':' << visport << endl;
+      }
+      else
+      {
+         sout1.precision(8);
+         sout1 << "parallel " << nprocs << " " << myid << "\n";
+         sout1 << "solution\n" << mesh_2 << func_target
+               << "window_title 'Target mesh and solution'"
+               << "window_geometry 600 0 600 600";
+         if (dim == 3) { sout1 << "keys mA\n"; }
+         sout1 << flush;
+      }
+   }
+
+   // Output the target mesh with the interpolated solution.
    if (myid == 0)
    {
-      cout << "FindPoints results:\n";
-      cout << "  Inside elements: " << global_inside << "\n";
-      cout << "  On boundaries:   " << global_border << "\n";  
-      cout << "  Not found:       " << global_miss << "\n";
-      cout << "  Total DOFs:      " << global_ndofs << "\n";
-      double success_rate = (global_ndofs > 0) ? 100.0 * (global_inside + global_border) / global_ndofs : 0.0;
-      cout << "  Success rate:    " << fixed << setprecision(2) << success_rate << "%\n";
+      ostringstream rho_name;
+      rho_name << "interpolated.gf";
+      ofstream rho_ofs(rho_name.str().c_str());
+      rho_ofs.precision(8);
+      func_target.Save(rho_ofs);
+      rho_ofs.close();
    }
-
-   // Create target grid function
-   ParGridFunction func_target(&fes_tar);
-
-   // Interpolate - handle scalar vs vector
-   if (vector_field)
-   {
-      Vector interp_vals(local_ndofs * vdim);
-      finder.Interpolate(func_source, interp_vals);
-      
-      // Handle NaN values
-      int local_fallback = 0;
-      for (int i = 0; i < local_ndofs; ++i)
-      {
-         bool has_nan = false;
-         for (int c = 0; c < vdim; ++c)
-         {
-            int idx = c * local_ndofs + i;
-            if (std::isnan(interp_vals[idx]) || code_out[i] >= 2)
-            {
-               has_nan = true;
-               break;
-            }
-         }
-         
-         if (has_nan)
-         {
-            Vector pt(dim);
-            for (int d = 0; d < dim; ++d) 
-            {
-               pt[d] = vxyz[d*local_ndofs + i];
-            }
-            Vector val(vdim);
-            vector_func(pt, val);
-            for (int c = 0; c < vdim; ++c)
-            {
-               interp_vals[c * local_ndofs + i] = val[c];
-            }
-            ++local_fallback;
-         }
-      }
-      
-      // Direct assignment
-      double *func_target_data = func_target.GetData();
-      for (int i = 0; i < local_ndofs * vdim; ++i)
-      {
-         func_target_data[i] = interp_vals[i];
-      }
-      
-      int global_fallback;
-      MPI_Allreduce(&local_fallback, &global_fallback, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-      if (myid == 0 && global_fallback > 0)
-      {
-         cout << "Fallback to exact function: " << global_fallback << " points\n";
-      }
-   }
-   else  // Scalar field
-   {
-      Vector interp_vals(local_ndofs);
-      finder.Interpolate(func_source, interp_vals);
-      
-      // Handle NaN values
-      int local_fallback = 0;
-      for (int i = 0; i < local_ndofs; ++i)
-      {
-         if (std::isnan(interp_vals[i]) || code_out[i] >= 2)
-         {
-            Vector pt(dim);
-            for (int d = 0; d < dim; ++d) 
-            {
-               pt[d] = vxyz[d*local_ndofs + i];
-            }
-            interp_vals[i] = scalar_func(pt);
-            ++local_fallback;
-         }
-      }
-      
-      // Direct assignment
-      double *func_target_data = func_target.GetData();
-      for (int i = 0; i < local_ndofs; ++i) 
-      { 
-         func_target_data[i] = interp_vals[i]; 
-      }
-      
-      int global_fallback;
-      MPI_Allreduce(&local_fallback, &global_fallback, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-      if (myid == 0 && global_fallback > 0)
-      {
-         cout << "Fallback to exact function: " << global_fallback << " points\n";
-      }
-   }
-
-   // Compute errors
-   if (myid == 0) { cout << "\n=== Computing Errors ===\n"; }
-   
-   // Create exact solution on target mesh
-   ParGridFunction func_exact(&fes_tar);
-   
-   if (vector_field)
-   {
-      VectorFunctionCoefficient exact_coeff(vdim, vector_func);
-      func_exact.ProjectCoefficient(exact_coeff);
-      
-      double l2_err_interp = func_target.ComputeL2Error(exact_coeff);
-      double l2_err_exact = func_exact.ComputeL2Error(exact_coeff);
-      double l2_err_src = func_source.ComputeL2Error(exact_coeff);
-      
-      // Compute norm
-      Vector zero_vec(vdim);
-      zero_vec = 0.0;
-      VectorConstantCoefficient zero_coeff(zero_vec);
-      double l2_norm = func_exact.ComputeL2Error(zero_coeff);
-      double rel_err = (l2_norm > 0.0) ? (l2_err_interp / l2_norm) : l2_err_interp;
-      
-      if (myid == 0)
-      {
-         cout << scientific << setprecision(12);
-         cout << "L2 error of u_interp:  " << l2_err_interp << "\n";
-         cout << "L2 error of u_exact:   " << l2_err_exact << " (sanity check)\n";
-         cout << "L2 error of u_src:     " << l2_err_src << " (on perturbed mesh)\n";
-         cout << "L2 norm of u_exact:    " << l2_norm << "\n";
-         cout << "Relative L2 error:     " << rel_err*100.0 << " %\n";
-         
-         if (l2_err_exact > 1e-10)
-         {
-            cout << "WARNING: u_exact has non-trivial error vs analytical solution!\n";
-         }
-      }
-   }
-   else
-   {
-      FunctionCoefficient exact_coeff(scalar_func);
-      func_exact.ProjectCoefficient(exact_coeff);
-      
-      double l2_err_interp = func_target.ComputeL2Error(exact_coeff);
-      double l2_err_exact = func_exact.ComputeL2Error(exact_coeff);
-      double l2_err_src = func_source.ComputeL2Error(exact_coeff);
-      
-      ConstantCoefficient zero_coeff(0.0);
-      double l2_norm = func_exact.ComputeL2Error(zero_coeff);
-      double rel_err = (l2_norm > 0.0) ? (l2_err_interp / l2_norm) : l2_err_interp;
-      
-      if (myid == 0)
-      {
-         cout << scientific << setprecision(12);
-         cout << "L2 error of u_interp:  " << l2_err_interp << "\n";
-         cout << "L2 error of u_exact:   " << l2_err_exact << " (sanity check)\n";
-         cout << "L2 error of u_src:     " << l2_err_src << " (on perturbed mesh)\n";
-         cout << "L2 norm of u_exact:    " << l2_norm << "\n";
-         cout << "Relative L2 error:     " << rel_err*100.0 << " %\n";
-         
-         if (l2_err_exact > 1e-10)
-         {
-            cout << "WARNING: u_exact has non-trivial error vs analytical solution!\n";
-         }
-      }
-   }
-
-   // Compute pointwise error
-   ParGridFunction func_error(&fes_tar);
-   func_error = func_exact;
-   func_error -= func_target;
 
    // VisIt output
    if (visit_output)
    {
       if (myid == 0) { cout << "\n=== Creating VisIt Output ===\n"; }
       
-      VisItDataCollection src_dc("SourceMesh", &mesh_1);
+      VisItDataCollection src_dc("SourceMesh", &mesh_2);
       src_dc.SetPrecision(8);
-      src_dc.RegisterField("u_src", &func_source);
+      src_dc.RegisterField("u_src", func_source);
       src_dc.SetCycle(0);
       src_dc.SetTime(0.0);
       src_dc.Save();
@@ -421,49 +493,23 @@ int main (int argc, char *argv[])
       VisItDataCollection tar_dc("TargetMesh", &mesh_2);
       tar_dc.SetPrecision(8);
       tar_dc.RegisterField("u_interp", &func_target);
-      tar_dc.RegisterField("u_exact", &func_exact);
-      tar_dc.RegisterField("u_error", &func_error);
+      tar_dc.RegisterField("u_exact", func_desired);
       tar_dc.SetCycle(0);
       tar_dc.SetTime(0.0);
       tar_dc.Save();
-      
-      if (myid == 0)
-      {
-         cout << "VisIt output saved to SourceMesh/ and TargetMesh/\n";
-      }
    }
 
-   // GLVis visualization
-   if (visualization)
-   {
-      char vishost[] = "localhost";
-      socketstream sout;
-      sout.open(vishost, visport);
-      if (!sout)
-      {
-         if (myid == 0)
-         {
-            cout << "Unable to connect to GLVis server at "
-                 << vishost << ':' << visport << endl;
-         }
-      }
-      else
-      {
-         sout << "parallel " << nprocs << " " << myid << "\n";
-         sout.precision(8);
-         sout << "solution\n" << mesh_2 << func_target
-              << "window_title 'Interpolated Solution'"
-              << "keys mA\n" << flush;
-      }
-   }
-
-   if (myid == 0)
-   {
-      cout << "\nDone!\n";
-   }
-
-   // Free the internal gslib data
+   // Free the internal gslib data.
    finder.FreeData();
+
+   // Delete remaining memory.
+   delete func_source;
+   delete func_desired;
+   delete src_fes;
+   delete des_fes;
+   delete src_fec;
+   delete tar_fes;
+   delete tar_fec;
 
    return 0;
 }
@@ -474,16 +520,8 @@ mpicxx -std=c++11 -I$MFEM_DIR -L$MFEM_DIR -o field_interp_parallel \
        field_interp_parallel.cpp -lmfem -lHYPRE -lmetis
 
 USAGE:
-# Scalar field (default)
-mpirun -np 1 ./field_interp_parallel -amp 0.02
-mpirun -np 2 ./field_interp_parallel -amp 0.02  
-mpirun -np 4 ./field_interp_parallel -amp 0.02
-
-# Vector field
-mpirun -np 1 ./field_interp_parallel -amp 0.02 -vec
-mpirun -np 2 ./field_interp_parallel -amp 0.02 -vec
-mpirun -np 4 ./field_interp_parallel -amp 0.02 -vec
-
-# Higher resolution
-mpirun -np 4 ./field_interp_parallel -nx 16 -o 3 -amp 0.05 -vec
+mpirun -np 1 ./field_interp_parallel -n 8 -o 3
+mpirun -np 2 ./field_interp_parallel -n 8 -o 3
+mpirun -np 4 ./field_interp_parallel -n 8 -o 3
+mpirun -np 8 ./field_interp_parallel -n 16 -o 3
 */
