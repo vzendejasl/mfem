@@ -16,10 +16,10 @@ using namespace mfem;
 using namespace std;
 
 // Mesh transformation for perturbation
-static double g_amp = 0.05;
+static double g_amp = 0.01;
 void PerturbMeshTransform(const Vector &x_in, Vector &x_out)
 {
-   const double freq = 2.0*M_PI;
+   const double freq = 4.0*M_PI;
    x_out = x_in;
    x_out[0] += g_amp * std::sin(freq*x_in[1]) * std::cos(freq*x_in[2]);
    x_out[1] += g_amp * std::cos(freq*x_in[0]) * std::sin(freq*x_in[2]) * 0.8;
@@ -378,7 +378,7 @@ int main (int argc, char *argv[])
 
    Vector interp_vals(nodes_cnt*tar_ncomp);
    FindPointsGSLIB finder(MPI_COMM_WORLD);
-   finder.Setup(mesh_1, 1.0*nx/8);
+   finder.Setup(mesh_1, 1.4);
    finder.SetDistanceToleranceForPointsFoundOnBoundary(1);
 
    finder.Interpolate(vxyz, *func_source, interp_vals, point_ordering);
