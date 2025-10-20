@@ -21,6 +21,11 @@
 // 2. Store Element data at center in binary for effiecnecy?
 // 3. Compute fft of data directly?
 
+// Example runs
+// mpirun -n 16 ./navier_tgv_victor_restart -no-ovs -o 4 -num_pts_per_dir 8 -es 1 -esp 1 -Re 1600 -tf 20 -time-out -nsnap 25 -no-problem1 -u0_from_mach -mach0 0.2
+// mpirun -n 16 ./navier_tgv_victor_restart -no-ovs -o 4 -num_pts_per_dir 8 -es 1 -esp 1 -Re 1600 -tf 20 -time-out -nsnap 25 -no-problem1
+// mpirun -n 16 ./navier_tgv_victor_restart -no-ovs -o 4 -num_pts_per_dir 8 -es 1 -esp 1 -Re 1600 -tf 20 -ddc 1000
+
 #include "navier_solver.hpp"
 #include "navier_utils.hpp"
 #include <fstream>
@@ -68,6 +73,8 @@ struct s_NavierContext
    int snapshot_index = 0;          // Which snapshot we're looking for next
    std::vector<real_t> snapshot_times; // Pre-computed target times
 
+   bool u0_based_on_mach = false;
+   double Mach0 = 0.1;
 } ctx;
 
 
@@ -1585,6 +1592,11 @@ int main(int argc, char *argv[])
                   "-nsnap",
                   "--num-snapshots",
                   "Number of evenly-spaced snapshots to output.");   
+   args.AddOption(&ctx.u0_based_on_mach, "-u0_from_mach", "--U0-from-mach", "-no-u0_from_mach",
+                  "--no-u0_from_mach",
+                  "Compute u0 based on a mach number?");
+   args.AddOption(&ctx.Mach0, "-mach0", "--Initial-Mach-Number", 
+      "Initial Mach number to compare with compressible codes");
    args.Parse();
    if (!args.Good())
    {
@@ -1635,20 +1647,26 @@ int main(int argc, char *argv[])
    // compressible codes!!
    // Can adjust this for different Mach number comparisions
    // Specify manually on purpose
-   double Mach0 = 0.1;
-   double gamma = 5.0/3.0;
-   double p0    = 1.0;
-   double rho0  = 1.0;
-   ctx.u0 = 2.0*Mach0*sqrt(gamma*p0/rho0);
+   if (ctx.u0_based_on_mach)
+   {
+      double gamma = 5.0/3.0;
+      double p0    = 1.0;
+      double rho0  = 1.0;
+      ctx.u0 = 2.0*ctx.Mach0*sqrt(gamma*p0/rho0);
+      if (Mpi::Root())
+      {
+         std::cout << "Mach0: " << ctx.Mach0 << std::endl;  
+      }
+   }
 
    // K0 = 1.0/L0
    double L0 = (ctx.problem1) ? 1.0 : 1.0/(2.0*M_PI);
 
    // t*=u0/L*t
-   double t_star_final = (ctx.problem1) ? 1.0 : L0/ctx.u0*ctx.t_final;
+   double t_star_final = L0/ctx.u0*ctx.t_final;
 
    // t = u0/L*t* (we are solving the for rescaled time based on velocity)
-   double dt_scale = (ctx.problem1) ? 1.0 : ctx.u0/L0;
+   double dt_scale = ctx.u0/L0;
 
    // Update kinematic viscosity
    ctx.kinvis = ctx.u0 * L0 / (ctx.reynum);
