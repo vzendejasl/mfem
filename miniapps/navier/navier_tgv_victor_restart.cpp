@@ -729,32 +729,31 @@ public:
   }
 
   // Computes \eta = 2*\nu*(\nabla u + trans(\nabla u))^2
-  real_t ComputeAveragedDissipation(ParGridFunction &u)
+  void ComputeAveragedDissipation(ParGridFunction &u, double *dissipation_ave, double *SijSij_ave)
   {
      
-    const ParFiniteElementSpace *pfes = u.ParFESpace();
+    const ParFiniteElementSpace *vfes = u.ParFESpace();
   
      double local_diss = 0.0; 
-     double local_vol        = 0.0;  
+     double local_vol  = 0.0;  
+     double local_SijSij = 0.0; 
   
      Array<int> vdofs;
      Vector loc_data;                 
-     DenseMatrix dshape;              
-     DenseMatrix grad_hat;            
-     DenseMatrix grad;                
+     DenseMatrix dshape, grad_hat, grad, S;              
   
-     const int ne = pfes->GetNE();
+     const int ne = vfes->GetNE();
      for (int e = 0; e < ne; ++e)
      {
-        pfes->GetElementVDofs(e, vdofs);
+        vfes->GetElementVDofs(e, vdofs);
         u.GetSubVector(vdofs, loc_data);
   
-        ElementTransformation *T = pfes->GetElementTransformation(e);
-        const FiniteElement   *el = pfes->GetFE(e);
+        ElementTransformation *T = vfes->GetElementTransformation(e);
+        const FiniteElement   *el = vfes->GetFE(e);
   
         const int elndofs = el->GetDof();
-        const int vdim    = pfes->GetVDim();
-        const int dim     = 3;
+        const int vdim    = vfes->GetVDim();
+        const int dim     = vfes->GetMesh()->Dimension();
   
         const int ir_order = 2*el->GetOrder() + 2;
         const IntegrationRule &ir = IntRules.Get(el->GetGeomType(), ir_order);
@@ -776,30 +775,46 @@ public:
   
            grad.SetSize(vdim, dim);
            Mult(grad_hat, Jinv, grad); 
-  
-           real_t d_val =   sq(grad(0, 0)) + sq(grad(1, 1)) + sq(grad(2, 2))
-                          + 0.5*(sq(grad(0,1) + grad(1,0)) + sq(grad(0,2) + grad(2,0))  
-                          + sq(grad(1,2) + grad(2,1))); 
-  
+
+           S.SetSize(dim,dim);
+           for (int a = 0; a < dim; ++a)
+           {
+              for (int b = 0; b < dim; ++b)
+              {
+                 S(a,b) = 0.5*(grad(a,b) + grad(b,a));
+              }
+           }
+
+           // Frobenius norm squared: S:S
+           double S2 = 0.0;
+           for (int a = 0; a < dim; ++a)
+           {
+              for (int b = 0; b < dim; ++b)
+              {
+                 S2 += S(a,b)*S(a,b);
+              }
+           }
+         
            const double dV = ip.weight * T->Weight();
-  
-           local_diss += 2.0*ctx.kinvis * d_val * dV;
-           local_vol         += dV;        
+           local_diss   += 2.0*ctx.kinvis * S2 * dV;
+           local_SijSij += S2*dV;
+           local_vol    += dV;        
         }
      }
   
-     double global_diss = 0.0;
-     double global_vol         = 0.0;
-     MPI_Comm comm = pfes->GetComm();
-     MPI_Allreduce(&local_diss, &global_diss, 1, MPI_DOUBLE, MPI_SUM, comm);
-     MPI_Allreduce(&local_vol,         &global_vol,         1, MPI_DOUBLE, MPI_SUM, comm);
+     double global_diss   = 0.0;
+     double global_SijSij = 0.0;
+     double global_vol    = 0.0;
+     MPI_Comm comm = vfes->GetComm();
+     MPI_Allreduce(&local_diss,   &global_diss  , 1, MPI_DOUBLE, MPI_SUM, comm);
+     MPI_Allreduce(&local_SijSij, &global_SijSij, 1, MPI_DOUBLE, MPI_SUM, comm);
+     MPI_Allreduce(&local_vol,    &global_vol   , 1, MPI_DOUBLE, MPI_SUM, comm);
   
-     return global_diss / global_vol;
+     *SijSij_ave      = global_SijSij/ global_vol;
+     *dissipation_ave = global_diss / global_vol;
   
      }
   
-   
-
    ~QuantitiesOfInterest() { delete mass_lf; };
 
 private:
@@ -2149,7 +2164,9 @@ int main(int argc, char *argv[])
    real_t kmax = 0.0;
    real_t hmin = 0.0;
 
-   real_t avg_diss = kin_energy.ComputeAveragedDissipation(*u_gf);
+   real_t avg_diss = 0.0;
+   real_t avg_SijSij = 0.0;
+   kin_energy.ComputeAveragedDissipation(*u_gf, &avg_diss, &avg_SijSij);
    kin_energy.ComputeKolmogorovAndTaylorMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, &avg_kolmTimeScl, &max_diss, ke);
    kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta, &kmax, &hmin);
 
@@ -2498,7 +2515,7 @@ int main(int argc, char *argv[])
       enstrophy = kin_energy.ComputeEnstrophy(*u_gf);
 
       ComputeDissipation(*u_gf, d_gf);
-      avg_diss = kin_energy.ComputeAveragedDissipation(*u_gf);
+      kin_energy.ComputeAveragedDissipation(*u_gf, &avg_diss, &avg_SijSij);
       kin_energy.ComputeKolmogorovAndTaylorMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, &avg_kolmTimeScl, &max_diss, ke);
       kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta, &kmax, &hmin);
       avg_lambda_iso = kin_energy.ComputeTaylorMicroscale(*u_gf, nullptr, nullptr);

@@ -17,7 +17,7 @@ using namespace std;
 // Problem setup
 // =============================================================
 
-static double g_amp = 0.05; // perturbation amplitude
+static double g_amp = 0.15; // perturbation amplitude
 
 void PerturbMeshTransform(const Vector &x_in, Vector &x_out)
 {
@@ -465,196 +465,196 @@ int main(int argc, char *argv[])
                 << "  (total=" << total << ")\n";
    }
 
-   // ---------------- Retry keys (deterministic order on all ranks) ----------------
-   std::vector<std::array<int,3>> retry_keys;
+   // // ---------------- Retry keys (deterministic order on all ranks) ----------------
+   // std::vector<std::array<int,3>> retry_keys;
 
-   // Faces
-   retry_keys.push_back({+1,  0,  0});
-   retry_keys.push_back({-1,  0,  0});
-   if (dim > 1)
-   {
-      retry_keys.push_back({0, +1,  0});
-      retry_keys.push_back({0, -1,  0});
-   }
-   if (dim > 2)
-   {
-      retry_keys.push_back({0,  0, +1});
-      retry_keys.push_back({0,  0, -1});
-   }
+   // // Faces
+   // retry_keys.push_back({+1,  0,  0});
+   // retry_keys.push_back({-1,  0,  0});
+   // if (dim > 1)
+   // {
+   //    retry_keys.push_back({0, +1,  0});
+   //    retry_keys.push_back({0, -1,  0});
+   // }
+   // if (dim > 2)
+   // {
+   //    retry_keys.push_back({0,  0, +1});
+   //    retry_keys.push_back({0,  0, -1});
+   // }
 
-   // Edges
-   if (dim > 1)
-   {
-      for (int sx : {-1, +1})
-      {
-         for (int sy : {-1, +1})
-         {
-            retry_keys.push_back({sx, sy, 0});
-         }
-      }
-   }
-   if (dim > 2)
-   {
-      for (int sx : {-1, +1})
-      {
-         for (int sz : {-1, +1})
-         {
-            retry_keys.push_back({sx, 0, sz});
-         }
-      }
-      for (int sy : {-1, +1})
-      {
-         for (int sz : {-1, +1})
-         {
-            retry_keys.push_back({0, sy, sz});
-         }
-      }
-   }
+   // // Edges
+   // if (dim > 1)
+   // {
+   //    for (int sx : {-1, +1})
+   //    {
+   //       for (int sy : {-1, +1})
+   //       {
+   //          retry_keys.push_back({sx, sy, 0});
+   //       }
+   //    }
+   // }
+   // if (dim > 2)
+   // {
+   //    for (int sx : {-1, +1})
+   //    {
+   //       for (int sz : {-1, +1})
+   //       {
+   //          retry_keys.push_back({sx, 0, sz});
+   //       }
+   //    }
+   //    for (int sy : {-1, +1})
+   //    {
+   //       for (int sz : {-1, +1})
+   //       {
+   //          retry_keys.push_back({0, sy, sz});
+   //       }
+   //    }
+   // }
 
-   // Corners
-   if (dim > 2)
-   {
-      for (int sx : {-1, +1})
-      {
-         for (int sy : {-1, +1})
-         {
-            for (int sz : {-1, +1})
-            {
-               retry_keys.push_back({sx, sy, sz});
-            }
-         }
-      }
-   }
+   // // Corners
+   // if (dim > 2)
+   // {
+   //    for (int sx : {-1, +1})
+   //    {
+   //       for (int sy : {-1, +1})
+   //       {
+   //          for (int sz : {-1, +1})
+   //          {
+   //             retry_keys.push_back({sx, sy, sz});
+   //          }
+   //       }
+   //    }
+   // }
 
-   auto select_candidates_for_key =
-      [&](const std::array<int,3>& key,
-          const std::vector<int>& pool,
-          std::vector<int>& out_ids)
-   {
-      out_ids.clear();
+   // auto select_candidates_for_key =
+   //    [&](const std::array<int,3>& key,
+   //        const std::vector<int>& pool,
+   //        std::vector<int>& out_ids)
+   // {
+   //    out_ids.clear();
 
-      const int sx = key[0], sy = key[1], sz = key[2];
+   //    const int sx = key[0], sy = key[1], sz = key[2];
 
-      for (int idx : pool)
-      {
-         const double x = vxyz_bn[idx];
-         const double y = (dim > 1) ? vxyz_bn[nodes_cnt + idx]       : 0.0;
-         const double z = (dim > 2) ? vxyz_bn[2 * nodes_cnt + idx]   : 0.0;
+   //    for (int idx : pool)
+   //    {
+   //       const double x = vxyz_bn[idx];
+   //       const double y = (dim > 1) ? vxyz_bn[nodes_cnt + idx]       : 0.0;
+   //       const double z = (dim > 2) ? vxyz_bn[2 * nodes_cnt + idx]   : 0.0;
 
-         bool pass = true;
+   //       bool pass = true;
 
-         if (sx == +1) { pass = pass && (x < eps_plane); }
-         if (sx == -1) { pass = pass && (x > Lx - eps_plane); }
+   //       if (sx == +1) { pass = pass && (x < eps_plane); }
+   //       if (sx == -1) { pass = pass && (x > Lx - eps_plane); }
 
-         if (dim > 1)
-         {
-            if (sy == +1) { pass = pass && (y < eps_plane); }
-            if (sy == -1) { pass = pass && (y > Ly - eps_plane); }
-         }
+   //       if (dim > 1)
+   //       {
+   //          if (sy == +1) { pass = pass && (y < eps_plane); }
+   //          if (sy == -1) { pass = pass && (y > Ly - eps_plane); }
+   //       }
 
-         if (dim > 2)
-         {
-            if (sz == +1) { pass = pass && (z < eps_plane); }
-            if (sz == -1) { pass = pass && (z > Lz - eps_plane); }
-         }
+   //       if (dim > 2)
+   //       {
+   //          if (sz == +1) { pass = pass && (z < eps_plane); }
+   //          if (sz == -1) { pass = pass && (z > Lz - eps_plane); }
+   //       }
 
-         if (pass)
-         {
-            out_ids.push_back(idx);
-         }
-      }
-   };
+   //       if (pass)
+   //       {
+   //          out_ids.push_back(idx);
+   //       }
+   //    }
+   // };
 
-   // ---------------- Collective retry loop (plane-filtered) ----------------
-   int found_faces = 0;
-   int found_edges_corners = 0;
+   // // ---------------- Collective retry loop (plane-filtered) ----------------
+   // int found_faces = 0;
+   // int found_edges_corners = 0;
 
-   std::vector<int> local_group;
-   local_group.reserve(missing.size());
+   // std::vector<int> local_group;
+   // local_group.reserve(missing.size());
 
-   for (size_t k = 0; k < retry_keys.size(); ++k)
-   {
-      const std::array<int,3> key = retry_keys[k];
+   // for (size_t k = 0; k < retry_keys.size(); ++k)
+   // {
+   //    const std::array<int,3> key = retry_keys[k];
 
-      // Face if exactly one non-zero in 2D, or exactly one zero in 3D? Simpler:
-      const bool is_face =
-         ( (key[0] == 0) + (key[1] == 0) + (key[2] == 0) ==
-           (dim == 3 ? 2 : 1) );
+   //    // Face if exactly one non-zero in 2D, or exactly one zero in 3D? Simpler:
+   //    const bool is_face =
+   //       ( (key[0] == 0) + (key[1] == 0) + (key[2] == 0) ==
+   //         (dim == 3 ? 2 : 1) );
 
-      select_candidates_for_key(key, missing, local_group);
+   //    select_candidates_for_key(key, missing, local_group);
 
-      int local_has = local_group.empty() ? 0 : 1;
-      int global_has = 0;
-      MPI_Allreduce(&local_has, &global_has, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+   //    int local_has = local_group.empty() ? 0 : 1;
+   //    int global_has = 0;
+   //    MPI_Allreduce(&local_has, &global_has, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 
-      if (global_has == 0)
-      {
-         continue; // nothing to do for this key on any rank
-      }
+   //    if (global_has == 0)
+   //    {
+   //       continue; // nothing to do for this key on any rank
+   //    }
 
-      Vector sub_coords;
-      BuildSubsetCoordsByNodes(vxyz_bn, dim, local_group, sub_coords);
-      const int subN = static_cast<int>(local_group.size());
+   //    Vector sub_coords;
+   //    BuildSubsetCoordsByNodes(vxyz_bn, dim, local_group, sub_coords);
+   //    const int subN = static_cast<int>(local_group.size());
 
-      Vector sub_vals(subN * tar_ncomp);
-      sub_vals = 0.0;
+   //    Vector sub_vals(subN * tar_ncomp);
+   //    sub_vals = 0.0;
 
-      finder.Interpolate(sub_coords, *func_source, sub_vals, Ordering::byNODES);
-      const Array<unsigned int> &sub_codes = finder.GetCode();
+   //    finder.Interpolate(sub_coords, *func_source, sub_vals, Ordering::byNODES);
+   //    const Array<unsigned int> &sub_codes = finder.GetCode();
 
-      int local_new_found = 0;
+   //    int local_new_found = 0;
 
-      for (int d = 0; d < tar_ncomp; ++d)
-      {
-         double *dst = interp_vals.GetData() + d * nodes_cnt;
-         const double *src = sub_vals.GetData() + d * subN;
+   //    for (int d = 0; d < tar_ncomp; ++d)
+   //    {
+   //       double *dst = interp_vals.GetData() + d * nodes_cnt;
+   //       const double *src = sub_vals.GetData() + d * subN;
 
-         for (int i = 0; i < subN; ++i)
-         {
-            if (sub_codes[i] != 2)
-            {
-               dst[ local_group[i] ] = src[i];
-               local_new_found++;
-            }
-         }
-      }
+   //       for (int i = 0; i < subN; ++i)
+   //       {
+   //          if (sub_codes[i] != 2)
+   //          {
+   //             dst[ local_group[i] ] = src[i];
+   //             local_new_found++;
+   //          }
+   //       }
+   //    }
 
-      int global_new_found = 0;
-      MPI_Allreduce(&local_new_found, &global_new_found, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+   //    int global_new_found = 0;
+   //    MPI_Allreduce(&local_new_found, &global_new_found, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 
-      if (is_face) { found_faces += global_new_found; }
-      else         { found_edges_corners += global_new_found; }
+   //    if (is_face) { found_faces += global_new_found; }
+   //    else         { found_edges_corners += global_new_found; }
 
-      // Rebuild local missing pool
-      if (subN > 0)
-      {
-         std::vector<char> is_found(nodes_cnt, 0);
-         for (int i = 0; i < subN; ++i)
-         {
-            if (sub_codes[i] != 2)
-            {
-               is_found[ local_group[i] ] = 1;
-            }
-         }
+   //    // Rebuild local missing pool
+   //    if (subN > 0)
+   //    {
+   //       std::vector<char> is_found(nodes_cnt, 0);
+   //       for (int i = 0; i < subN; ++i)
+   //       {
+   //          if (sub_codes[i] != 2)
+   //          {
+   //             is_found[ local_group[i] ] = 1;
+   //          }
+   //       }
 
-         std::vector<int> next_missing;
-         next_missing.reserve(missing.size());
-         for (int idx : missing)
-         {
-            if (!is_found[idx])
-            {
-               next_missing.push_back(idx);
-            }
-         }
-         missing.swap(next_missing);
-      }
-   }
+   //       std::vector<int> next_missing;
+   //       next_missing.reserve(missing.size());
+   //       for (int idx : missing)
+   //       {
+   //          if (!is_found[idx])
+   //          {
+   //             next_missing.push_back(idx);
+   //          }
+   //       }
+   //       missing.swap(next_missing);
+   //    }
+   // }
 
-   if (myid == 0)
-   {
-      std::cout << "Plane-filtered retries found: faces=" << found_faces
-                << ", edges/corners=" << found_edges_corners << "\n";
-   }
+   // if (myid == 0)
+   // {
+   //    std::cout << "Plane-filtered retries found: faces=" << found_faces
+   //              << ", edges/corners=" << found_edges_corners << "\n";
+   // }
 
    // ---------------- Final brute-force collective pass (no plane filter) ----------------
    // If anything remains, try all offsets again on the entire remaining set.
@@ -847,6 +847,19 @@ int main(int argc, char *argv[])
 
    func_target.SetTrueVector();
    func_target.SetFromTrueVector();
+
+   // Global TRUE DoFs (portable reduction)
+   {
+      HYPRE_Int local_tv = tar_fes->GetTrueVSize();
+      long long local_ll = static_cast<long long>(local_tv);
+      long long global_ll = 0;
+      MPI_Allreduce(&local_ll, &global_ll, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+
+      if (myid == 0)
+      {
+         cout << "Target Global TRUE DoFs: " << global_ll << "\n";
+      }
+   }
 
    // ---------------- Visualization ----------------
    if (visualization)
