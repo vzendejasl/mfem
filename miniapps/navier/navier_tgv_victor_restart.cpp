@@ -805,6 +805,7 @@ public:
      double global_diss   = 0.0;
      double global_SijSij = 0.0;
      double global_vol    = 0.0;
+
      MPI_Comm comm = vfes->GetComm();
      MPI_Allreduce(&local_diss,   &global_diss  , 1, MPI_DOUBLE, MPI_SUM, comm);
      MPI_Allreduce(&local_SijSij, &global_SijSij, 1, MPI_DOUBLE, MPI_SUM, comm);
@@ -2214,6 +2215,14 @@ int main(int argc, char *argv[])
                                               + ctx.element_subdivisions_parallel) 
                                             + "P" + std::to_string(ctx.order)
                                             + ".txt";
+   std::string fname_turb_continued = std::string("tgv_out_turb_continued_") 
+                                            + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
+                                            + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                            + "RefLv" + std::to_string(
+                                                ctx.element_subdivisions 
+                                              + ctx.element_subdivisions_parallel) 
+                                            + "P" + std::to_string(ctx.order)
+                                            + ".txt";
    std::string fname_turb_grid = std::string("tgv_out_turb_grid_") 
                                             + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
                                             + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
@@ -2224,6 +2233,7 @@ int main(int argc, char *argv[])
                                             + ".txt";
    FILE *f = NULL;
    FILE *f_turb = NULL;
+   FILE *f_turb_continued = NULL;
    FILE *f_turb_grid = NULL;
 
    if (Mpi::Root())
@@ -2244,6 +2254,7 @@ int main(int argc, char *argv[])
 
       f = fopen(fname.c_str(), file_mode);
       f_turb = fopen(fname_turb.c_str(), file_mode);
+      f_turb_continued = fopen(fname_turb_continued.c_str(), file_mode);
       f_turb_grid = fopen(fname_turb_grid.c_str(), file_mode);
 
       if (!f)
@@ -2253,6 +2264,12 @@ int main(int argc, char *argv[])
       }
 
       if (!f_turb)
+      {
+        std::cerr << "Error opening file " << fname_turb << std::endl;
+        MPI_Abort(MPI_COMM_WORLD,1);
+      }
+
+      if (!f_turb_continued)
       {
         std::cerr << "Error opening file " << fname_turb << std::endl;
         MPI_Abort(MPI_COMM_WORLD,1);
@@ -2299,6 +2316,19 @@ int main(int argc, char *argv[])
                        Re_taylor, u_rms);
 
           // Write header only if not restarting
+          fprintf(f_turb_continued, "3D Taylor Green Vortex (turbulence metrics)\n");
+          fprintf(f_turb_continued, "Reynolds Number = %d\n", static_cast<int>(ctx.reynum));
+          fprintf(f_turb_continued, "order = %d\n", ctx.order);
+          fprintf(f_turb_continued, "grid = %d x %d x %d\n", nel1d, nel1d, nel1d);
+          fprintf(f_turb_continued, "dofs per component = %d\n", ngridpts);
+          fprintf(f_turb_continued, "===================================================================================\n");
+          fprintf(f_turb_continued, "        time                        cycle                avg_SijSij    \n");
+
+          // Write the initial data point
+           fprintf(f_turb_continued, "%20.16e     %20.16e      %20.16e\n",
+                       t, static_cast<real_t>(global_cycle + step), avg_SijSij); 
+
+          // Write header only if not restarting
           fprintf(f_turb_grid, "3D Taylor Green Vortex (turbulence grid metrics)\n");
           fprintf(f_turb_grid, "Reynolds Number = %d\n", static_cast<int>(ctx.reynum));
           fprintf(f_turb_grid, "order = %d\n", ctx.order);
@@ -2318,6 +2348,7 @@ int main(int argc, char *argv[])
 
       fflush(f);
       fflush(f_turb);
+      fflush(f_turb_continued);
       fflush(f_turb_grid);
       fflush(stdout);
    }
@@ -2549,10 +2580,13 @@ int main(int argc, char *argv[])
                        t, static_cast<real_t>(global_cycle + step), max_diss, avg_diss, kolmLenScl, 
                        avg_lambda, avg_lambda_iso, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
                        Re_taylor, u_rms);
+           fprintf(f_turb_continued, "%20.16e     %20.16e      %20.16e\n",
+                       t, static_cast<real_t>(global_cycle + step), avg_SijSij); 
            fprintf(f_turb_grid, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e    %20.16e    %20.16e\n",
                        t, static_cast<real_t>(global_cycle + step), kmax_eta, hmin_eta, PI_nu, PI_nu_min, avg_kmax_eta, avg_hmin_eta);
            fflush(f);
            fflush(f_turb);
+           fflush(f_turb_continued);
            fflush(f_turb_grid);
            fflush(stdout);
          }
