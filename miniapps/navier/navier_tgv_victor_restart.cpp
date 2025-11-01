@@ -21,6 +21,11 @@
 // 2. Store Element data at center in binary for effiecnecy?
 // 3. Compute fft of data directly?
 
+// Example runs
+// mpirun -n 16 ./navier_tgv_victor_restart -no-ovs -o 4 -num_pts_per_dir 8 -es 1 -esp 1 -Re 1600 -tf 20 -time-out -nsnap 25 -no-problem1 -u0_from_mach -mach0 0.2
+// mpirun -n 16 ./navier_tgv_victor_restart -no-ovs -o 4 -num_pts_per_dir 8 -es 1 -esp 1 -Re 1600 -tf 20 -time-out -nsnap 25 -no-problem1
+// mpirun -n 16 ./navier_tgv_victor_restart -no-ovs -o 4 -num_pts_per_dir 8 -es 1 -esp 1 -Re 1600 -tf 20 -ddc 1000
+
 #include "navier_solver.hpp"
 #include "navier_utils.hpp"
 #include <fstream>
@@ -68,6 +73,8 @@ struct s_NavierContext
    int snapshot_index = 0;          // Which snapshot we're looking for next
    std::vector<real_t> snapshot_times; // Pre-computed target times
 
+   bool u0_based_on_mach = false;
+   double Mach0 = 0.1;
 } ctx;
 
 
@@ -230,7 +237,7 @@ public:
         dshape.SetSize(elndofs, dim);
         u.GetSubVector(v_dofs, loc_data);
            
-        int intorder = 2 * el->GetOrder();
+        int intorder = 2 * el->GetOrder() + 2;
         const IntegrationRule *ir = &IntRules.Get(el->GetGeomType(), intorder);
 
         for (int j = 0; j < ir->GetNPoints(); j++){
@@ -529,10 +536,8 @@ public:
   }
 
    double ComputeTaylorMicroscale(const mfem::ParGridFunction &u,
-                                                      const mfem::IntegrationRule *user_ir,
                                                       double lambda_components[3])
    {
-      using namespace mfem;
 
       MFEM_VERIFY(u.ParFESpace() != nullptr, "Velocity ParGridFunction has no FESpace.");
       const ParFiniteElementSpace &fes = *u.ParFESpace();
@@ -555,10 +560,8 @@ public:
          const FiniteElement &fe = *fes.GetFE(e);
          ElementTransformation &T = *fes.GetElementTransformation(e);
 
-         // Match a “robust” dissipation quadrature depth: 2*p (unless user supplies one)
-         const int ir_order = (user_ir) ? user_ir->GetOrder() : 2*fe.GetOrder();
-         const IntegrationRule &ir = (user_ir) ? *user_ir
-                                             : IntRules.Get(fe.GetGeomType(), ir_order);
+         const int ir_order = 2*fe.GetOrder() + 2;
+         const IntegrationRule &ir = IntRules.Get(fe.GetGeomType(), ir_order);
 
          for (int q = 0; q < ir.GetNPoints(); ++q)
          {
@@ -608,28 +611,175 @@ public:
       return lambda_sum / 3.0; // component-averaged λ
    }
 
+   template <typename T>
+   T sq(T x)
+   {
+      return x * x;
+   }
+
+   // 3D, vdim=3.
+   // Computes (by reference):
+   //   skewness    = \displaystyle \frac{\left\langle \frac{1}{3}\left[(\partial_x u)^3 + (\partial_y v)^3 + (\partial_z w)^3\right]\right\rangle}
+   //                           {\left(\left\langle \frac{1}{3}\left[(\partial_x u)^2 + (\partial_y v)^2 + (\partial_z w)^2\right]\right\rangle\right)^{3/2}}
+   //
+   //   flatness    = \displaystyle \frac{\left\langle \frac{1}{3}\left[(\partial_x u)^4 + (\partial_y v)^4 + (\partial_z w)^4\right]\right\rangle}
+   //                           {\left(\left\langle \frac{1}{3}\left[(\partial_x u)^2 + (\partial_y v)^2 + (\partial_z w)^2\right]\right\rangle\right)^{2}}
+   //
+   //   D3_over_D1  = \displaystyle \frac{\left\langle \sum_{j=1}^{3}\left(\partial_{x_j} u_3\right)^2 \right\rangle}
+   //                           {\left\langle \sum_{j=1}^{3}\left(\partial_{x_j} u_1\right)^2 \right\rangle}
+   //
+   //   E3_over_E1  = \displaystyle \frac{\left\langle u_3^2 \right\rangle}{\left\langle u_1^2 \right\rangle}
+   //
+   // All angle brackets \langle \cdot \rangle denote volume averages: \langle \phi \rangle = \frac{1}{V}\int \phi \, dV,
+   // with V = \text{global\_volume}. We first form the averages, then take ratios/powers.
+   void ComputeSkewFlat_D3D1_E3E1(const mfem::ParGridFunction &u,
+                                  double &skewness,
+                                  double &flatness,
+                                  double &D3_over_D1,
+                                  double &E3_over_E1)
+   {
+      using namespace mfem;
+   
+      MFEM_VERIFY(u.ParFESpace() != nullptr, "Velocity ParGridFunction has no FESpace.");
+      const ParFiniteElementSpace &fes = *u.ParFESpace();
+      MFEM_VERIFY(fes.GetParMesh() && fes.GetParMesh()->Dimension() == 3, "Expect 3D mesh.");
+      MFEM_VERIFY(fes.GetVDim() == 3, "Expect vdim=3 velocity.");
+   
+      MPI_Comm comm = fes.GetComm();
+      ParMesh &pmesh = *fes.GetParMesh();
+   
+      // ---------------- Local accumulators ----------------
+      double local_volume = 0.0;
+   
+      // \int u_i^2 \, dV  (for E3/E1)
+      double local_u2[3]  = {0.0, 0.0, 0.0};
+   
+      // Longitudinal moments: \int (\partial_{x}u)^p, (\partial_{y}v)^p, (\partial_{z}w)^p \, dV for p=2,3,4
+      double local_d2[3]  = {0.0, 0.0, 0.0};
+      double local_d3[3]  = {0.0, 0.0, 0.0};
+      double local_d4[3]  = {0.0, 0.0, 0.0};
+   
+      // \int \sum_{j=1}^{3} (\partial_{x_j} u_i)^2 \, dV  (for D3/D1)
+      double local_gsq[3] = {0.0, 0.0, 0.0};
+   
+      mfem::Vector      local_u_val(3);
+      mfem::DenseMatrix local_grad(3, 3); // local_grad(i,j) = \partial_{x_j} u_i
+   
+      const int NE = pmesh.GetNE();
+   
+      for (int e = 0; e < NE; ++e)
+      {
+         const FiniteElement &fe = *fes.GetFE(e);
+         ElementTransformation &T = *fes.GetElementTransformation(e);
+      
+         // Integration rule order sufficient for up to 4th moments
+         const int ir_order = 2 * fe.GetOrder() + 2;
+         const IntegrationRule &ir = IntRules.Get(fe.GetGeomType(), ir_order);
+      
+         for (int q = 0; q < ir.GetNPoints(); ++q)
+         {
+            const IntegrationPoint &ip = ir.IntPoint(q);
+            T.SetIntPoint(&ip);
+         
+            const double dV = ip.weight * T.Weight();
+         
+            u.GetVectorValue(e, ip, local_u_val);
+            u.GetVectorGradient(T, local_grad);
+         
+            local_volume += dV;
+         
+            // --- \int u_i^2 dV ---
+            local_u2[0] += sq(local_u_val(0)) * dV;
+            local_u2[1] += sq(local_u_val(1)) * dV;
+            local_u2[2] += sq(local_u_val(2)) * dV;
+         
+            // --- Longitudinal derivatives: (\partial_x u), (\partial_y v), (\partial_z w) ---
+            local_d2[0] += sq(local_grad(0,0)) * dV;
+            local_d2[1] += sq(local_grad(1,1)) * dV;
+            local_d2[2] += sq(local_grad(2,2)) * dV;
+         
+            local_d3[0] +=  local_grad(0,0) * sq(local_grad(0,0)) * dV; // (\partial_x u)^3
+            local_d3[1] +=  local_grad(1,1) * sq(local_grad(1,1)) * dV; // (\partial_y v)^3
+            local_d3[2] +=  local_grad(2,2) * sq(local_grad(2,2)) * dV; // (\partial_z w)^3
+         
+            local_d4[0] += sq(sq(local_grad(0,0))) * dV; // (\partial_x u)^4
+            local_d4[1] += sq(sq(local_grad(1,1))) * dV; // (\partial_y v)^4
+            local_d4[2] += sq(sq(local_grad(2,2))) * dV; // (\partial_z w)^4
+         
+            // --- \int \sum_{j=1}^{3} (\partial_{x_j} u_i)^2 dV ---
+            local_gsq[0] += ( sq(local_grad(0,0)) + sq(local_grad(0,1)) + sq(local_grad(0,2)) ) * dV;
+            local_gsq[1] += ( sq(local_grad(1,0)) + sq(local_grad(1,1)) + sq(local_grad(1,2)) ) * dV;
+            local_gsq[2] += ( sq(local_grad(2,0)) + sq(local_grad(2,1)) + sq(local_grad(2,2)) ) * dV;
+         }
+      }
+   
+      // ---------------- Global reductions ----------------
+      double global_volume = 0.0;
+   
+      double global_u2[3];
+      double global_d2[3];
+      double global_d3[3];
+      double global_d4[3];
+      double global_gsq[3];
+   
+      MPI_Allreduce(&local_volume, &global_volume, 1, MPI_DOUBLE, MPI_SUM, comm);
+      MPI_Allreduce(local_u2,      global_u2,      3, MPI_DOUBLE, MPI_SUM, comm);
+      MPI_Allreduce(local_d2,      global_d2,      3, MPI_DOUBLE, MPI_SUM, comm);
+      MPI_Allreduce(local_d3,      global_d3,      3, MPI_DOUBLE, MPI_SUM, comm);
+      MPI_Allreduce(local_d4,      global_d4,      3, MPI_DOUBLE, MPI_SUM, comm);
+      MPI_Allreduce(local_gsq,     global_gsq,     3, MPI_DOUBLE, MPI_SUM, comm);
+   
+      // ---------------- Form averages FIRST ----------------
+      const double one_third = 1.0 / 3.0;
+   
+      // \left\langle \frac{1}{3}\big[(\partial_x u)^p + (\partial_y v)^p + (\partial_z w)^p\big] \right\rangle
+      double avg_long_d2 = 0.0;
+      double avg_long_d3 = 0.0;
+      double avg_long_d4 = 0.0;
+   
+      if (global_volume > 0.0)
+      {
+         avg_long_d2 = one_third * ( (global_d2[0] + global_d2[1] + global_d2[2]) / global_volume );
+         avg_long_d3 = one_third * ( (global_d3[0] + global_d3[1] + global_d3[2]) / global_volume );
+         avg_long_d4 = one_third * ( (global_d4[0] + global_d4[1] + global_d4[2]) / global_volume );
+      }
+   
+      // \left\langle \sum_{j=1}^{3}(\partial_{x_j} u_i)^2 \right\rangle for i=1 and i=3
+      double avg_gsq_comp1 = (global_volume > 0.0) ? (global_gsq[0] / global_volume) : 0.0;
+      double avg_gsq_comp3 = (global_volume > 0.0) ? (global_gsq[2] / global_volume) : 0.0;
+   
+      // \left\langle u_i^2 \right\rangle for i=1 and i=3
+      double avg_u2_comp1  = (global_volume > 0.0) ? (global_u2[0] / global_volume) : 0.0;
+      double avg_u2_comp3  = (global_volume > 0.0) ? (global_u2[2] / global_volume) : 0.0;
+   
+      // ---------------- Final ratios/powers ----------------
+      // S = \frac{\langle \frac{1}{3}[(\partial_x u)^3 + (\partial_y v)^3 + (\partial_z w)^3] \rangle}
+      //          { \langle \frac{1}{3}[(\partial_x u)^2 + (\partial_y v)^2 + (\partial_z w)^2] \rangle^{3/2} }
+      skewness = (avg_long_d2 > 0.0) ? (avg_long_d3 / std::pow(avg_long_d2, 1.5)) : 0.0;
+   
+      // F = \frac{\langle \frac{1}{3}[(\partial_x u)^4 + (\partial_y v)^4 + (\partial_z w)^4] \rangle}
+      //          { \langle \frac{1}{3}[(\partial_x u)^2 + (\partial_y v)^2 + (\partial_z w)^2] \rangle^{2} }
+      flatness = (avg_long_d2 > 0.0) ? (avg_long_d4 / sq(avg_long_d2)) : 0.0;
+   
+      // \frac{D_3}{D_1} = \frac{\langle \sum_{j=1}^{3}(\partial_{x_j} u_3)^2 \rangle}{\langle \sum_{j=1}^{3}(\partial_{x_j} u_1)^2 \rangle}
+      D3_over_D1 = (avg_gsq_comp1 > 0.0) ? (avg_gsq_comp3 / avg_gsq_comp1) : 0.0;
+   
+      // \frac{E_3}{E_1} = \frac{\langle u_3^2 \rangle}{\langle u_1^2 \rangle}
+      E3_over_E1 = (avg_u2_comp1 > 0.0) ? (avg_u2_comp3 / avg_u2_comp1) : 0.0;
+   }
 
 
 
-  void ComputeKolmogorovAndTaylorMicroLength(ParGridFunction &d_gf,real_t vol_avg_dissipation, real_t *kolmogorov_length, 
+
+  void ComputeKolmogorovAndTaylorMicroLength(const real_t *max_dissipation,real_t vol_avg_dissipation, real_t *kolmogorov_length, 
                                                                    real_t *avg_lambda, real_t *avg_kolmogorov_length, 
                                                                    real_t *kolmogorov_time_scale,
-                                                                   real_t *avg_kolmogorov_time_scale, real_t *max_diss, real_t ke)
+                                                                   real_t *avg_kolmogorov_time_scale, real_t ke)
   {
-      double max_dissipation = 0.0;
-  
-      // Iterate over the entire grid function to find the maximum dissipation value
-      for (int i = 0; i < d_gf.Size(); ++i) {
-          max_dissipation = std::max(max_dissipation, d_gf(i));
-      }
-  
-      // Reduce across all MPI processes to ensure global maximum
-      double global_max_dissipation;
-      MPI_Allreduce(&max_dissipation, &global_max_dissipation, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
   
       // Compute the smallest Kolmogorov length scale using the maximum dissipation
       // eta = (nu^3/diss_max)^0.25
-      *kolmogorov_length = pow((ctx.kinvis * ctx.kinvis * ctx.kinvis) / global_max_dissipation, 0.25);
+      *kolmogorov_length = pow((ctx.kinvis * ctx.kinvis * ctx.kinvis) / *max_dissipation, 0.25);
 
       // eta = (nu^3/<diss>)^0.25
       *avg_kolmogorov_length = pow((ctx.kinvis * ctx.kinvis * ctx.kinvis) / vol_avg_dissipation, 0.25);
@@ -640,114 +790,42 @@ public:
 
       // Kolmogorov time scale
       // Tau_eta = sqrt(\nu/diss_max)
-      *kolmogorov_time_scale = pow(ctx.kinvis/global_max_dissipation,0.50);
+      *kolmogorov_time_scale = pow(ctx.kinvis/ *max_dissipation,0.50);
 
       // Kolmogorov time scale
       // Tau_eta = sqrt(\nu/diss_max)
       *avg_kolmogorov_time_scale = pow(ctx.kinvis/vol_avg_dissipation,0.50);
 
-      // Assign the max dissipation
-      *max_diss = global_max_dissipation;
-  }
-
-  /*
-  real_t ComputeAveragedDissipation(ParGridFunction &d)
-  {
-      Vector d_vec;
-      const FiniteElement *fe;
-      ElementTransformation *T;
-      FiniteElementSpace *fes = d.FESpace();
-      real_t integ = 0.0;
-
-      double totalVolume = 0.0;
-      double totalDissipation = 0.0;
-  
-      for (int i = 0; i < fes->GetNE(); i++)
-      {
-          fe = fes->GetFE(i);
-          int intorder = 2 * fe->GetOrder();
-          const IntegrationRule *ir = &IntRules.Get(fe->GetGeomType(), intorder);
-
-          d.GetValues(i, *ir, d_vec);
-          T = fes->GetElementTransformation(i);
-
-          // Prepare to compute the integral and volume over this element
-          double volume_per_cell = 0.0;
-          double elem_diss = 0.0;
-  
-          for (int j = 0; j < ir->GetNPoints(); j++)
-          {
-              const IntegrationPoint &ip = ir->IntPoint(j);
-              T->SetIntPoint(&ip);
-  
-              // Evaluate the solution at this integration point
-              real_t local_diss = d_vec(j);
-     
-              // Compute the Jacobian determinant at the current integration point
-              real_t detJ = T->Weight();
-              real_t weight = ip.weight;
-
-              volume_per_cell += weight*detJ;
-              elem_diss   += local_diss * detJ * weight;
-
-          }
-          totalVolume +=volume_per_cell;
-          totalDissipation += elem_diss;
-      }
-  
-      double globalDissipation = 0.0;
-      double globalVolume   = 0.0;
-
-      MPI_Allreduce(&totalVolume,
-                    &globalVolume,
-                    1,
-                    MPITypeMap<real_t>::mpi_type,
-                    MPI_SUM,
-                    MPI_COMM_WORLD);
-
-      MPI_Allreduce(&totalDissipation,
-                    &globalDissipation,
-                    1,
-                    MPITypeMap<real_t>::mpi_type,
-                    MPI_SUM,
-                    MPI_COMM_WORLD);
-
-      return globalDissipation/globalVolume;
-  }*/
-
-  template<typename T>
-  T sq(T x)
-  {
-     return x * x;
   }
 
   // Computes \eta = 2*\nu*(\nabla u + trans(\nabla u))^2
-  real_t ComputeAveragedDissipation(ParGridFunction &u)
+  void ComputeAveragedDissipation(ParGridFunction &u, double *dissipation_ave, double *SijSij_ave, real_t *max_dissipation)
   {
      
-    const ParFiniteElementSpace *pfes = u.ParFESpace();
+    const ParFiniteElementSpace *vfes = u.ParFESpace();
   
      double local_diss = 0.0; 
-     double local_vol        = 0.0;  
+     double local_vol  = 0.0;  
+     double local_SijSij = 0.0; 
   
      Array<int> vdofs;
      Vector loc_data;                 
-     DenseMatrix dshape;              
-     DenseMatrix grad_hat;            
-     DenseMatrix grad;                
+     DenseMatrix dshape, grad_hat, grad, S;              
+
+     real_t local_max_dissipation = 0.0;
   
-     const int ne = pfes->GetNE();
+     const int ne = vfes->GetNE();
      for (int e = 0; e < ne; ++e)
      {
-        pfes->GetElementVDofs(e, vdofs);
+        vfes->GetElementVDofs(e, vdofs);
         u.GetSubVector(vdofs, loc_data);
   
-        ElementTransformation *T = pfes->GetElementTransformation(e);
-        const FiniteElement   *el = pfes->GetFE(e);
+        ElementTransformation *T = vfes->GetElementTransformation(e);
+        const FiniteElement   *el = vfes->GetFE(e);
   
         const int elndofs = el->GetDof();
-        const int vdim    = pfes->GetVDim();
-        const int dim     = 3;
+        const int vdim    = vfes->GetVDim();
+        const int dim     = vfes->GetMesh()->Dimension();
   
         const int ir_order = 2*el->GetOrder() + 2;
         const IntegrationRule &ir = IntRules.Get(el->GetGeomType(), ir_order);
@@ -769,30 +847,58 @@ public:
   
            grad.SetSize(vdim, dim);
            Mult(grad_hat, Jinv, grad); 
-  
-           real_t d_val =   sq(grad(0, 0)) + sq(grad(1, 1)) + sq(grad(2, 2))
-                          + 0.5*(sq(grad(0,1) + grad(1,0)) + sq(grad(0,2) + grad(2,0))  
-                          + sq(grad(1,2) + grad(2,1))); 
-  
+
+           S.SetSize(dim,dim);
+           for (int a = 0; a < dim; ++a)
+           {
+              for (int b = 0; b < dim; ++b)
+              {
+                 S(a,b) = 0.5*(grad(a,b) + grad(b,a));
+              }
+           }
+
+           // Frobenius norm squared: S:S
+           double S2 = 0.0;
+           for (int a = 0; a < dim; ++a)
+           {
+              for (int b = 0; b < dim; ++b)
+              {
+                 S2 += S(a,b)*S(a,b);
+              }
+           }
+         
            const double dV = ip.weight * T->Weight();
-  
-           local_diss += 2.0*ctx.kinvis * d_val * dV;
-           local_vol         += dV;        
+           local_diss   += 2.0*ctx.kinvis * S2 * dV;
+           local_SijSij += S2*dV;
+           local_vol    += dV;        
+
+           // Point wise max
+           local_max_dissipation = std::max(local_max_dissipation, static_cast<real_t>( 2.0 * ctx.kinvis * S2) );
         }
      }
   
-     double global_diss = 0.0;
-     double global_vol         = 0.0;
-     MPI_Comm comm = pfes->GetComm();
-     MPI_Allreduce(&local_diss, &global_diss, 1, MPI_DOUBLE, MPI_SUM, comm);
-     MPI_Allreduce(&local_vol,         &global_vol,         1, MPI_DOUBLE, MPI_SUM, comm);
+     MPI_Comm comm = vfes->GetComm();
+
+     real_t global_max_dissipation = 0.0;
+     MPI_Allreduce(&local_max_dissipation, &global_max_dissipation,
+                   1, MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+
+      if (max_dissipation) { *max_dissipation = global_max_dissipation; }
+
+
+     double global_diss   = 0.0;
+     double global_SijSij = 0.0;
+     double global_vol    = 0.0;
+
+     MPI_Allreduce(&local_diss,   &global_diss  , 1, MPI_DOUBLE, MPI_SUM, comm);
+     MPI_Allreduce(&local_SijSij, &global_SijSij, 1, MPI_DOUBLE, MPI_SUM, comm);
+     MPI_Allreduce(&local_vol,    &global_vol   , 1, MPI_DOUBLE, MPI_SUM, comm);
   
-     return global_diss / global_vol;
+     *SijSij_ave      = global_SijSij/ global_vol;
+     *dissipation_ave = global_diss / global_vol;
   
      }
   
-   
-
    ~QuantitiesOfInterest() { delete mass_lf; };
 
 private:
@@ -1585,6 +1691,11 @@ int main(int argc, char *argv[])
                   "-nsnap",
                   "--num-snapshots",
                   "Number of evenly-spaced snapshots to output.");   
+   args.AddOption(&ctx.u0_based_on_mach, "-u0_from_mach", "--U0-from-mach", "-no-u0_from_mach",
+                  "--no-u0_from_mach",
+                  "Compute u0 based on a mach number?");
+   args.AddOption(&ctx.Mach0, "-mach0", "--Initial-Mach-Number", 
+      "Initial Mach number to compare with compressible codes");
    args.Parse();
    if (!args.Good())
    {
@@ -1635,20 +1746,26 @@ int main(int argc, char *argv[])
    // compressible codes!!
    // Can adjust this for different Mach number comparisions
    // Specify manually on purpose
-   double Mach0 = 0.1;
-   double gamma = 5.0/3.0;
-   double p0    = 1.0;
-   double rho0  = 1.0;
-   ctx.u0 = 2.0*Mach0*sqrt(gamma*p0/rho0);
+   if (ctx.u0_based_on_mach)
+   {
+      double gamma = 5.0/3.0;
+      double p0    = 1.0;
+      double rho0  = 1.0;
+      ctx.u0 = 2.0*ctx.Mach0*sqrt(gamma*p0/rho0);
+      if (Mpi::Root())
+      {
+         std::cout << "Mach0: " << ctx.Mach0 << std::endl;  
+      }
+   }
 
    // K0 = 1.0/L0
    double L0 = (ctx.problem1) ? 1.0 : 1.0/(2.0*M_PI);
 
    // t*=u0/L*t
-   double t_star_final = (ctx.problem1) ? 1.0 : L0/ctx.u0*ctx.t_final;
+   double t_star_final = L0/ctx.u0*ctx.t_final;
 
    // t = u0/L*t* (we are solving the for rescaled time based on velocity)
-   double dt_scale = (ctx.problem1) ? 1.0 : ctx.u0/L0;
+   double dt_scale = ctx.u0/L0;
 
    // Update kinematic viscosity
    ctx.kinvis = ctx.u0 * L0 / (ctx.reynum);
@@ -1901,14 +2018,12 @@ int main(int argc, char *argv[])
    // Initialize w_gf and q_gf using the finite element spaces
    ParGridFunction w_gf(velocity_fespace);
    ParGridFunction q_gf(pressure_fespace);
-   ParGridFunction d_gf(pressure_fespace);
    ParGridFunction lambda2_gf(pressure_fespace);
    // ParGridFunction ke_gf(pressure_fespace);
 
    flowsolver->ComputeCurl3D(*u_gf, w_gf);
    ComputeQCriterion(*u_gf, q_gf);
    ComputeLambda2Nodal(*u_gf, lambda2_gf);
-   ComputeDissipation(*u_gf, d_gf);
 
    // ComputeDivergence3D(*u_gf, divu_gf);
    // ComputeVorticalPart(flowsolver, *u_gf, w_gf, u_vort);
@@ -2060,7 +2175,6 @@ int main(int argc, char *argv[])
       // dc->RegisterField("curl_Ah", &curl_Ah_h1);
       // dc->RegisterField("curl_Ah_from_grad_phi", &curl_Ah_h1_from_grad_phi);
       // dc->RegisterField("grad_phi", &grad_phi_h1);
-      // dc->RegisterField("dissipation", &d_gf);
       // dc->RegisterField("divu", &divu_gf);
       // dc->RegisterField("ke", &ke_gf);
       // dc->RegisterField("u_vort", &u_vort);
@@ -2099,7 +2213,6 @@ int main(int argc, char *argv[])
            cdc->RegisterField("pressure", p_gf);
            cdc->RegisterField("vorticity", &w_gf);
            cdc->RegisterField("qcriterion", &q_gf);
-           // cdc->RegisterField("dissipation", &d_gf);
            cdc->Save();
          }
 #else
@@ -2126,17 +2239,23 @@ int main(int argc, char *argv[])
    real_t hmin_eta = 0.0;
    real_t kmax_eta = 0.0;
    real_t u_rms =  pow(2.0/3.0*ke,0.5);
-   real_t max_diss = 0.0;
 
    real_t kmax = 0.0;
    real_t hmin = 0.0;
 
-   real_t avg_diss = kin_energy.ComputeAveragedDissipation(*u_gf);
-   kin_energy.ComputeKolmogorovAndTaylorMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, &avg_kolmTimeScl, &max_diss, ke);
+   real_t avg_diss = 0.0;
+   real_t avg_SijSij = 0.0;
+   real_t max_dissipation = 0.0;
+
+   real_t S, F, D31, E31;
+   kin_energy.ComputeSkewFlat_D3D1_E3E1(*u_gf, S, F, D31, E31);
+
+   kin_energy.ComputeAveragedDissipation(*u_gf, &avg_diss, &avg_SijSij,&max_dissipation);
+   kin_energy.ComputeKolmogorovAndTaylorMicroLength(&max_dissipation, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, &avg_kolmTimeScl, ke);
    kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta, &kmax, &hmin);
 
    // double lambdas[3];
-   double avg_lambda_iso = kin_energy.ComputeTaylorMicroscale(*u_gf, nullptr, nullptr);
+   double avg_lambda_iso = kin_energy.ComputeTaylorMicroscale(*u_gf, nullptr);
 
    // if (Mpi::Root())
    // {
@@ -2152,7 +2271,7 @@ int main(int argc, char *argv[])
    // This computes how resolved our grid is.
    // See Aspen 2008 Implicit LES Anaylsis
    real_t PI_nu = pow(avg_diss,0.5)/(avg_kolmLenScl*pow(vel_curl_ke,0.75));
-   real_t PI_nu_min = pow(max_diss,0.5)/(kolmLenScl*pow(vel_curl_ke,0.75));
+   real_t PI_nu_min = pow(max_dissipation,0.5)/(kolmLenScl*pow(vel_curl_ke,0.75));
 
    // Taylor Reynolds Number
    // Re_lambda = u' lambda/nu
@@ -2179,6 +2298,14 @@ int main(int argc, char *argv[])
                                               + ctx.element_subdivisions_parallel) 
                                             + "P" + std::to_string(ctx.order)
                                             + ".txt";
+   std::string fname_turb_continued = std::string("tgv_out_turb_continued_") 
+                                            + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
+                                            + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
+                                            + "RefLv" + std::to_string(
+                                                ctx.element_subdivisions 
+                                              + ctx.element_subdivisions_parallel) 
+                                            + "P" + std::to_string(ctx.order)
+                                            + ".txt";
    std::string fname_turb_grid = std::string("tgv_out_turb_grid_") 
                                             + "Re" + std::to_string(static_cast<int>(ctx.reynum)) 
                                             + "NumPtsPerDir" +std::to_string(ctx.num_pts) 
@@ -2189,6 +2316,7 @@ int main(int argc, char *argv[])
                                             + ".txt";
    FILE *f = NULL;
    FILE *f_turb = NULL;
+   FILE *f_turb_continued = NULL;
    FILE *f_turb_grid = NULL;
 
    if (Mpi::Root())
@@ -2209,6 +2337,7 @@ int main(int argc, char *argv[])
 
       f = fopen(fname.c_str(), file_mode);
       f_turb = fopen(fname_turb.c_str(), file_mode);
+      f_turb_continued = fopen(fname_turb_continued.c_str(), file_mode);
       f_turb_grid = fopen(fname_turb_grid.c_str(), file_mode);
 
       if (!f)
@@ -2218,6 +2347,12 @@ int main(int argc, char *argv[])
       }
 
       if (!f_turb)
+      {
+        std::cerr << "Error opening file " << fname_turb << std::endl;
+        MPI_Abort(MPI_COMM_WORLD,1);
+      }
+
+      if (!f_turb_continued)
       {
         std::cerr << "Error opening file " << fname_turb << std::endl;
         MPI_Abort(MPI_COMM_WORLD,1);
@@ -2259,9 +2394,24 @@ int main(int argc, char *argv[])
 
           // Write the initial data point
            fprintf(f_turb, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
-                       t, static_cast<real_t>(global_cycle + step), max_diss, avg_diss, kolmLenScl, 
+                       t, static_cast<real_t>(global_cycle + step), max_dissipation, avg_diss, kolmLenScl, 
                        avg_lambda, avg_lambda_iso, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
                        Re_taylor, u_rms);
+
+          // Write header only if not restarting
+          fprintf(f_turb_continued, "3D Taylor Green Vortex (turbulence metrics)\n");
+          fprintf(f_turb_continued, "Reynolds Number = %d\n", static_cast<int>(ctx.reynum));
+          fprintf(f_turb_continued, "order = %d\n", ctx.order);
+          fprintf(f_turb_continued, "grid = %d x %d x %d\n", nel1d, nel1d, nel1d);
+          fprintf(f_turb_continued, "dofs per component = %d\n", ngridpts);
+          fprintf(f_turb_continued, "===================================================================================");
+          fprintf(f_turb_continued, "===================================================================================\n");
+          fprintf(f_turb_continued, "        time                        cycle                     avg_SijSij                 Skewness");
+          fprintf(f_turb_continued, "            Flatness                    D31                       E31\n");
+
+          // Write the initial data point
+           fprintf(f_turb_continued, "%20.16e     %20.16e      %20.16e     %20.16e     %20.16e     %20.16e     %20.16e\n",
+                       t, static_cast<real_t>(global_cycle + step), avg_SijSij, S, F, D31, E31); 
 
           // Write header only if not restarting
           fprintf(f_turb_grid, "3D Taylor Green Vortex (turbulence grid metrics)\n");
@@ -2283,6 +2433,7 @@ int main(int argc, char *argv[])
 
       fflush(f);
       fflush(f_turb);
+      fflush(f_turb_continued);
       fflush(f_turb_grid);
       fflush(stdout);
    }
@@ -2479,21 +2630,21 @@ int main(int argc, char *argv[])
       vel_curl_ke = kin_energy.ComputeInertialRangeEnergy(*u_gf);
       enstrophy = kin_energy.ComputeEnstrophy(*u_gf);
 
-      ComputeDissipation(*u_gf, d_gf);
-      avg_diss = kin_energy.ComputeAveragedDissipation(*u_gf);
-      kin_energy.ComputeKolmogorovAndTaylorMicroLength(d_gf, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, &avg_kolmTimeScl, &max_diss, ke);
+      kin_energy.ComputeAveragedDissipation(*u_gf, &avg_diss, &avg_SijSij, &max_dissipation);
+      kin_energy.ComputeKolmogorovAndTaylorMicroLength(&max_dissipation, avg_diss, &kolmLenScl, &avg_lambda, &avg_kolmLenScl, &kolmTimeScl, &avg_kolmTimeScl, ke);
       kin_energy.ComputeGridPtsRequirementsTurb(*u_gf, kolmLenScl, &hmin_eta, &kmax_eta, &kmax, &hmin);
-      avg_lambda_iso = kin_energy.ComputeTaylorMicroscale(*u_gf, nullptr, nullptr);
+      avg_lambda_iso = kin_energy.ComputeTaylorMicroscale(*u_gf, nullptr);
       u_rms =  pow(2.0/3.0*ke, 0.5);
       // Re_taylor = u_rms*avg_lambda/ctx.kinvis;
       Re_taylor = u_rms*avg_lambda_iso/ctx.kinvis;
 
       PI_nu = pow(avg_diss,0.5)/(avg_kolmLenScl*pow(vel_curl_ke,0.75));
-      PI_nu_min = pow(max_diss,0.5)/(kolmLenScl*pow(vel_curl_ke,0.75));
+      PI_nu_min = pow(max_dissipation,0.5)/(kolmLenScl*pow(vel_curl_ke,0.75));
 
       avg_hmin_eta = hmin/avg_kolmLenScl;
       avg_kmax_eta = kmax*avg_kolmLenScl;
 
+      kin_energy.ComputeSkewFlat_D3D1_E3E1(*u_gf, S, F, D31, E31);
 
       // if (Mpi::Root())
       // {
@@ -2511,13 +2662,16 @@ int main(int argc, char *argv[])
            printf("%.5E %.5E %.5E %.5E %.5E %.5E %.5E\n", t, ctx.dt, u_inf, p_inf, ke, enstrophy, cfl);
            fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e      %20.16e\n", t, static_cast<real_t>(step + global_cycle), ke, enstrophy, cfl);
            fprintf(f_turb, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
-                       t, static_cast<real_t>(global_cycle + step), max_diss, avg_diss, kolmLenScl, 
+                       t, static_cast<real_t>(global_cycle + step), max_dissipation, avg_diss, kolmLenScl, 
                        avg_lambda, avg_lambda_iso, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
                        Re_taylor, u_rms);
+           fprintf(f_turb_continued, "%20.16e     %20.16e      %20.16e     %20.16e     %20.16e     %20.16e     %20.16e\n",
+                       t, static_cast<real_t>(global_cycle + step), avg_SijSij, S, F, D31, E31); 
            fprintf(f_turb_grid, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e    %20.16e    %20.16e\n",
                        t, static_cast<real_t>(global_cycle + step), kmax_eta, hmin_eta, PI_nu, PI_nu_min, avg_kmax_eta, avg_hmin_eta);
            fflush(f);
            fflush(f_turb);
+           fflush(f_turb_continued);
            fflush(f_turb_grid);
            fflush(stdout);
          }
