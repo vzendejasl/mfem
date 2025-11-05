@@ -17,7 +17,7 @@ using namespace std;
 // Problem setup
 // =============================================================
 
-static double g_amp = 0.15; // perturbation amplitude
+static double g_amp = 0.05; // perturbation amplitude
 
 void PerturbMeshTransform(const Vector &x_in, Vector &x_out)
 {
@@ -155,9 +155,6 @@ int main(int argc, char *argv[])
    bool visit_output = false;
    int visport = 19916;
 
-   double bb_rel     = 0.20; // per-element AABB padding
-   double bdr_frac   = 1; // boundary distance tol as fraction of h
-   double plane_mult = 1;  // plane window = plane_mult * bdr_tol
 
    OptionsParser args(argc, argv);
    args.AddOption(&nx, "-n", "--num_el", "Elements per direction.");
@@ -169,9 +166,6 @@ int main(int argc, char *argv[])
    args.AddOption(&fieldtype, "-ft", "--field-type", "Target GF: -1(same), 0-H1, 1-L2, 2-H(div), 3-H(curl).");
    args.AddOption(&visualization, "-vis", "--visualization", "-no-vis", "--no-visualization", "GLVis on/off.");
    args.AddOption(&visit_output, "-visit", "--visit-output", "-no-visit", "--no-visit-output", "VisIt on/off.");
-   args.AddOption(&bb_rel, "--bb", "--bb", "FindPoints per-element AABB padding.");
-   args.AddOption(&bdr_frac, "--bdrfrac", "--bdrfrac", "Boundary tolerance as fraction of h.");
-   args.AddOption(&plane_mult, "--plane-mult", "--plane-mult", "Plane window multiplier (×bdr_tol).");
    args.Parse();
 
    if (!args.Good())
@@ -421,16 +415,14 @@ int main(int argc, char *argv[])
 
    // Characteristic size and tolerances
    const double h       = Lx / nx;
-   const double bdr_tol = std::max(bdr_frac * h, 1e-6);
-   const double eps_plane = std::max(plane_mult * bdr_tol, 2e-6);
 
    // ---------------- FindPoints: first pass ----------------
    Vector interp_vals(nodes_cnt * tar_ncomp);
    interp_vals = 0.0;
 
    FindPointsGSLIB finder(MPI_COMM_WORLD);
-   finder.Setup(mesh_1, bb_rel);
-   finder.SetDistanceToleranceForPointsFoundOnBoundary(bdr_tol);
+   finder.Setup(mesh_1, 0.4);
+   finder.SetDistanceToleranceForPointsFoundOnBoundary(1);
    if (fieldtype == 1)
    {
       finder.SetL2AvgType(mfem::FindPointsGSLIB::ARITHMETIC);
@@ -464,197 +456,6 @@ int main(int argc, char *argv[])
                 << " notfound=" << g_miss
                 << "  (total=" << total << ")\n";
    }
-
-   // // ---------------- Retry keys (deterministic order on all ranks) ----------------
-   // std::vector<std::array<int,3>> retry_keys;
-
-   // // Faces
-   // retry_keys.push_back({+1,  0,  0});
-   // retry_keys.push_back({-1,  0,  0});
-   // if (dim > 1)
-   // {
-   //    retry_keys.push_back({0, +1,  0});
-   //    retry_keys.push_back({0, -1,  0});
-   // }
-   // if (dim > 2)
-   // {
-   //    retry_keys.push_back({0,  0, +1});
-   //    retry_keys.push_back({0,  0, -1});
-   // }
-
-   // // Edges
-   // if (dim > 1)
-   // {
-   //    for (int sx : {-1, +1})
-   //    {
-   //       for (int sy : {-1, +1})
-   //       {
-   //          retry_keys.push_back({sx, sy, 0});
-   //       }
-   //    }
-   // }
-   // if (dim > 2)
-   // {
-   //    for (int sx : {-1, +1})
-   //    {
-   //       for (int sz : {-1, +1})
-   //       {
-   //          retry_keys.push_back({sx, 0, sz});
-   //       }
-   //    }
-   //    for (int sy : {-1, +1})
-   //    {
-   //       for (int sz : {-1, +1})
-   //       {
-   //          retry_keys.push_back({0, sy, sz});
-   //       }
-   //    }
-   // }
-
-   // // Corners
-   // if (dim > 2)
-   // {
-   //    for (int sx : {-1, +1})
-   //    {
-   //       for (int sy : {-1, +1})
-   //       {
-   //          for (int sz : {-1, +1})
-   //          {
-   //             retry_keys.push_back({sx, sy, sz});
-   //          }
-   //       }
-   //    }
-   // }
-
-   // auto select_candidates_for_key =
-   //    [&](const std::array<int,3>& key,
-   //        const std::vector<int>& pool,
-   //        std::vector<int>& out_ids)
-   // {
-   //    out_ids.clear();
-
-   //    const int sx = key[0], sy = key[1], sz = key[2];
-
-   //    for (int idx : pool)
-   //    {
-   //       const double x = vxyz_bn[idx];
-   //       const double y = (dim > 1) ? vxyz_bn[nodes_cnt + idx]       : 0.0;
-   //       const double z = (dim > 2) ? vxyz_bn[2 * nodes_cnt + idx]   : 0.0;
-
-   //       bool pass = true;
-
-   //       if (sx == +1) { pass = pass && (x < eps_plane); }
-   //       if (sx == -1) { pass = pass && (x > Lx - eps_plane); }
-
-   //       if (dim > 1)
-   //       {
-   //          if (sy == +1) { pass = pass && (y < eps_plane); }
-   //          if (sy == -1) { pass = pass && (y > Ly - eps_plane); }
-   //       }
-
-   //       if (dim > 2)
-   //       {
-   //          if (sz == +1) { pass = pass && (z < eps_plane); }
-   //          if (sz == -1) { pass = pass && (z > Lz - eps_plane); }
-   //       }
-
-   //       if (pass)
-   //       {
-   //          out_ids.push_back(idx);
-   //       }
-   //    }
-   // };
-
-   // // ---------------- Collective retry loop (plane-filtered) ----------------
-   // int found_faces = 0;
-   // int found_edges_corners = 0;
-
-   // std::vector<int> local_group;
-   // local_group.reserve(missing.size());
-
-   // for (size_t k = 0; k < retry_keys.size(); ++k)
-   // {
-   //    const std::array<int,3> key = retry_keys[k];
-
-   //    // Face if exactly one non-zero in 2D, or exactly one zero in 3D? Simpler:
-   //    const bool is_face =
-   //       ( (key[0] == 0) + (key[1] == 0) + (key[2] == 0) ==
-   //         (dim == 3 ? 2 : 1) );
-
-   //    select_candidates_for_key(key, missing, local_group);
-
-   //    int local_has = local_group.empty() ? 0 : 1;
-   //    int global_has = 0;
-   //    MPI_Allreduce(&local_has, &global_has, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-
-   //    if (global_has == 0)
-   //    {
-   //       continue; // nothing to do for this key on any rank
-   //    }
-
-   //    Vector sub_coords;
-   //    BuildSubsetCoordsByNodes(vxyz_bn, dim, local_group, sub_coords);
-   //    const int subN = static_cast<int>(local_group.size());
-
-   //    Vector sub_vals(subN * tar_ncomp);
-   //    sub_vals = 0.0;
-
-   //    finder.Interpolate(sub_coords, *func_source, sub_vals, Ordering::byNODES);
-   //    const Array<unsigned int> &sub_codes = finder.GetCode();
-
-   //    int local_new_found = 0;
-
-   //    for (int d = 0; d < tar_ncomp; ++d)
-   //    {
-   //       double *dst = interp_vals.GetData() + d * nodes_cnt;
-   //       const double *src = sub_vals.GetData() + d * subN;
-
-   //       for (int i = 0; i < subN; ++i)
-   //       {
-   //          if (sub_codes[i] != 2)
-   //          {
-   //             dst[ local_group[i] ] = src[i];
-   //             local_new_found++;
-   //          }
-   //       }
-   //    }
-
-   //    int global_new_found = 0;
-   //    MPI_Allreduce(&local_new_found, &global_new_found, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-
-   //    if (is_face) { found_faces += global_new_found; }
-   //    else         { found_edges_corners += global_new_found; }
-
-   //    // Rebuild local missing pool
-   //    if (subN > 0)
-   //    {
-   //       std::vector<char> is_found(nodes_cnt, 0);
-   //       for (int i = 0; i < subN; ++i)
-   //       {
-   //          if (sub_codes[i] != 2)
-   //          {
-   //             is_found[ local_group[i] ] = 1;
-   //          }
-   //       }
-
-   //       std::vector<int> next_missing;
-   //       next_missing.reserve(missing.size());
-   //       for (int idx : missing)
-   //       {
-   //          if (!is_found[idx])
-   //          {
-   //             next_missing.push_back(idx);
-   //          }
-   //       }
-   //       missing.swap(next_missing);
-   //    }
-   // }
-
-   // if (myid == 0)
-   // {
-   //    std::cout << "Plane-filtered retries found: faces=" << found_faces
-   //              << ", edges/corners=" << found_edges_corners << "\n";
-   // }
 
    // ---------------- Final brute-force collective pass (no plane filter) ----------------
    // If anything remains, try all offsets again on the entire remaining set.
@@ -779,8 +580,7 @@ int main(int argc, char *argv[])
 
       if (final_missing_global > 0)
       {
-         std::cout << "NOTE: remaining misses = " << final_missing_global
-                   << ". Try --bb 0.35..0.45 or --bdrfrac 0.14..0.18 or --plane-mult 4.0.\n";
+         std::cout << "NOTE: remaining misses = " << final_missing_global << std::endl;
       }
    }
 
