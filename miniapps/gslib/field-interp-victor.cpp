@@ -499,6 +499,58 @@ int main(int argc, char *argv[])
    mesh_1_serial.Clear();
    mesh_2_serial.Clear();
 
+   {
+      const std::string mesh_dir = "saved_mesh";
+      const std::string fname_base = "uniform-parallel";
+
+      if (myid == 0)
+      {
+         std::string cmd = "mkdir -p " + mesh_dir;
+         int ret = system(cmd.c_str());
+         MFEM_VERIFY(ret == 0, "Failed to create directory: " + mesh_dir);
+      }
+
+      MPI_Barrier(MPI_COMM_WORLD);  // Wait for directory creation
+
+      // --- Save parallel mesh: each rank writes its partition ---
+      std::ostringstream mesh_name;
+      mesh_name << mesh_dir << "/" << fname_base << "." 
+                << std::setfill('0') << std::setw(6) << myid;
+
+      std::ofstream mesh_ofs(mesh_name.str());
+      MFEM_VERIFY(mesh_ofs.good(), "Failed to open mesh file for writing: " + mesh_name.str());
+      mesh_ofs.precision(17);
+      mesh_2.ParPrint(mesh_ofs);
+      mesh_ofs.close();
+
+      MPI_Barrier(MPI_COMM_WORLD);  // Ensure all ranks finish writing
+
+      if (myid == 0)
+      {
+         std::cout << "Mesh saved to directory: " << mesh_dir << "/" << std::endl;
+      }
+
+      // --- Load parallel mesh: each rank reads its partition ---
+      std::ostringstream mesh_load_name;
+      mesh_load_name << mesh_dir << "/" << fname_base << "." 
+                     << std::setfill('0') << std::setw(6) << myid;
+
+      std::ifstream mesh_ifs(mesh_load_name.str());
+      MFEM_VERIFY(mesh_ifs.good(), "Failed to open mesh file for reading: " + mesh_load_name.str());
+
+      mfem::ParMesh reloaded(MPI_COMM_WORLD, mesh_ifs);
+      mesh_ifs.close();
+
+      if (myid == 0)
+      {
+         std::cout << "Mesh loaded from directory: " << mesh_dir << "/" << std::endl;
+      }
+
+      // Replace old mesh
+      mesh_2 = std::move(reloaded);
+   }
+
+
    // ---------------- Source field setup ----------------
    int src_vdim = src_ncomp;
    mfem::FiniteElementCollection *src_fec = nullptr;

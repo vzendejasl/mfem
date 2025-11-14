@@ -639,131 +639,131 @@ public:
                                   double &E3_over_E1)
    {
       using namespace mfem;
-   
+
       MFEM_VERIFY(u.ParFESpace() != nullptr, "Velocity ParGridFunction has no FESpace.");
       const ParFiniteElementSpace &fes = *u.ParFESpace();
       MFEM_VERIFY(fes.GetParMesh() && fes.GetParMesh()->Dimension() == 3, "Expect 3D mesh.");
       MFEM_VERIFY(fes.GetVDim() == 3, "Expect vdim=3 velocity.");
-   
+
       MPI_Comm comm = fes.GetComm();
       ParMesh &pmesh = *fes.GetParMesh();
-   
+
       // ---------------- Local accumulators ----------------
       double local_volume = 0.0;
-   
+
       // \int u_i^2 \, dV  (for E3/E1)
       double local_u2[3]  = {0.0, 0.0, 0.0};
-   
+
       // Longitudinal moments: \int (\partial_{x}u)^p, (\partial_{y}v)^p, (\partial_{z}w)^p \, dV for p=2,3,4
       double local_d2[3]  = {0.0, 0.0, 0.0};
       double local_d3[3]  = {0.0, 0.0, 0.0};
       double local_d4[3]  = {0.0, 0.0, 0.0};
-   
+
       // \int \sum_{j=1}^{3} (\partial_{x_j} u_i)^2 \, dV  (for D3/D1)
       double local_gsq[3] = {0.0, 0.0, 0.0};
-   
+
       mfem::Vector      local_u_val(3);
       mfem::DenseMatrix local_grad(3, 3); // local_grad(i,j) = \partial_{x_j} u_i
-   
+
       const int NE = pmesh.GetNE();
-   
+
       for (int e = 0; e < NE; ++e)
       {
          const FiniteElement &fe = *fes.GetFE(e);
          ElementTransformation &T = *fes.GetElementTransformation(e);
-      
+
          // Integration rule order sufficient for up to 4th moments
          const int ir_order = 2 * fe.GetOrder() + 2;
          const IntegrationRule &ir = IntRules.Get(fe.GetGeomType(), ir_order);
-      
+
          for (int q = 0; q < ir.GetNPoints(); ++q)
          {
             const IntegrationPoint &ip = ir.IntPoint(q);
             T.SetIntPoint(&ip);
-         
+
             const double dV = ip.weight * T.Weight();
-         
+
             u.GetVectorValue(e, ip, local_u_val);
             u.GetVectorGradient(T, local_grad);
-         
+
             local_volume += dV;
-         
+
             // --- \int u_i^2 dV ---
             local_u2[0] += sq(local_u_val(0)) * dV;
             local_u2[1] += sq(local_u_val(1)) * dV;
             local_u2[2] += sq(local_u_val(2)) * dV;
-         
+
             // --- Longitudinal derivatives: (\partial_x u), (\partial_y v), (\partial_z w) ---
             local_d2[0] += sq(local_grad(0,0)) * dV;
             local_d2[1] += sq(local_grad(1,1)) * dV;
             local_d2[2] += sq(local_grad(2,2)) * dV;
-         
+
             local_d3[0] +=  local_grad(0,0) * sq(local_grad(0,0)) * dV; // (\partial_x u)^3
             local_d3[1] +=  local_grad(1,1) * sq(local_grad(1,1)) * dV; // (\partial_y v)^3
             local_d3[2] +=  local_grad(2,2) * sq(local_grad(2,2)) * dV; // (\partial_z w)^3
-         
+
             local_d4[0] += sq(sq(local_grad(0,0))) * dV; // (\partial_x u)^4
             local_d4[1] += sq(sq(local_grad(1,1))) * dV; // (\partial_y v)^4
             local_d4[2] += sq(sq(local_grad(2,2))) * dV; // (\partial_z w)^4
-         
+
             // --- \int \sum_{j=1}^{3} (\partial_{x_j} u_i)^2 dV ---
             local_gsq[0] += ( sq(local_grad(0,0)) + sq(local_grad(0,1)) + sq(local_grad(0,2)) ) * dV;
             local_gsq[1] += ( sq(local_grad(1,0)) + sq(local_grad(1,1)) + sq(local_grad(1,2)) ) * dV;
             local_gsq[2] += ( sq(local_grad(2,0)) + sq(local_grad(2,1)) + sq(local_grad(2,2)) ) * dV;
          }
       }
-   
+
       // ---------------- Global reductions ----------------
       double global_volume = 0.0;
-   
+
       double global_u2[3];
       double global_d2[3];
       double global_d3[3];
       double global_d4[3];
       double global_gsq[3];
-   
+
       MPI_Allreduce(&local_volume, &global_volume, 1, MPI_DOUBLE, MPI_SUM, comm);
       MPI_Allreduce(local_u2,      global_u2,      3, MPI_DOUBLE, MPI_SUM, comm);
       MPI_Allreduce(local_d2,      global_d2,      3, MPI_DOUBLE, MPI_SUM, comm);
       MPI_Allreduce(local_d3,      global_d3,      3, MPI_DOUBLE, MPI_SUM, comm);
       MPI_Allreduce(local_d4,      global_d4,      3, MPI_DOUBLE, MPI_SUM, comm);
       MPI_Allreduce(local_gsq,     global_gsq,     3, MPI_DOUBLE, MPI_SUM, comm);
-   
+
       // ---------------- Form averages FIRST ----------------
       const double one_third = 1.0 / 3.0;
-   
+
       // \left\langle \frac{1}{3}\big[(\partial_x u)^p + (\partial_y v)^p + (\partial_z w)^p\big] \right\rangle
       double avg_long_d2 = 0.0;
       double avg_long_d3 = 0.0;
       double avg_long_d4 = 0.0;
-   
+
       if (global_volume > 0.0)
       {
          avg_long_d2 = one_third * ( (global_d2[0] + global_d2[1] + global_d2[2]) / global_volume );
          avg_long_d3 = one_third * ( (global_d3[0] + global_d3[1] + global_d3[2]) / global_volume );
          avg_long_d4 = one_third * ( (global_d4[0] + global_d4[1] + global_d4[2]) / global_volume );
       }
-   
+
       // \left\langle \sum_{j=1}^{3}(\partial_{x_j} u_i)^2 \right\rangle for i=1 and i=3
       double avg_gsq_comp1 = (global_volume > 0.0) ? (global_gsq[0] / global_volume) : 0.0;
       double avg_gsq_comp3 = (global_volume > 0.0) ? (global_gsq[2] / global_volume) : 0.0;
-   
+
       // \left\langle u_i^2 \right\rangle for i=1 and i=3
       double avg_u2_comp1  = (global_volume > 0.0) ? (global_u2[0] / global_volume) : 0.0;
       double avg_u2_comp3  = (global_volume > 0.0) ? (global_u2[2] / global_volume) : 0.0;
-   
+
       // ---------------- Final ratios/powers ----------------
       // S = \frac{\langle \frac{1}{3}[(\partial_x u)^3 + (\partial_y v)^3 + (\partial_z w)^3] \rangle}
       //          { \langle \frac{1}{3}[(\partial_x u)^2 + (\partial_y v)^2 + (\partial_z w)^2] \rangle^{3/2} }
       skewness = (avg_long_d2 > 0.0) ? (avg_long_d3 / std::pow(avg_long_d2, 1.5)) : 0.0;
-   
+
       // F = \frac{\langle \frac{1}{3}[(\partial_x u)^4 + (\partial_y v)^4 + (\partial_z w)^4] \rangle}
       //          { \langle \frac{1}{3}[(\partial_x u)^2 + (\partial_y v)^2 + (\partial_z w)^2] \rangle^{2} }
       flatness = (avg_long_d2 > 0.0) ? (avg_long_d4 / sq(avg_long_d2)) : 0.0;
-   
+
       // \frac{D_3}{D_1} = \frac{\langle \sum_{j=1}^{3}(\partial_{x_j} u_3)^2 \rangle}{\langle \sum_{j=1}^{3}(\partial_{x_j} u_1)^2 \rangle}
       D3_over_D1 = (avg_gsq_comp1 > 0.0) ? (avg_gsq_comp3 / avg_gsq_comp1) : 0.0;
-   
+
       // \frac{E_3}{E_1} = \frac{\langle u_3^2 \rangle}{\langle u_1^2 \rangle}
       E3_over_E1 = (avg_u2_comp1 > 0.0) ? (avg_u2_comp3 / avg_u2_comp1) : 0.0;
    }
@@ -1749,9 +1749,9 @@ int main(int argc, char *argv[])
    if (ctx.u0_based_on_mach)
    {
       double gamma = 5.0/3.0;
-      double p0    = 1.0;
+      double p0    = 100.0;
       double rho0  = 1.0;
-      ctx.u0 = 2.0*ctx.Mach0*sqrt(gamma*p0/rho0);
+      ctx.u0 = ctx.Mach0*sqrt(gamma*p0/rho0);
       if (Mpi::Root())
       {
          std::cout << "Mach0: " << ctx.Mach0 << std::endl;  
