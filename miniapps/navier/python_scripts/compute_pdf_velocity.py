@@ -453,7 +453,7 @@ def main():
     
     # Choose σ normalization
     if args.sigma_norm == "omega_prime":
-        Xsig = sigma / omega_prime
+        Xsig = sigma / omega_prime**2
         sig_label = "σ / ω′"
     elif args.sigma_norm == "omega_prime_times_absw":
         Xsig = sigma / (omega_prime * (np.abs(wmag) + 1e-30))

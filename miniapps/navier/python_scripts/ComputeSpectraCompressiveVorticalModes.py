@@ -174,8 +174,19 @@ def read_data_file_chunked(filename, chunk_size=5_000_000):
     print(f"    vy: [{vely_grid.min():.6f}, {vely_grid.max():.6f}]")
     print(f"    vz: [{velz_grid.min():.6f}, {velz_grid.max():.6f}]")
     print(f"    |v|: [{v_mag.min():.6f}, {v_mag.max():.6f}]")
-    
-    return velx_grid, vely_grid, velz_grid, x_unique, y_unique, z_unique, dx, dy, dz
+
+    # --- PERIODICITY FIX ---
+    # Slice off the last point in every direction (index 8) 
+    # so we only pass the 8 unique periodic points to the FFT.
+    print("  Applying periodic slicing (dropping last point)...")
+    return (velx_grid[:-1, :-1, :-1], 
+            vely_grid[:-1, :-1, :-1], 
+            velz_grid[:-1, :-1, :-1], 
+            x_unique[:-1], 
+            y_unique[:-1], 
+            z_unique[:-1], 
+            dx, dy, dz)
+    # return velx_grid, vely_grid, velz_grid, x_unique, y_unique, z_unique, dx, dy, dz
 
 # ------------------------------------------------------------------ #
 #  Step 3: Create wavenumber grids for FFT operations
