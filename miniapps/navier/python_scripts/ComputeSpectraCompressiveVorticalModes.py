@@ -4,24 +4,38 @@ Simple Helmholtz-Hodge decomposition and energy spectrum analysis
 MINIMAL FIX: Only correcting the dx/(1.0) bug - everything else stays the same
 
 Usage:
-    python simple_script.py data_file.txt                    # Basic analysis
-    python simple_script.py data_file.txt --visualize       # With visualization
+    python simple_script.py data_file.txt                    # Basic analysis with plots
+    python simple_script.py data_file.txt --no-plot         # No plots (for SLURM)
+    python simple_script.py file1.txt file2.txt file3.txt   # Multiple files with plots
+    python simple_script.py *.txt --no-plot                 # Multiple files, no plots
+    python simple_script.py data_file.txt --visualize       # With velocity field visualization
+    python python_scripts/ComputeSpectraCompressiveVorticalModes.py \
+    SamplePointsVelocity_Re400NumPtsPerDir8RefLv3P2/cycle_*/SampledData[0-9]*.txt \
+    --no-plot
 """
 
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 import scipy.fft as fft
 import re
 import os 
 import argparse
+import pandas as pd
 
 
 # ------------------------------------------------------------------ #
 #  Step 1: Read and parse data file
 # ------------------------------------------------------------------ #
-def read_data_file(filename):
-    """Read velocity data from file and extract metadata"""
-    print(f"Reading data from: {filename}")
+
+import pandas as pd
+
+# ------------------------------------------------------------------ #
+#  Step 1: Read and parse data file (SIMPLIFIED CHUNKED VERSION)
+# ------------------------------------------------------------------ #
+def read_data_file_header(filename):
+    """Read only header information from file"""
+    print(f"Reading header from: {filename}")
     
     # Read header lines
     with open(filename, 'r') as f:
@@ -32,8 +46,8 @@ def read_data_file(filename):
     time_value = 0.0
     
     for line in header_lines:
-        if 'Cycle' in line:
-            match = re.search(r'Cycle\s*[:=]\s*(\d+)', line)
+        if 'Cycle' in line or 'Step' in line:
+            match = re.search(r'(?:Cycle|Step)\s*[:=]\s*(\d+)', line)
             if match:
                 step_number = match.group(1)
         if 'Time' in line:
@@ -41,41 +55,83 @@ def read_data_file(filename):
             if match:
                 time_value = float(match.group(1))
     
-    # Load velocity data (skip header)
-    data = np.genfromtxt(filename, delimiter=' ', skip_header=6)
-    
-    # Extract coordinates and velocities
-    x_coords = data[:, 0]
-    y_coords = data[:, 1] 
-    z_coords = data[:, 2]
-    vel_x = data[:, 3]
-    vel_y = data[:, 4]
-    vel_z = data[:, 5]
-    
     print(f"  Step: {step_number}, Time: {time_value:.3e}")
-    print(f"  Data points: {len(x_coords)}")
     
-    return x_coords, y_coords, z_coords, vel_x, vel_y, vel_z, step_number, time_value
+    return step_number, time_value
 
 
-# ------------------------------------------------------------------ #
-#  Step 2: Convert scattered data to regular grid
-# ------------------------------------------------------------------ #
-def create_velocity_grid(x_coords, y_coords, z_coords, vel_x, vel_y, vel_z):
-    """Convert scattered velocity data to regular 3D grid"""
-    print("Creating regular velocity grid...")
+def read_data_file_chunked(filename, chunk_size=5_000_000):
+    """
+    Read velocity data file in chunks using pandas to minimize memory usage
     
-    # Round coordinates to avoid floating point issues
-    x_rounded = np.round(x_coords, decimals=10)
-    y_rounded = np.round(y_coords, decimals=10)
-    z_rounded = np.round(z_coords, decimals=10)
+    Returns velocity grid directly without loading entire file into memory at once
+    """
+    print(f"Reading data from: {filename} (chunked, size={chunk_size})")
     
-    # Find unique coordinates
-    x_unique = np.unique(x_rounded)
-    y_unique = np.unique(y_rounded)
-    z_unique = np.unique(z_rounded)
+    # Load data in chunks
+    print("  Loading data in chunks (skipping header)...")
+    reader = pd.read_csv(
+        filename,
+        delimiter=' ',
+        skiprows=6,
+        header=None,
+        chunksize=chunk_size
+    )
     
+    # Read into per-chunk lists
+    xpos_list, ypos_list, zpos_list = [], [], []
+    velx_list, vely_list, velz_list = [], [], []
+    
+    for chunk in reader:
+        xp = np.round(chunk.iloc[:, 0].values, 10)
+        yp = np.round(chunk.iloc[:, 1].values, 10)
+        zp = np.round(chunk.iloc[:, 2].values, 10)
+        vx = chunk.iloc[:, 3].values
+        vy = chunk.iloc[:, 4].values
+        vz = chunk.iloc[:, 5].values
+        
+        xpos_list.append(xp)
+        ypos_list.append(yp)
+        zpos_list.append(zp)
+        velx_list.append(vx)
+        vely_list.append(vy)
+        velz_list.append(vz)
+    
+    # Preallocate the final flat arrays
+    total_pts = sum(arr.size for arr in xpos_list)
+    print(f"  Total data points: {total_pts}")
+    
+    xpos = np.empty(total_pts, dtype=xpos_list[0].dtype)
+    ypos = np.empty(total_pts, dtype=ypos_list[0].dtype)
+    zpos = np.empty(total_pts, dtype=zpos_list[0].dtype)
+    velx = np.empty(total_pts, dtype=velx_list[0].dtype)
+    vely = np.empty(total_pts, dtype=vely_list[0].dtype)
+    velz = np.empty(total_pts, dtype=velz_list[0].dtype)
+    
+    # Copy each chunk into its slice of the flat arrays
+    offset = 0
+    for xp, yp, zp, vx, vy, vz in zip(
+            xpos_list, ypos_list, zpos_list,
+            velx_list, vely_list, velz_list):
+        n = xp.size
+        xpos[offset:offset+n] = xp
+        ypos[offset:offset+n] = yp
+        zpos[offset:offset+n] = zp
+        velx[offset:offset+n] = vx
+        vely[offset:offset+n] = vy
+        velz[offset:offset+n] = vz
+        offset += n
+    
+    # Release the chunk lists to free memory
+    del xpos_list, ypos_list, zpos_list
+    del velx_list, vely_list, velz_list
+    
+    # Determine grid size
+    x_unique = np.unique(xpos)
+    y_unique = np.unique(ypos)
+    z_unique = np.unique(zpos)
     nx, ny, nz = len(x_unique), len(y_unique), len(z_unique)
+    
     print(f"  Grid dimensions: {nx} × {ny} × {nz}")
     
     # Compute grid spacing
@@ -84,41 +140,53 @@ def create_velocity_grid(x_coords, y_coords, z_coords, vel_x, vel_y, vel_z):
     dz = z_unique[1] - z_unique[0] if nz > 1 else 1.0
     print(f"  Grid spacing: dx={dx:.6f}, dy={dy:.6f}, dz={dz:.6f}")
     
-    # Create empty grids
-    grid_vx = np.zeros((nx, ny, nz))
-    grid_vy = np.zeros((nx, ny, nz))
-    grid_vz = np.zeros((nx, ny, nz))
+    # Validate data size
+    expected_num_points = nx * ny * nz
+    if total_pts != expected_num_points:
+        print(f"  Warning: Actual points ({total_pts}) != expected ({expected_num_points})")
+    
+    # Reconstruct velocity grids
+    print("  Reconstructing velocity grids...")
+    velx_grid = np.zeros((nx, ny, nz))
+    vely_grid = np.zeros((nx, ny, nz))
+    velz_grid = np.zeros((nx, ny, nz))
     
     # Create coordinate mappings
-    x_to_i = {val: i for i, val in enumerate(x_unique)}
-    y_to_j = {val: j for j, val in enumerate(y_unique)}
-    z_to_k = {val: k for k, val in enumerate(z_unique)}
+    x_idx = {val: i for i, val in enumerate(x_unique)}
+    y_idx = {val: i for i, val in enumerate(y_unique)}
+    z_idx = {val: i for i, val in enumerate(z_unique)}
     
-    # Fill grids
-    for n in range(len(x_coords)):
-        i = x_to_i[x_rounded[n]]
-        j = y_to_j[y_rounded[n]]
-        k = z_to_k[z_rounded[n]]
-        grid_vx[i, j, k] = vel_x[n]
-        grid_vy[i, j, k] = vel_y[n]
-        grid_vz[i, j, k] = vel_z[n]
+    for i in range(total_pts):
+        xi = x_idx[xpos[i]]
+        yi = y_idx[ypos[i]]
+        zi = z_idx[zpos[i]]
+        velx_grid[xi, yi, zi] = velx[i]
+        vely_grid[xi, yi, zi] = vely[i]
+        velz_grid[xi, yi, zi] = velz[i]
     
-    # Calculate total kinetic energy
-    total_ke = 0.5 * np.mean(grid_vx**2 + grid_vy**2 + grid_vz**2)
+    # Calculate statistics
+    total_ke = 0.5 * np.mean(velx_grid**2 + vely_grid**2 + velz_grid**2)
+    v_mag = np.sqrt(velx_grid**2 + vely_grid**2 + velz_grid**2)
+    
     print(f"  Total kinetic energy: {total_ke:.6f}")
-    
-    # Calculate velocity magnitude for the entire 3D field
-    v_mag = np.sqrt(grid_vx**2 + grid_vy**2 + grid_vz**2)
-    
-    # Print velocity component statistics
-    print(f"  Original velocity component ranges:")
-    print(f"    vx: [{grid_vx.min():.6f}, {grid_vx.max():.6f}]")
-    print(f"    vy: [{grid_vy.min():.6f}, {grid_vy.max():.6f}]")
-    print(f"    vz: [{grid_vz.min():.6f}, {grid_vz.max():.6f}]")
+    print(f"  Velocity component ranges:")
+    print(f"    vx: [{velx_grid.min():.6f}, {velx_grid.max():.6f}]")
+    print(f"    vy: [{vely_grid.min():.6f}, {vely_grid.max():.6f}]")
+    print(f"    vz: [{velz_grid.min():.6f}, {velz_grid.max():.6f}]")
     print(f"    |v|: [{v_mag.min():.6f}, {v_mag.max():.6f}]")
-    
-    return grid_vx, grid_vy, grid_vz, x_unique, y_unique, z_unique, dx, dy, dz
 
+    # --- PERIODICITY FIX ---
+    # Slice off the last point in every direction (index 8) 
+    # so we only pass the 8 unique periodic points to the FFT.
+    print("  Applying periodic slicing (dropping last point)...")
+    return (velx_grid[:-1, :-1, :-1], 
+            vely_grid[:-1, :-1, :-1], 
+            velz_grid[:-1, :-1, :-1], 
+            x_unique[:-1], 
+            y_unique[:-1], 
+            z_unique[:-1], 
+            dx, dy, dz)
+    # return velx_grid, vely_grid, velz_grid, x_unique, y_unique, z_unique, dx, dy, dz
 
 # ------------------------------------------------------------------ #
 #  Step 3: Create wavenumber grids for FFT operations
@@ -187,18 +255,18 @@ def compute_curl(vx, vy, vz, KX, KY, KZ):
 #  Step 5: Helmholtz-Hodge decomposition
 # ------------------------------------------------------------------ #
 def compute_compressive_part(vx, vy, vz, KX, KY, KZ, K_squared, nonzero_mask):
-    """Compute compressive (irrotational) part: v_c = -??"""
+    """Compute compressive (irrotational) part: v_c = -∇φ"""
     print("Computing compressive component...")
     
     # Step 1: Compute divergence
     divergence = compute_divergence(vx, vy, vz, KX, KY, KZ)
     
-    # Step 2: Solve for scalar potential ?: ?²? = -div
+    # Step 2: Solve for scalar potential φ: ∇²φ = -div
     div_k = fft.fftn(divergence)
     phi_k = np.zeros_like(div_k, dtype=complex)
     phi_k[nonzero_mask] = div_k[nonzero_mask] / K_squared[nonzero_mask]
     
-    # Step 3: Compute compressive velocity: v_c = -??
+    # Step 3: Compute compressive velocity: v_c = -∇φ
     vx_c_k = -1j * KX * phi_k
     vy_c_k = -1j * KY * phi_k
     vz_c_k = -1j * KZ * phi_k
@@ -216,13 +284,13 @@ def compute_compressive_part(vx, vy, vz, KX, KY, KZ, K_squared, nonzero_mask):
 
 
 def compute_rotational_part(vx, vy, vz, KX, KY, KZ, K_squared, nonzero_mask):
-    """Compute rotational (solenoidal) part: v_r = ?×A"""
+    """Compute rotational (solenoidal) part: v_r = ∇×A"""
     print("Computing rotational component...")
     
     # Step 1: Compute curl
     curl_x, curl_y, curl_z = compute_curl(vx, vy, vz, KX, KY, KZ)
     
-    # Step 2: Solve for vector potential A: ?²A = -curl
+    # Step 2: Solve for vector potential A: ∇²A = -curl
     curl_x_k = fft.fftn(curl_x)
     curl_y_k = fft.fftn(curl_y)
     curl_z_k = fft.fftn(curl_z)
@@ -235,7 +303,7 @@ def compute_rotational_part(vx, vy, vz, KX, KY, KZ, K_squared, nonzero_mask):
     Ay_k[nonzero_mask] = curl_y_k[nonzero_mask] / K_squared[nonzero_mask]
     Az_k[nonzero_mask] = curl_z_k[nonzero_mask] / K_squared[nonzero_mask]
     
-    # Step 3: Compute rotational velocity: v_r = ?×A
+    # Step 3: Compute rotational velocity: v_r = ∇×A
     vx_r_k = 1j * (KY * Az_k - KZ * Ay_k)
     vy_r_k = 1j * (KZ * Ax_k - KX * Az_k)
     vz_r_k = 1j * (KX * Ay_k - KY * Ax_k)
@@ -253,7 +321,7 @@ def compute_rotational_part(vx, vy, vz, KX, KY, KZ, K_squared, nonzero_mask):
     div_A_r = compute_divergence(Ax_r, Ay_r, Az_r, KX, KY, KZ)
     max_div_A_r = np.abs(div_A_r).max()
     
-    print(f"  Max |?·A_r|:  {max_div_A_r:.2e} (should be ~0)")
+    print(f"  Max |∇·A_r|:  {max_div_A_r:.2e} (should be ~0)")
     
     # Calculate kinetic energy
     ke_rot = 0.5 * np.mean(vx_r**2 + vy_r**2 + vz_r**2)
@@ -294,8 +362,8 @@ def verify_decomposition(vx_c, vy_c, vz_c, vx_r, vy_r, vz_r, KX, KY, KZ):
     div_r = compute_divergence(vx_r, vy_r, vz_r, KX, KY, KZ)
     max_div_r = np.abs(div_r).max()
     
-    print(f"  Max |?×v_compressive|: {max_curl_c:.2e} (should be ~0)")
-    print(f"  Max |?·v_rotational|:  {max_div_r:.2e} (should be ~0)")
+    print(f"  Max |∇×v_compressive|: {max_curl_c:.2e} (should be ~0)")
+    print(f"  Max |∇·v_rotational|:  {max_div_r:.2e} (should be ~0)")
 
 
 # ------------------------------------------------------------------ #
@@ -380,7 +448,7 @@ def compute_energy_dissipation_enstophy(vx, vy, vz, nx, ny, nz, dx, dy, dz):
     k_squared = KX_int**2 + KY_int**2 + KZ_int**2
     
     # Compute dissipation (convert integer k to physical)
-    # Physical wavenumber = 2? * integer_k / L, where L=1 for your domain
+    # Physical wavenumber = 2π * integer_k / L, where L=1 for your domain
     k_phys_squared = (2*np.pi)**2 * k_squared  
     total_energy_dissipation = np.sum(energy_density * k_phys_squared)
     print(f"  Total dissipative energy: {total_energy_dissipation:.6f}")
@@ -398,79 +466,150 @@ def compute_energy_dissipation_enstophy(vx, vy, vz, nx, ny, nz, dx, dy, dz):
 # ------------------------------------------------------------------ #
 #  Step 7: Visualization
 # ------------------------------------------------------------------ #
+
 def plot_velocity_slice(x_coords, y_coords, z_coords, vx, vy, vz, 
                        vx_c, vy_c, vz_c, vx_r, vy_r, vz_r,
                        slice_z, step_number, time_value):
-    """Plot 2D slice of velocity fields"""
-    print(f"Creating visualization for z-slice {slice_z}...")
+    """Plot 2D slices of velocity fields on two orthogonal planes (XY and XZ)"""
+    print(f"Creating visualization for XY and XZ planes...")
+    
+    # Determine slice indices (default to middle)
+    nx, ny, nz = len(x_coords), len(y_coords), len(z_coords)
+    slice_y = ny // 2
+    if slice_z is None:
+        slice_z = nz // 2
+    
+    print(f"  Slice indices: y={slice_y}/{ny}, z={slice_z}/{nz}")
     
     # Create coordinate grids
     X, Y, Z = np.meshgrid(x_coords, y_coords, z_coords, indexing='ij')
     
-    # Extract slice data
-    X_slice = X[:, :, slice_z]
-    Y_slice = Y[:, :, slice_z]
-    
-    # Velocity components on slice
-    vx_slice = vx[:, :, slice_z]
-    vy_slice = vy[:, :, slice_z]
-    vx_c_slice = vx_c[:, :, slice_z]
-    vy_c_slice = vy_c[:, :, slice_z]
-    vx_r_slice = vx_r[:, :, slice_z]
-    vy_r_slice = vy_r[:, :, slice_z]
-    
-    # Compute magnitudes
-    v_mag = np.sqrt(vx_slice**2 + vy_slice**2 + vz[:, :, slice_z]**2)
-    v_c_mag = np.sqrt(vx_c_slice**2 + vy_c_slice**2 + vz_c[:, :, slice_z]**2)
-    v_r_mag = np.sqrt(vx_r_slice**2 + vy_r_slice**2 + vz_r[:, :, slice_z]**2)
-    
-    # Create figure
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    # Create figure with 2 rows (XY and XZ planes) and 3 columns (total, comp, rot)
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
     
     # Arrow subsampling
-    skip = max(len(x_coords) // 16, 1)
+    skip = max(max(nx, ny, nz) // 16, 1)
     
-    # Total field
-    ax = axes[0]
-    im1 = ax.contourf(X_slice, Y_slice, v_mag, levels=20, cmap='viridis')
-    ax.quiver(X_slice[::skip, ::skip], Y_slice[::skip, ::skip],
-              vx_slice[::skip, ::skip], vy_slice[::skip, ::skip],
+    # ------------------------------------------------------------------ #
+    # ROW 1: XY plane (z-slice)
+    # ------------------------------------------------------------------ #
+    X_xy = X[:, :, slice_z]
+    Y_xy = Y[:, :, slice_z]
+    
+    vx_xy = vx[:, :, slice_z]
+    vy_xy = vy[:, :, slice_z]
+    vz_xy = vz[:, :, slice_z]
+    
+    vx_c_xy = vx_c[:, :, slice_z]
+    vy_c_xy = vy_c[:, :, slice_z]
+    vz_c_xy = vz_c[:, :, slice_z]
+    
+    vx_r_xy = vx_r[:, :, slice_z]
+    vy_r_xy = vy_r[:, :, slice_z]
+    vz_r_xy = vz_r[:, :, slice_z]
+    
+    v_mag_xy = np.sqrt(vx_xy**2 + vy_xy**2 + vz_xy**2)
+    v_c_mag_xy = np.sqrt(vx_c_xy**2 + vy_c_xy**2 + vz_c_xy**2)
+    v_r_mag_xy = np.sqrt(vx_r_xy**2 + vy_r_xy**2 + vz_r_xy**2)
+    
+    # Total velocity - XY plane
+    ax = axes[0, 0]
+    im = ax.contourf(X_xy, Y_xy, v_mag_xy, levels=20, cmap='viridis')
+    ax.quiver(X_xy[::skip, ::skip], Y_xy[::skip, ::skip],
+              vx_xy[::skip, ::skip], vy_xy[::skip, ::skip],
               scale=None, scale_units='xy', angles='xy', alpha=0.7, color='white')
-    ax.set_title(f'Total Velocity\n(z-slice {slice_z})')
+    ax.set_title(f'Total Velocity (XY plane, z={z_coords[slice_z]:.3f})')
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_aspect('equal')
-    plt.colorbar(im1, ax=ax, label='|v|')
+    plt.colorbar(im, ax=ax, label='|v|')
     
-    # Compressive field
-    ax = axes[1]
-    im2 = ax.contourf(X_slice, Y_slice, v_c_mag, levels=20, cmap='Blues')
-    ax.quiver(X_slice[::skip, ::skip], Y_slice[::skip, ::skip],
-              vx_c_slice[::skip, ::skip], vy_c_slice[::skip, ::skip],
+    # Compressive - XY plane
+    ax = axes[0, 1]
+    im = ax.contourf(X_xy, Y_xy, v_c_mag_xy, levels=20, cmap='Blues')
+    ax.quiver(X_xy[::skip, ::skip], Y_xy[::skip, ::skip],
+              vx_c_xy[::skip, ::skip], vy_c_xy[::skip, ::skip],
               scale=None, scale_units='xy', angles='xy', alpha=0.7, color='darkblue')
-    ax.set_title(f'Compressive\n(z-slice {slice_z})')
+    ax.set_title(f'Compressive (XY plane, z={z_coords[slice_z]:.3f})')
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_aspect('equal')
-    plt.colorbar(im2, ax=ax, label='|v_c|')
+    plt.colorbar(im, ax=ax, label='|v_c|')
     
-    # Rotational field
-    ax = axes[2]
-    im3 = ax.contourf(X_slice, Y_slice, v_r_mag, levels=20, cmap='Reds')
-    ax.quiver(X_slice[::skip, ::skip], Y_slice[::skip, ::skip],
-              vx_r_slice[::skip, ::skip], vy_r_slice[::skip, ::skip],
+    # Rotational - XY plane
+    ax = axes[0, 2]
+    im = ax.contourf(X_xy, Y_xy, v_r_mag_xy, levels=20, cmap='Reds')
+    ax.quiver(X_xy[::skip, ::skip], Y_xy[::skip, ::skip],
+              vx_r_xy[::skip, ::skip], vy_r_xy[::skip, ::skip],
               scale=None, scale_units='xy', angles='xy', alpha=0.7, color='darkred')
-    ax.set_title(f'Rotational\n(z-slice {slice_z})')
+    ax.set_title(f'Rotational (XY plane, z={z_coords[slice_z]:.3f})')
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_aspect('equal')
-    plt.colorbar(im3, ax=ax, label='|v_r|')
+    plt.colorbar(im, ax=ax, label='|v_r|')
     
-    plt.suptitle(f'Velocity Field Decomposition - Step {step_number}, Time {time_value:.3e}', 
-                 fontsize=14)
+    # ------------------------------------------------------------------ #
+    # ROW 2: XZ plane (y-slice)
+    # ------------------------------------------------------------------ #
+    X_xz = X[:, slice_y, :]
+    Z_xz = Z[:, slice_y, :]
+    
+    vx_xz = vx[:, slice_y, :]
+    vy_xz = vy[:, slice_y, :]
+    vz_xz = vz[:, slice_y, :]
+    
+    vx_c_xz = vx_c[:, slice_y, :]
+    vy_c_xz = vy_c[:, slice_y, :]
+    vz_c_xz = vz_c[:, slice_y, :]
+    
+    vx_r_xz = vx_r[:, slice_y, :]
+    vy_r_xz = vy_r[:, slice_y, :]
+    vz_r_xz = vz_r[:, slice_y, :]
+    
+    v_mag_xz = np.sqrt(vx_xz**2 + vy_xz**2 + vz_xz**2)
+    v_c_mag_xz = np.sqrt(vx_c_xz**2 + vy_c_xz**2 + vz_c_xz**2)
+    v_r_mag_xz = np.sqrt(vx_r_xz**2 + vy_r_xz**2 + vz_r_xz**2)
+    
+    # Total velocity - XZ plane
+    ax = axes[1, 0]
+    im = ax.contourf(X_xz, Z_xz, v_mag_xz, levels=20, cmap='viridis')
+    ax.quiver(X_xz[::skip, ::skip], Z_xz[::skip, ::skip],
+              vx_xz[::skip, ::skip], vz_xz[::skip, ::skip],
+              scale=None, scale_units='xy', angles='xy', alpha=0.7, color='white')
+    ax.set_title(f'Total Velocity (XZ plane, y={y_coords[slice_y]:.3f})')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Z')
+    ax.set_aspect('equal')
+    plt.colorbar(im, ax=ax, label='|v|')
+    
+    # Compressive - XZ plane
+    ax = axes[1, 1]
+    im = ax.contourf(X_xz, Z_xz, v_c_mag_xz, levels=20, cmap='Blues')
+    ax.quiver(X_xz[::skip, ::skip], Z_xz[::skip, ::skip],
+              vx_c_xz[::skip, ::skip], vz_c_xz[::skip, ::skip],
+              scale=None, scale_units='xy', angles='xy', alpha=0.7, color='darkblue')
+    ax.set_title(f'Compressive (XZ plane, y={y_coords[slice_y]:.3f})')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Z')
+    ax.set_aspect('equal')
+    plt.colorbar(im, ax=ax, label='|v_c|')
+    
+    # Rotational - XZ plane
+    ax = axes[1, 2]
+    im = ax.contourf(X_xz, Z_xz, v_r_mag_xz, levels=20, cmap='Reds')
+    ax.quiver(X_xz[::skip, ::skip], Z_xz[::skip, ::skip],
+              vx_r_xz[::skip, ::skip], vz_r_xz[::skip, ::skip],
+              scale=None, scale_units='xy', angles='xy', alpha=0.7, color='darkred')
+    ax.set_title(f'Rotational (XZ plane, y={y_coords[slice_y]:.3f})')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Z')
+    ax.set_aspect('equal')
+    plt.colorbar(im, ax=ax, label='|v_r|')
+    
+    plt.suptitle(f'Velocity Field Decomposition (XY & XZ Planes) - Step {step_number}, Time {time_value:.3e}', 
+                 fontsize=16, y=0.995)
     plt.tight_layout()
     plt.show()
-
 
 # ------------------------------------------------------------------ #
 #  Step 8: Save results
@@ -509,22 +648,21 @@ def save_spectra(k_centers, E_total, E_comp, E_rot, filename, step_number, time_
     
     print(f"Saved library-matched spectra to: {output_filename}")
     return output_filename
-
 # ------------------------------------------------------------------ #
 #  Main function - puts it all together
 # ------------------------------------------------------------------ #
-def analyze_file(filename, visualize=False, slice_z=None):
+def analyze_file(filename, visualize=False, slice_z=None, chunk_size=5_000_000):
     """Main analysis function - step by step with MINIMAL FIX"""
     print(f"\n{'='*60}")
     print(f"ANALYZING: {filename}")
     print(f"{'='*60}")
     
-    # Step 1: Read data
-    x_coords, y_coords, z_coords, vel_x, vel_y, vel_z, step_number, time_value = read_data_file(filename)
+    # Step 1: Read header
+    step_number, time_value = read_data_file_header(filename)
     
-    # Step 2: Create regular grid
-    grid_vx, grid_vy, grid_vz, x_unique, y_unique, z_unique, dx, dy, dz = create_velocity_grid(
-        x_coords, y_coords, z_coords, vel_x, vel_y, vel_z)
+    # Step 2: Read data and create regular grid (memory-efficient chunked reading)
+    grid_vx, grid_vy, grid_vz, x_unique, y_unique, z_unique, dx, dy, dz = read_data_file_chunked(
+        filename, chunk_size=chunk_size)
     
     nx, ny, nz = len(x_unique), len(y_unique), len(z_unique)
     total_ke = 0.5 * np.mean(grid_vx**2 + grid_vy**2 + grid_vz**2)
@@ -575,8 +713,7 @@ def analyze_file(filename, visualize=False, slice_z=None):
                            viz_slice_z, step_number, time_value)
     
     return k_centers, E_total, E_comp, E_rot, step_number, time_value
-
-
+    
 def plot_spectra(results_list):
     """Plot energy spectra from multiple files"""
     print("\nPlotting library-matched energy spectra...")
@@ -613,11 +750,39 @@ def plot_spectra(results_list):
 #  Command line interface
 # ------------------------------------------------------------------ #
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Simple Helmholtz-Hodge decomposition with minimal fix')
-    parser.add_argument('data_files', type=str, nargs='+', help='Velocity data files')
-    parser.add_argument('--visualize', '-v', action='store_true', help='Show velocity field visualization')
-    parser.add_argument('--slice_z', '-s', type=int, default=None, help='Z-slice for visualization')
+    parser = argparse.ArgumentParser(
+        description='Simple Helmholtz-Hodge decomposition with minimal fix',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Process single file with plots
+  python simple_script.py data_file.txt
+  
+  # Process multiple files with plots
+  python simple_script.py file1.txt file2.txt file3.txt
+  
+  # Process files without plots (for SLURM batch jobs)
+  python simple_script.py data_file.txt --no-plot
+  python simple_script.py *.txt --no-plot
+  
+  # With velocity field visualization
+  python simple_script.py data_file.txt --visualize
+        """
+    )
+    parser.add_argument('data_files', type=str, nargs='+', 
+                       help='One or more velocity data files to analyze')
+    parser.add_argument('--visualize', '-v', action='store_true', 
+                       help='Show velocity field visualization for each file')
+    parser.add_argument('--slice_z', '-s', type=int, default=None, 
+                       help='Z-slice for visualization (default: middle slice)')
+    parser.add_argument('--no-plot', action='store_true',
+                       help='Skip plotting spectra (useful for batch/SLURM jobs)')
     args = parser.parse_args()
+    
+    # Set matplotlib backend for headless operation if no plotting
+    if args.no_plot:
+        matplotlib.use('Agg')  # Use non-interactive backend
+        print("Running in batch mode (no plots will be displayed)")
     
     # Analyze each file
     results = []
@@ -625,6 +790,9 @@ if __name__ == "__main__":
         result = analyze_file(filename, visualize=args.visualize, slice_z=args.slice_z)
         results.append(result)
     
-    # Plot all spectra together
-    plot_spectra(results)
-
+    # Plot all spectra together (unless --no-plot is specified)
+    if not args.no_plot:
+        plot_spectra(results)
+    else:
+        print(f"\nProcessed {len(results)} files. Spectrum files saved to disk.")
+        print("Skipping plot display as requested (--no-plot flag).")
