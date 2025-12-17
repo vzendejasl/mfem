@@ -52,6 +52,11 @@ if (MFEM_USE_MPI)
     ${NAVIER_COMMON_FILES}
     LIBRARIES mfem)
 
+  add_mfem_miniapp(navier_shear_layer
+    MAIN navier_shear_layer.cpp
+    ${NAVIER_COMMON_FILES}
+    LIBRARIES mfem)
+
   add_mfem_miniapp(navier_tgv_hit
     MAIN navier_hit.cpp
     ${NAVIER_COMMON_FILES}
