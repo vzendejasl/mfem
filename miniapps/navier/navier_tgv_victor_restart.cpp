@@ -38,6 +38,7 @@ using namespace navier;
 
 real_t delta_const = 1e-8;
 bool static_cond = false;
+bool snapshot_dumped = false;
 struct s_NavierContext
 {
    int element_subdivisions = 0;
@@ -75,6 +76,7 @@ struct s_NavierContext
 
    bool u0_based_on_mach = false;
    double Mach0 = 0.1;
+   double time_snapshot_dump = 1.43239;
 } ctx;
 
 
@@ -1694,8 +1696,8 @@ int main(int argc, char *argv[])
    args.AddOption(&ctx.u0_based_on_mach, "-u0_from_mach", "--U0-from-mach", "-no-u0_from_mach",
                   "--no-u0_from_mach",
                   "Compute u0 based on a mach number?");
-   args.AddOption(&ctx.Mach0, "-mach0", "--Initial-Mach-Number", 
-      "Initial Mach number to compare with compressible codes");
+   args.AddOption(&ctx.time_snapshot_dump, "-time_snapshot", "--Time-Snapshot", 
+      "Dump single data snap shot at this time.");
    args.Parse();
    if (!args.Good())
    {
@@ -2502,6 +2504,18 @@ int main(int argc, char *argv[])
       else
       {
          should_dump_data = ((global_cycle + step) % ctx.data_dump_cycle == 0) || last_step;
+      }
+            
+      if (!snapshot_dumped && t >= ctx.time_snapshot_dump - ctx.dt * 0.01 )
+      {
+        if (Mpi::Root())
+        {
+           std::cout << "Dumping single data snap shot = " << t 
+                     << ", target time = " << ctx.time_snapshot_dump 
+                     << std::endl;
+        }
+         should_dump_data = true;
+         snapshot_dumped = true;
       }
 
       // Skip output on the very first step after restart to avoid duplicates
