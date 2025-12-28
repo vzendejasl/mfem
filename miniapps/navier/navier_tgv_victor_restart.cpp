@@ -2623,7 +2623,7 @@ int main(int argc, char *argv[])
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
             SamplePoints(u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
-            SamplePointsAtDoFs(u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
+            // SamplePointsAtDoFs(u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
             if (Mpi::Root())
             {
                std::cout << "\nOutput element center file saved at cycle " << global_cycle + step << "." << std::endl;
@@ -2671,7 +2671,7 @@ int main(int argc, char *argv[])
       if (Mpi::Root())
       {
          // If restarting, skip the first saved checkpoint
-         if (!(ctx.restart && step == 0 && restart_files_found))
+         // if (!(ctx.restart && step == 0 && restart_files_found))
          {
            printf("%.5E %.5E %.5E %.5E %.5E %.5E %.5E\n", t, ctx.dt, u_inf, p_inf, ke, enstrophy, cfl);
            fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e      %20.16e\n", t, static_cast<real_t>(step + global_cycle), ke, enstrophy, cfl);
@@ -2725,6 +2725,13 @@ int main(int argc, char *argv[])
    // delete h1_fec;
    // delete l2_fec;
 
+   if (Mpi::Root())
+   {
+      if (f) fclose(f);
+      if (f_turb) fclose(f_turb);
+      if (f_turb_continued) fclose(f_turb_continued);
+      if (f_turb_grid) fclose(f_turb_grid);
+   }
    return 0;
 }
 
