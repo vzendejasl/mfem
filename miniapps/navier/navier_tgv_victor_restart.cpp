@@ -2001,6 +2001,11 @@ int main(int argc, char *argv[])
       // Set up the flow solver
       flowsolver->Setup(ctx.dt);
 
+      SamplePoints(u_gf, pmesh, 0, t, "Velocity", &ctx);
+      if (Mpi::Root())
+      {
+         std::cout << "\nOutput element center file saved at cycle " << 0 << "." << std::endl;
+      }
 
       if (Mpi::Root())
       {
@@ -2120,6 +2125,9 @@ int main(int argc, char *argv[])
    real_t ke = kin_energy.ComputeKineticEnergy(*u_gf);
 
    flowsolver->GetTimeHistory(hist);
+   const int init_cycle = (ctx.restart && restart_files_found)
+                          ? (global_cycle - 1)
+                          : (global_cycle + step);
 
    ParaViewDataCollection *pvdc = NULL;
    if (ctx.paraview)
@@ -2137,7 +2145,7 @@ int main(int argc, char *argv[])
       pvdc->SetDataFormat(VTKFormat::BINARY32);
       pvdc->SetHighOrderOutput(true);
       pvdc->SetLevelsOfDetail(ctx.order);
-      pvdc->SetCycle(global_cycle + step);
+      pvdc->SetCycle(init_cycle);
       pvdc->SetTime(t);
       pvdc->RegisterField("velocity", u_gf);
       pvdc->RegisterField("pressure", p_gf);
@@ -2172,7 +2180,7 @@ int main(int argc, char *argv[])
       }
       int precision = 16;
       dc->SetPrecision(precision);
-      dc->SetCycle(global_cycle + step);
+      dc->SetCycle(init_cycle);
       dc->SetTime(t);
       dc->SetFormat(DataCollection::PARALLEL_FORMAT);
       dc->RegisterField("velocity", u_gf);
@@ -2386,7 +2394,7 @@ int main(int argc, char *argv[])
           fprintf(f, "        time                      cycle                 kinetic energy               enstrophy               cfl\n");
 
           // Write the initial data point
-           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e      %20.16e\n", t, static_cast<real_t>(global_cycle + step), ke, enstrophy, cfl);
+           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e      %20.16e\n", t, static_cast<real_t>(init_cycle), ke, enstrophy, cfl);
 
           // Write header only if not restarting
           fprintf(f_turb, "3D Taylor Green Vortex (turbulence metrics)\n");
@@ -2404,7 +2412,7 @@ int main(int argc, char *argv[])
 
           // Write the initial data point
            fprintf(f_turb, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
-                       t, static_cast<real_t>(global_cycle + step), max_dissipation, avg_diss, kolmLenScl, 
+                       t, static_cast<real_t>(init_cycle), max_dissipation, avg_diss, kolmLenScl, 
                        avg_lambda, avg_lambda_iso, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
                        Re_taylor, u_rms);
 
@@ -2421,7 +2429,7 @@ int main(int argc, char *argv[])
 
           // Write the initial data point
            fprintf(f_turb_continued, "%20.16e     %20.16e      %20.16e     %20.16e     %20.16e     %20.16e     %20.16e\n",
-                       t, static_cast<real_t>(global_cycle + step), avg_SijSij, S, F, D31, E31); 
+                       t, static_cast<real_t>(init_cycle), avg_SijSij, S, F, D31, E31); 
 
           // Write header only if not restarting
           fprintf(f_turb_grid, "3D Taylor Green Vortex (turbulence grid metrics)\n");
@@ -2438,7 +2446,7 @@ int main(int argc, char *argv[])
 
           // Write the initial data point
            fprintf(f_turb_grid, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e    %20.16e    %20.16e\n",
-                       t, static_cast<real_t>(global_cycle + step), kmax_eta, hmin_eta, PI_nu, PI_nu_min, avg_kmax_eta, avg_hmin_eta);
+                       t, static_cast<real_t>(init_cycle), kmax_eta, hmin_eta, PI_nu, PI_nu_min, avg_kmax_eta, avg_hmin_eta);
       } 
 
       fflush(f);
@@ -2446,6 +2454,15 @@ int main(int argc, char *argv[])
       fflush(f_turb_continued);
       fflush(f_turb_grid);
       fflush(stdout);
+   }
+
+   if (ctx.time_based_output)
+   {
+      while (ctx.snapshot_index < ctx.num_snapshots &&
+             t >= ctx.snapshot_times[ctx.snapshot_index] - ctx.dt * 0.01)
+      {
+         ctx.snapshot_index++;
+      }
    }
 
    real_t dt = ctx.dt;
@@ -2487,7 +2504,9 @@ int main(int argc, char *argv[])
       {
          integrator_step = global_cycle + step - 1;
       }
+
       flowsolver->Step(t, dt, integrator_step);
+      const int cycle_out = integrator_step + 1;
 
       cfl = flowsolver->ComputeCFL(*u_gf, ctx.dt);
 
@@ -2516,19 +2535,22 @@ int main(int argc, char *argv[])
       }
       else
       {
-         should_dump_data = ((global_cycle + step) % ctx.data_dump_cycle == 0) || last_step;
+         should_dump_data = ((cycle_out % ctx.data_dump_cycle) == 0) || last_step;
       }
             
-      if (!snapshot_dumped && t >= ctx.time_snapshot_dump - ctx.dt * 0.01 )
+      if (!ctx.time_based_output)
       {
-        if (Mpi::Root())
-        {
-           std::cout << "Dumping single data snap shot = " << t 
-                     << ", target time = " << ctx.time_snapshot_dump 
-                     << std::endl;
-        }
-         should_dump_data = true;
-         snapshot_dumped = true;
+         if (!snapshot_dumped && t >= ctx.time_snapshot_dump - ctx.dt * 0.01)
+         {
+            if (Mpi::Root())
+            {
+               std::cout << "Dumping single data snap shot = " << t
+                         << ", target time = " << ctx.time_snapshot_dump
+                         << std::endl;
+            }
+            should_dump_data = true;
+            snapshot_dumped = true;
+         }
       }
 
       // Skip output on the very first step after restart to avoid duplicates
@@ -2540,9 +2562,10 @@ int main(int argc, char *argv[])
             ComputeQCriterion(*u_gf, q_gf);
             ComputeLambda2Nodal(*u_gf, lambda2_gf);
             flowsolver->ComputeCurl3D(*u_gf, w_gf);
+            flowsolver->GetTimeHistory(hist);
 
             // For all output types, use this consistent output_cycle calculation:
-            int output_cycle = global_cycle + step;
+            int output_cycle = cycle_out;
 
             if (ctx.paraview)
             {
@@ -2559,12 +2582,11 @@ int main(int argc, char *argv[])
             {
                dc->SetCycle(output_cycle);
                dc->SetTime(t);
-               flowsolver->GetTimeHistory(hist);
                dc->Save();
 
                if (Mpi::Root())
                {
-                  std::cout << "\nVisit file saved at cycle " << global_cycle + step << "." << std::endl;
+                  std::cout << "\nVisit file saved at cycle " << output_cycle << "." << std::endl;
                }
 
                real_t u_inf_loc = dc->GetField("velocity")->Normlinf();
@@ -2628,7 +2650,7 @@ int main(int argc, char *argv[])
       }
       else
       {
-         should_dump_element_centers = ((global_cycle + step) % ctx.element_center_cycle == 0) || last_step;
+         should_dump_element_centers = ((cycle_out % ctx.element_center_cycle) == 0) || last_step;
       }
    
       if (should_dump_element_centers)
@@ -2636,11 +2658,11 @@ int main(int argc, char *argv[])
          // If restarting, skip the first saved checkpoint
          if (!(ctx.restart && step == 0 && restart_files_found))
          {
-            SamplePoints(u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
-            // SamplePointsAtDoFs(u_gf, pmesh, global_cycle + step, t, "Velocity", &ctx);
+            SamplePoints(u_gf, pmesh, cycle_out, t, "Velocity", &ctx);
+            // SamplePointsAtDoFs(u_gf, pmesh, cycle_out, t, "Velocity", &ctx);
             if (Mpi::Root())
             {
-               std::cout << "\nOutput element center file saved at cycle " << global_cycle + step << "." << std::endl;
+               std::cout << "\nOutput element center file saved at cycle " << cycle_out << "." << std::endl;
             }
          }
       }
@@ -2688,15 +2710,15 @@ int main(int argc, char *argv[])
          // if (!(ctx.restart && step == 0 && restart_files_found))
          {
            printf("%.5E %.5E %.5E %.5E %.5E %.5E %.5E\n", t, ctx.dt, u_inf, p_inf, ke, enstrophy, cfl);
-           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e      %20.16e\n", t, static_cast<real_t>(step + global_cycle), ke, enstrophy, cfl);
+           fprintf(f, "%20.16e     %20.16e     %20.16e     %20.16e      %20.16e\n", t, static_cast<real_t>(cycle_out), ke, enstrophy, cfl);
            fprintf(f_turb, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e     %20.16e      %20.16e      %20.16e      %20.16e\n",
-                       t, static_cast<real_t>(global_cycle + step), max_dissipation, avg_diss, kolmLenScl, 
+                       t, static_cast<real_t>(cycle_out), max_dissipation, avg_diss, kolmLenScl, 
                        avg_lambda, avg_lambda_iso, avg_kolmLenScl, kolmTimeScl, avg_kolmTimeScl,
                        Re_taylor, u_rms);
            fprintf(f_turb_continued, "%20.16e     %20.16e      %20.16e     %20.16e     %20.16e     %20.16e     %20.16e\n",
-                       t, static_cast<real_t>(global_cycle + step), avg_SijSij, S, F, D31, E31); 
+                       t, static_cast<real_t>(cycle_out), avg_SijSij, S, F, D31, E31); 
            fprintf(f_turb_grid, "%20.16e     %20.16e     %20.16e     %20.16e     %20.16e    %20.16e    %20.16e    %20.16e\n",
-                       t, static_cast<real_t>(global_cycle + step), kmax_eta, hmin_eta, PI_nu, PI_nu_min, avg_kmax_eta, avg_hmin_eta);
+                       t, static_cast<real_t>(cycle_out), kmax_eta, hmin_eta, PI_nu, PI_nu_min, avg_kmax_eta, avg_hmin_eta);
            fflush(f);
            fflush(f_turb);
            fflush(f_turb_continued);
