@@ -1156,11 +1156,41 @@ void NavierSolver::AddAccelTerm(VecFuncT *f, Array<int> &attr)
    AddAccelTerm(new VectorFunctionCoefficient(pmesh->Dimension(), f), attr);
 }
 
+void NavierSolver::GetTimeHistory(TimeHistory &out) const
+{
+   out.u_nm1.SetSpace(vfes);
+   out.u_nm2.SetSpace(vfes);
+   out.u_nm1.SetFromTrueDofs(unm1);
+   out.u_nm2.SetFromTrueDofs(unm2);
+}
+
+void NavierSolver::SetTimeHistory(const TimeHistory &in, real_t dt)
+{
+   MFEM_VERIFY(in.u_nm1.ParFESpace() == vfes,
+               "u_nm1 must be on the velocity space.");
+   MFEM_VERIFY(in.u_nm2.ParFESpace() == vfes,
+               "u_nm2 must be on the velocity space.");
+
+   in.u_nm1.GetTrueDofs(unm1);
+   in.u_nm2.GetTrueDofs(unm2);
+
+   // fixed-dt history
+   dthist[0] = dt;
+   dthist[1] = dt;
+   dthist[2] = dt;
+}
+
+
 void NavierSolver::SetTimeIntegrationCoefficients(int step)
 {
    // Maximum BDF order to use at current time step
    // step + 1 <= order <= max_bdf_order
    int bdf_order = std::min(step + 1, max_bdf_order);
+   if (verbose && pmesh->GetMyRank() == 0)
+   {
+      mfem::out << "Time integrator order: BDF" << bdf_order
+                << " (step " << step << ")" << std::endl;
+   }
 
    // Ratio of time step history at dt(t_{n}) - dt(t_{n-1})
    real_t rho1 = 0.0;

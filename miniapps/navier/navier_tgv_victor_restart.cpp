@@ -36,6 +36,7 @@
 using namespace mfem;
 using namespace navier;
 
+
 real_t delta_const = 1e-8;
 bool static_cond = false;
 bool snapshot_dumped = false;
@@ -2000,11 +2001,14 @@ int main(int argc, char *argv[])
       // Set up the flow solver
       flowsolver->Setup(ctx.dt);
 
+
       if (Mpi::Root())
       {
          mfem::out << "Done setting up the flowsolver. " << std::endl;
       }
    }
+
+   NavierSolver::TimeHistory hist;
 
    int nel = pmesh->GetGlobalNE();
    if (Mpi::Root())
@@ -2115,6 +2119,8 @@ int main(int argc, char *argv[])
    // jreal_t ke = kin_energy.ComputeKineticEnergy(*u_gf, ke_gf);
    real_t ke = kin_energy.ComputeKineticEnergy(*u_gf);
 
+   flowsolver->GetTimeHistory(hist);
+
    ParaViewDataCollection *pvdc = NULL;
    if (ctx.paraview)
    {
@@ -2170,6 +2176,8 @@ int main(int argc, char *argv[])
       dc->SetTime(t);
       dc->SetFormat(DataCollection::PARALLEL_FORMAT);
       dc->RegisterField("velocity", u_gf);
+      dc->RegisterField("velocity_nm1", &hist.u_nm1);
+      dc->RegisterField("velocity_nm2", &hist.u_nm2);
       dc->RegisterField("pressure", p_gf);
       dc->RegisterField("vorticity", &w_gf);
       dc->RegisterField("qcriterion", &q_gf);
@@ -2473,8 +2481,13 @@ int main(int argc, char *argv[])
         // Update the filter amplification
         flowsolver->SetFilterAlpha(effective_alpha);
       }
-   
-      flowsolver->Step(t, dt, step);
+
+      int integrator_step = step;
+      if (ctx.restart && restart_files_found)
+      {
+         integrator_step = global_cycle + step - 1;
+      }
+      flowsolver->Step(t, dt, integrator_step);
 
       cfl = flowsolver->ComputeCFL(*u_gf, ctx.dt);
 
@@ -2546,6 +2559,7 @@ int main(int argc, char *argv[])
             {
                dc->SetCycle(output_cycle);
                dc->SetTime(t);
+               flowsolver->GetTimeHistory(hist);
                dc->Save();
 
                if (Mpi::Root())

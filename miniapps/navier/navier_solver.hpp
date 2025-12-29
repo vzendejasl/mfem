@@ -283,6 +283,15 @@ public:
     */
    void SetFilterAlpha(real_t a) { filter_alpha = a; }
 
+   struct TimeHistory
+   {
+      ParGridFunction u_nm1;
+      ParGridFunction u_nm2;
+   };
+
+   void GetTimeHistory(TimeHistory &out) const;
+   void SetTimeHistory(const TimeHistory &in, real_t dt);
+
 protected:
    /// Print information about the Navier version.
    void PrintInfo();

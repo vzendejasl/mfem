@@ -84,6 +84,10 @@ bool LoadCheckpoint(ParMesh*& pmesh,
 
     GridFunction* loaded_u_gf = nullptr;
     GridFunction* loaded_p_gf = nullptr;
+
+    GridFunction* loaded_u_nm1_gf = nullptr;
+    GridFunction* loaded_u_nm2_gf = nullptr;
+
     int precision = 16;
 
     if (GetVisit(ctx))
@@ -110,6 +114,10 @@ bool LoadCheckpoint(ParMesh*& pmesh,
 
         loaded_u_gf = dc_load->GetField("velocity");
         loaded_p_gf = dc_load->GetField("pressure");
+
+        loaded_u_nm1_gf = dc_load->GetField("velocity_nm1");
+        loaded_u_nm2_gf = dc_load->GetField("velocity_nm2");
+
         step = dc_load->GetCycle();
         t = dc_load->GetTime();
     }
@@ -177,6 +185,31 @@ bool LoadCheckpoint(ParMesh*& pmesh,
      }
 
     flowsolver->Setup(GetDt(ctx));
+
+    if (loaded_u_nm1_gf && loaded_u_nm2_gf)
+    {
+       ParGridFunction temp_u_nm1(u_gf->ParFESpace(), loaded_u_nm1_gf);
+       ParGridFunction temp_u_nm2(u_gf->ParFESpace(), loaded_u_nm2_gf);
+
+       NavierSolver::TimeHistory hist;
+       hist.u_nm1.SetSpace(u_gf->ParFESpace());
+       hist.u_nm2.SetSpace(u_gf->ParFESpace());
+       hist.u_nm1 = temp_u_nm1;
+       hist.u_nm2 = temp_u_nm2;
+
+       flowsolver->SetTimeHistory(hist, GetDt(ctx));
+    }
+    else
+    {
+       NavierSolver::TimeHistory hist;
+       hist.u_nm1.SetSpace(u_gf->ParFESpace());
+       hist.u_nm2.SetSpace(u_gf->ParFESpace());
+       hist.u_nm1 = *u_gf;
+       hist.u_nm2 = *u_gf;
+
+       flowsolver->SetTimeHistory(hist, GetDt(ctx));
+    }
+
 
     mfem::real_t u_inf_loc = u_gf->Normlinf();
     mfem::real_t p_inf_loc = p_gf->Normlinf();
