@@ -84,6 +84,10 @@ bool LoadCheckpoint(ParMesh*& pmesh,
 
     GridFunction* loaded_u_gf = nullptr;
     GridFunction* loaded_p_gf = nullptr;
+
+    GridFunction* loaded_u_nm1_gf = nullptr;
+    GridFunction* loaded_u_nm2_gf = nullptr;
+
     int precision = 16;
 
     if (GetVisit(ctx))
@@ -110,6 +114,10 @@ bool LoadCheckpoint(ParMesh*& pmesh,
 
         loaded_u_gf = dc_load->GetField("velocity");
         loaded_p_gf = dc_load->GetField("pressure");
+
+        loaded_u_nm1_gf = dc_load->GetField("velocity_nm1");
+        loaded_u_nm2_gf = dc_load->GetField("velocity_nm2");
+
         step = dc_load->GetCycle();
         t = dc_load->GetTime();
     }
@@ -177,6 +185,31 @@ bool LoadCheckpoint(ParMesh*& pmesh,
      }
 
     flowsolver->Setup(GetDt(ctx));
+
+    if (loaded_u_nm1_gf && loaded_u_nm2_gf)
+    {
+       ParGridFunction temp_u_nm1(u_gf->ParFESpace(), loaded_u_nm1_gf);
+       ParGridFunction temp_u_nm2(u_gf->ParFESpace(), loaded_u_nm2_gf);
+
+       NavierSolver::TimeHistory hist;
+       hist.u_nm1.SetSpace(u_gf->ParFESpace());
+       hist.u_nm2.SetSpace(u_gf->ParFESpace());
+       hist.u_nm1 = temp_u_nm1;
+       hist.u_nm2 = temp_u_nm2;
+
+       flowsolver->SetTimeHistory(hist, GetDt(ctx));
+    }
+    else
+    {
+       NavierSolver::TimeHistory hist;
+       hist.u_nm1.SetSpace(u_gf->ParFESpace());
+       hist.u_nm2.SetSpace(u_gf->ParFESpace());
+       hist.u_nm1 = *u_gf;
+       hist.u_nm2 = *u_gf;
+
+       flowsolver->SetTimeHistory(hist, GetDt(ctx));
+    }
+
 
     mfem::real_t u_inf_loc = u_gf->Normlinf();
     mfem::real_t p_inf_loc = p_gf->Normlinf();
@@ -460,9 +493,6 @@ void SamplePoints(mfem::ParGridFunction* sol,
 
 
 
-// -------------------------------
-// Minimal collective text writer
-// -------------------------------
 static int WriteTextCollective(MPI_Comm comm,
                                const std::string &path,
                                const std::string &header_rank0,
@@ -476,38 +506,57 @@ static int WriteTextCollective(MPI_Comm comm,
                             MPI_INFO_NULL, &fh);
     if (err != MPI_SUCCESS) return err;
 
-    // (1) rank 0 writes header at offset 0
+    // (1) rank 0 writes header
     MPI_Offset header_bytes = 0;
     if (rank == 0) {
         const MPI_Offset hsz = (MPI_Offset)header_rank0.size();
         if (hsz > 0) {
             MPI_Status st0;
-            err = MPI_File_write_at(fh, 0,
-                                    header_rank0.data(), (int)hsz,
-                                    MPI_BYTE, &st0);
+            err = MPI_File_write_at(fh, 0, header_rank0.data(), 
+                                   (int)hsz, MPI_BYTE, &st0);
             if (err != MPI_SUCCESS) { MPI_File_close(&fh); return err; }
         }
         header_bytes = hsz;
     }
     MPI_Bcast(&header_bytes, 1, MPI_OFFSET, 0, comm);
 
-    // (2) exclusive scan of local byte sizes
+    // (2) exclusive scan
     const MPI_Offset my_bytes  = (MPI_Offset)local_text.size();
     MPI_Offset my_prefix = 0;
     MPI_Exscan(&my_bytes, &my_prefix, 1, MPI_OFFSET, MPI_SUM, comm);
     if (rank == 0) my_prefix = 0;
 
-    // (3) byte-wise view + collective write
+    // (3) Independent writes in chunks (no collective synchronization needed)
     MPI_File_set_view(fh, 0, MPI_BYTE, MPI_BYTE, "native", MPI_INFO_NULL);
 
     const MPI_Offset my_file_offset = header_bytes + my_prefix;
-    MPI_Status st_all;
-    const void *buf = local_text.size() ? (const void*)local_text.data() : (const void*)"";
-    err = MPI_File_write_at_all(fh, my_file_offset,
-                                buf, (int)my_bytes, MPI_BYTE, &st_all);
+    const MPI_Offset chunk_size = 1073741824;  // 1 GB
+    MPI_Offset bytes_written = 0;
 
+    while (bytes_written < my_bytes) {
+        const MPI_Offset bytes_remaining = my_bytes - bytes_written;
+        const int write_count = (bytes_remaining > chunk_size) 
+                                ? (int)chunk_size 
+                                : (int)bytes_remaining;
+        
+        const MPI_Offset offset = my_file_offset + bytes_written;
+        const void* write_buf = local_text.data() + bytes_written;
+        
+        MPI_Status st_chunk;
+        // Independent write - each rank can call different number of times
+        err = MPI_File_write_at(fh, offset, write_buf, 
+                               write_count, MPI_BYTE, &st_chunk);
+        if (err != MPI_SUCCESS) {
+            MPI_File_close(&fh);
+            return err;
+        }
+        
+        bytes_written += write_count;
+    }
+
+    // Collective close is fine
     MPI_File_close(&fh);
-    return err; // MPI_SUCCESS on success
+    return MPI_SUCCESS;
 }
 
 // -------------------------------
