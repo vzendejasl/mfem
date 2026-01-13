@@ -2538,19 +2538,16 @@ int main(int argc, char *argv[])
          should_dump_data = ((cycle_out % ctx.data_dump_cycle) == 0) || last_step;
       }
             
-      if (!ctx.time_based_output)
+      if (!snapshot_dumped && t >= ctx.time_snapshot_dump - ctx.dt * 0.01)
       {
-         if (!snapshot_dumped && t >= ctx.time_snapshot_dump - ctx.dt * 0.01)
+         if (Mpi::Root())
          {
-            if (Mpi::Root())
-            {
-               std::cout << "Dumping single data snap shot = " << t
-                         << ", target time = " << ctx.time_snapshot_dump
-                         << std::endl;
-            }
-            should_dump_data = true;
-            snapshot_dumped = true;
+            std::cout << "Dumping single data snap shot = " << t
+                      << ", target time = " << ctx.time_snapshot_dump
+                      << std::endl;
          }
+         should_dump_data = true;
+         snapshot_dumped = true;
       }
 
       // Skip output on the very first step after restart to avoid duplicates

@@ -830,8 +830,8 @@ void VectorConvectionNLFIntegrator::AddMultPA(const Vector &x, Vector &y) const
          // For p7 polynomial
          // constexpr int T_MAX_D1D = 14;
          // constexpr int T_MAX_Q1D = 14;
-         constexpr int T_MAX_D1D = 20;
-         constexpr int T_MAX_Q1D = 20;
+         constexpr int T_MAX_D1D = 28;
+         constexpr int T_MAX_Q1D = 28;
          MFEM_VERIFY(D1D <= T_MAX_D1D && Q1D <= T_MAX_Q1D, "Not yet implemented!");
          // mfem::out << "T_Max_D1D: " << T_MAX_D1D << std::endl;
          // mfem::out << "T_Max_Q1D: " << T_MAX_Q1D << std::endl;

@@ -3,7 +3,7 @@
 #include <algorithm> // for std::remove_if
 #include <string>
 #include <cstdio> // for popen, pclose
-#include "hdf5.h"
+// #include "hdf5.h"
 // #include <adios2.h>
 
 using namespace mfem;
