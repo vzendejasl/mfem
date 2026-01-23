@@ -19,18 +19,65 @@ import re
 import os
 import argparse
 import pandas as pd
+import h5py
 
 
 # ------------------------------------------------------------------ #
 #  Step 1: Read and parse data file
 # ------------------------------------------------------------------ #
 
+def detect_header_lines(filename):
+    """Automatically detect the number of header lines in a text file"""
+    print(f"  Auto-detecting header length for {filename}...")
+    header_count = 0
+    try:
+        with open(filename, 'r') as f:
+            for line in f:
+                line_stripped = line.strip()
+                # Skip empty lines but count them as header/preamble
+                if not line_stripped:
+                    header_count += 1
+                    continue
+                
+                try:
+                    parts = line_stripped.split()
+                    # Try to parse all parts as floats. 
+                    # If it works, it's the first data line.
+                    [float(x) for x in parts]
+                    break 
+                except ValueError:
+                    # Not a data line, so it's part of the header
+                    header_count += 1
+    except Exception as e:
+        print(f"  Error detecting header: {e}")
+        return 0
+    
+    print(f"  Detected header lines: {header_count}")
+    return header_count
+
+
 def read_data_file_header(filename, header_lines):
     """Read only header information from file"""
     print(f"Reading header from: {filename}")
 
-    with open(filename, 'r') as f:
-        hdr = [next(f) for _ in range(header_lines)]
+    hdr = []
+    if filename.endswith('.h5'):
+        try:
+            with h5py.File(filename, 'r') as f:
+                if 'header' in f:
+                    header_ds = f['header'][:]
+                    for line in header_ds:
+                        if isinstance(line, bytes):
+                            hdr.append(line.decode('utf-8'))
+                        else:
+                            hdr.append(str(line))
+                else:
+                    print("  Warning: No 'header' dataset found in HDF5 file.")
+        except Exception as e:
+            print(f"  Error reading HDF5 header: {e}")
+    else:
+        with open(filename, 'r') as f:
+            hdr = [next(f) for _ in range(header_lines)]
 
     # Extract step number and time
     step_number = "unknown"
@@ -58,62 +105,94 @@ def read_data_file_chunked(filename, chunk_size=5_000_000, skiprows=5):
     """
     print(f"Reading data from: {filename} (chunked, size={chunk_size})")
 
-    print(f"  Loading data in chunks (skipping {skiprows} header lines)...")
-    reader = pd.read_csv(
-        filename,
-        delimiter=' ',
-        skiprows=skiprows,
-        header=None,
-        chunksize=chunk_size
-    )
+    if filename.endswith('.h5'):
+        print(f"  Loading data from HDF5: {filename} (chunked read)")
+        with h5py.File(filename, 'r') as f:
+            dset = f['data']
+            total_pts = dset.shape[0]
+            print(f"  Total data points: {total_pts}")
 
-    # Read into per-chunk lists
-    xpos_list, ypos_list, zpos_list = [], [], []
-    velx_list, vely_list, velz_list = [], [], []
+            # Preallocate final arrays
+            xpos = np.empty(total_pts, dtype=np.float64)
+            ypos = np.empty(total_pts, dtype=np.float64)
+            zpos = np.empty(total_pts, dtype=np.float64)
+            velx = np.empty(total_pts, dtype=np.float64)
+            vely = np.empty(total_pts, dtype=np.float64)
+            velz = np.empty(total_pts, dtype=np.float64)
 
-    for chunk in reader:
-        xp = np.round(chunk.iloc[:, 0].values, 10)
-        yp = np.round(chunk.iloc[:, 1].values, 10)
-        zp = np.round(chunk.iloc[:, 2].values, 10)
-        vx = chunk.iloc[:, 3].values
-        vy = chunk.iloc[:, 4].values
-        vz = chunk.iloc[:, 5].values
+            # Read in chunks
+            for i in range(0, total_pts, chunk_size):
+                end_idx = min(i + chunk_size, total_pts)
+                
+                # Read raw chunk from HDF5
+                chunk_data = dset[i:end_idx]
+                
+                # Distribute to columns
+                # Round coordinates matching text loader logic
+                xpos[i:end_idx] = np.round(chunk_data[:, 0], 10)
+                ypos[i:end_idx] = np.round(chunk_data[:, 1], 10)
+                zpos[i:end_idx] = np.round(chunk_data[:, 2], 10)
+                
+                velx[i:end_idx] = chunk_data[:, 3]
+                vely[i:end_idx] = chunk_data[:, 4]
+                velz[i:end_idx] = chunk_data[:, 5]
+    else:
+        print(f"  Loading data in chunks (skipping {skiprows} header lines)...")
+        reader = pd.read_csv(
+            filename,
+            delimiter=' ',
+            skiprows=skiprows,
+            header=None,
+            chunksize=chunk_size
+        )
 
-        xpos_list.append(xp)
-        ypos_list.append(yp)
-        zpos_list.append(zp)
-        velx_list.append(vx)
-        vely_list.append(vy)
-        velz_list.append(vz)
+        # Read into per-chunk lists
+        xpos_list, ypos_list, zpos_list = [], [], []
+        velx_list, vely_list, velz_list = [], [], []
 
-    # Preallocate the final flat arrays
-    total_pts = sum(arr.size for arr in xpos_list)
-    print(f"  Total data points: {total_pts}")
+        for chunk in reader:
+            xp = np.round(chunk.iloc[:, 0].values, 10)
+            yp = np.round(chunk.iloc[:, 1].values, 10)
+            zp = np.round(chunk.iloc[:, 2].values, 10)
+            vx = chunk.iloc[:, 3].values
+            vy = chunk.iloc[:, 4].values
+            vz = chunk.iloc[:, 5].values
 
-    xpos = np.empty(total_pts, dtype=xpos_list[0].dtype)
-    ypos = np.empty(total_pts, dtype=ypos_list[0].dtype)
-    zpos = np.empty(total_pts, dtype=zpos_list[0].dtype)
-    velx = np.empty(total_pts, dtype=velx_list[0].dtype)
-    vely = np.empty(total_pts, dtype=vely_list[0].dtype)
-    velz = np.empty(total_pts, dtype=velz_list[0].dtype)
+            xpos_list.append(xp)
+            ypos_list.append(yp)
+            zpos_list.append(zp)
+            velx_list.append(vx)
+            vely_list.append(vy)
+            velz_list.append(vz)
 
-    # Copy each chunk into its slice of the flat arrays
-    offset = 0
-    for xp, yp, zp, vx, vy, vz in zip(
-            xpos_list, ypos_list, zpos_list,
-            velx_list, vely_list, velz_list):
-        n = xp.size
-        xpos[offset:offset+n] = xp
-        ypos[offset:offset+n] = yp
-        zpos[offset:offset+n] = zp
-        velx[offset:offset+n] = vx
-        vely[offset:offset+n] = vy
-        velz[offset:offset+n] = vz
-        offset += n
+        # Preallocate the final flat arrays
+        total_pts = sum(arr.size for arr in xpos_list)
+        print(f"  Total data points: {total_pts}")
 
-    # Release the chunk lists to free memory
-    del xpos_list, ypos_list, zpos_list
-    del velx_list, vely_list, velz_list
+        xpos = np.empty(total_pts, dtype=xpos_list[0].dtype)
+        ypos = np.empty(total_pts, dtype=ypos_list[0].dtype)
+        zpos = np.empty(total_pts, dtype=zpos_list[0].dtype)
+        velx = np.empty(total_pts, dtype=velx_list[0].dtype)
+        vely = np.empty(total_pts, dtype=vely_list[0].dtype)
+        velz = np.empty(total_pts, dtype=velz_list[0].dtype)
+
+        # Copy each chunk into its slice of the flat arrays
+        offset = 0
+        for xp, yp, zp, vx, vy, vz in zip(
+                xpos_list, ypos_list, zpos_list,
+                velx_list, vely_list, velz_list):
+            n = xp.size
+            xpos[offset:offset+n] = xp
+            ypos[offset:offset+n] = yp
+            zpos[offset:offset+n] = zp
+            velx[offset:offset+n] = vx
+            vely[offset:offset+n] = vy
+            velz[offset:offset+n] = vz
+            offset += n
+
+        # Release the chunk lists to free memory
+        del xpos_list, ypos_list, zpos_list
+        del velx_list, vely_list, velz_list
 
     # Determine grid size
     x_unique = np.unique(xpos)
@@ -566,11 +645,17 @@ def save_spectra(k_centers, E_total, E_comp, E_rot, filename, step_number, time_
 # ------------------------------------------------------------------ #
 #  Main function - puts it all together
 # ------------------------------------------------------------------ #
-def analyze_file(filename, header_lines, visualize=False, slice_z=None, chunk_size=5_000_000):
+def analyze_file(filename, header_lines=None, visualize=False, slice_z=None, chunk_size=5_000_000):
     """Main analysis function - step by step with MINIMAL FIX"""
     print(f"\n{'='*60}")
     print(f"ANALYZING: {filename}")
     print(f"{'='*60}")
+
+    # Determine header lines if not provided
+    if filename.endswith('.h5'):
+        header_lines = 0
+    elif header_lines is None:
+        header_lines = detect_header_lines(filename)
 
     # Step 1: Read header
     step_number, time_value = read_data_file_header(filename, header_lines)
@@ -671,6 +756,7 @@ if __name__ == "__main__":
         epilog="""
 Examples:
   python simple_script.py data_file.txt --header-lines 5
+  python simple_script.py data_file.h5 --header-lines 0 --no-plot
   python simple_script.py data_file.txt --header-lines 6 --no-plot
   python simple_script.py file1.txt file2.txt --header-lines 5
   python simple_script.py *.txt --header-lines 6 --no-plot
@@ -681,9 +767,9 @@ Examples:
     parser.add_argument('data_files', type=str, nargs='+',
                         help='One or more velocity data files to analyze')
 
-    # REQUIRED:
-    parser.add_argument('--header-lines', type=int, required=True,
-                        help='Number of header lines to skip/read (e.g., 5 for Marbl, 6 for MFEM)')
+    # OPTIONAL (Auto-detected if not provided):
+    parser.add_argument('--header-lines', type=int, default=None,
+                        help='Number of header lines to skip/read. If omitted, attempts auto-detection.')
 
     parser.add_argument('--visualize', '-v', action='store_true',
                         help='Show velocity field visualization for each file')
