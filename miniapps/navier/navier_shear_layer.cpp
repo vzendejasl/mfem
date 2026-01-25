@@ -8,14 +8,18 @@
 // - Top/bottom: Dirichlet moving walls (u=3 at top, u=1 at bottom)
 // - Outflow: natural/Neumann (do not mark as essential)
 // - VisIt output (VisItDataCollection)
+// mpirun -n 4 ./navier_shear_layer -no-vis -visit -dc 10 -dt 0.001 -Re 50 -o 1 -eps 0.005 -pa
+
 
 #include "mfem.hpp"
 #include "navier_solver.hpp"
 #include "navier_utils.hpp"
 
 #include <cmath>
+#include <cerrno>
 #include <iostream>
 #include <memory>
+#include <sys/stat.h>
 
 using namespace mfem;
 using namespace navier;
@@ -331,7 +335,20 @@ u = flowsolver.GetCurrentVelocity();
    std::unique_ptr<VisItDataCollection> visit_dc;
    if (ctx.visit)
    {
-      visit_dc = std::make_unique<VisItDataCollection>("navier_shear_layer", &pmesh);
+      const char *visit_dir = "navier_shear_layer_visit";
+      if (myid == 0)
+      {
+         const int rc = mkdir(visit_dir, 0755);
+         if (rc != 0 && errno != EEXIST)
+         {
+            MFEM_ABORT("Failed to create VisIt output directory.");
+         }
+      }
+      MPI_Barrier(MPI_COMM_WORLD);
+
+      const std::string visit_prefix =
+         std::string(visit_dir) + "/navier_shear_layer";
+      visit_dc = std::make_unique<VisItDataCollection>(visit_prefix.c_str(), &pmesh);
       visit_dc->SetPrecision(8);
       // Some MFEM builds support binary toggle; if not, this is harmless.
       // visit_dc->SetBinary(ctx.binary);
