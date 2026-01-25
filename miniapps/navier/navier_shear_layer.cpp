@@ -2,13 +2,24 @@
 // Produced at the Lawrence Livermore National Laboratory. All Rights reserved.
 // See files LICENSE and NOTICE for details. LLNL-CODE-806117.
 //
-// Single-domain Navier shear-layer demo:
+// Single-domain Navier shear-layer demo (2D/3D via -dim, default 2):
 // - Programmatic rectangular mesh (channel)
 // - Inflow: hyperbolic tangent shear profile
 // - Top/bottom: Dirichlet moving walls (u=3 at top, u=1 at bottom)
 // - Outflow: natural/Neumann (do not mark as essential)
 // - VisIt output (VisItDataCollection)
-// mpirun -n 4 ./navier_shear_layer -no-vis -visit -dc 10 -dt 0.001 -Re 50 -o 1 -eps 0.005 -pa
+//
+// Example runs:
+// 2D (default):
+//   mpirun -n 4 ./navier_shear_layer -no-vis -visit -dc 10 -dt 0.001 -Re 50 -o 1 -eps 0.005 -pa
+// 2D with more frequent snapshots:
+//   mpirun -n 4 ./navier_shear_layer -no-vis -visit -dc 0 -dt 0.001 -Re 50 -o 1
+// 2D with stronger perturbation + faster forcing:
+//   mpirun -n 4 ./navier_shear_layer -no-vis -visit -eps 0.02 -nper 8
+// 2D high Re with tighter shear layer:
+//   mpirun -n 4 ./navier_shear_layer -no-vis -visit -dc 100 -dt 0.001 -Re 2000 -o 2 -eps 0.08 -pa -delta 0.01 -tf 8
+// 3D (spanwise modes, periodic in z):
+//   mpirun -n 8 ./navier_shear_layer -dim 3 -nx 64 -ny 32 -nz 32 -lx 4 -ly 1 -lz 1 -nmodes 3 -nper 4 -no-vis -visit
 
 
 #include "mfem.hpp"
@@ -20,6 +31,7 @@
 #include <iostream>
 #include <memory>
 #include <sys/stat.h>
+#include <vector>
 
 using namespace mfem;
 using namespace navier;
@@ -57,9 +69,14 @@ struct s_NavierContext
 
 } ctx;
 
+static int    g_dim   = 2;    // 2D or 3D
 static real_t g_eps   = 0.02; // perturbation amplitude (try 0.01–0.05)
-static int    g_k     = 2;    // number of waves in x
+static int    g_k     = 2;    // number of waves in x (2D only)
 static real_t g_sigma = 0.10; // y-localization width (absolute in y-units)
+static int    g_nper  = 4;    // oscillations per convective time (Lx/Uc)
+static int    g_nmodes = 1;   // spanwise Fourier modes (3D only)
+static real_t g_phi0  = 0.0;  // base phase (radians)
+static bool   g_per_z = true; // periodic in z (3D only)
 
 // Accessors expected by navier_utils.[hpp,cpp].
 bool   GetVisit(const s_NavierContext *c) { return c && c->visit; }
@@ -86,24 +103,31 @@ static real_t g_xmin   = 0.0;
 static real_t g_xmax   = 4.0;
 static real_t g_ymin   = 0.0;
 static real_t g_ymax   = 1.0;
+static real_t g_zmin   = 0.0;
+static real_t g_zmax   = 1.0;
 
 static real_t g_Ubot   = 1.0;
 static real_t g_Utop   = 3.0;
 static real_t g_delta  = 0.05; // shear thickness (absolute in y-units)
 
-// In MFEM cartesian meshes, boundary attributes are typically:
-//   1 = bottom, 2 = right, 3 = top, 4 = left
-// We'll use:
-//   inflow  = left  (attr 4)
-//   outflow = right (attr 2)
-//   bottom  = attr 1
-//   top     = attr 3
-enum BdrAttr
+// In MFEM cartesian meshes:
+// 2D: 1=bottom, 2=right, 3=top, 4=left
+// 3D: 1=zmin, 2=ymin, 3=xmax, 4=ymax, 5=xmin, 6=zmax
+enum BdrAttr2D
 {
    BDR_BOTTOM = 1,
    BDR_RIGHT  = 2,
    BDR_TOP    = 3,
    BDR_LEFT   = 4
+};
+enum BdrAttr3D
+{
+   BDR_ZMIN = 1,
+   BDR_YMIN = 2,
+   BDR_XMAX = 3,
+   BDR_YMAX = 4,
+   BDR_XMIN = 5,
+   BDR_ZMAX = 6
 };
 
 static inline real_t shear_profile_u(real_t y)
@@ -116,27 +140,67 @@ static inline real_t shear_profile_u(real_t y)
    return Umean + 0.5*dU*std::tanh(arg);
 }
 
-static inline real_t perturb_uy(real_t x, real_t y)
+static inline real_t omega_from_convective()
+{
+   const real_t Lx = g_xmax - g_xmin;
+   const real_t Uc = 0.5*(g_Utop + g_Ubot);
+   return (g_nper > 0 && Lx > 0.0 && Uc != 0.0)
+          ? (2.0*M_PI * real_t(g_nper) * Uc / Lx)
+          : 0.0;
+}
+
+static inline real_t perturb_uy_2d(real_t x, real_t y, real_t t)
 {
    const real_t y0 = 0.5*(g_ymin + g_ymax);
    const real_t phase = 2.0*M_PI*real_t(g_k) * (x - g_xmin) / (g_xmax - g_xmin);
    const real_t gauss = std::exp(-std::pow((y - y0)/g_sigma, 2));
-   return g_eps * std::sin(phase) * gauss;
+   const real_t omega = omega_from_convective();
+   return g_eps * std::sin(phase - omega*t) * gauss;
 }
 
-void vel_inflow(const Vector &x,real_t, Vector &u)
+static inline real_t spanwise_mode_sum(real_t z, real_t t)
 {
-   u.SetSize(2);
+   if (g_nmodes <= 0) { return 0.0; }
+   const real_t Lz = g_zmax - g_zmin;
+   const real_t omega = omega_from_convective();
+   real_t sum = 0.0;
+   const int nm = g_nmodes;
+   for (int n = 1; n <= nm; ++n)
+   {
+      const real_t alpha = (Lz > 0.0) ? (2.0*M_PI * real_t(n) / Lz) : 0.0;
+      const real_t phase = alpha * (z - g_zmin) + real_t(n) * g_phi0;
+      sum += std::cos(phase + omega*t);
+   }
+   return sum / real_t(nm);
+}
+
+static inline real_t perturb_uy_3d(real_t y, real_t z, real_t t)
+{
+   const real_t y0 = 0.5*(g_ymin + g_ymax);
+   const real_t gauss = std::exp(-std::pow((y - y0)/g_sigma, 2));
+   return g_eps * spanwise_mode_sum(z, t) * gauss;
+}
+
+void vel_inflow(const Vector &x, real_t t, Vector &u)
+{
+   u.SetSize(g_dim);
    u = 0.0;
    u(0) = shear_profile_u(x(1));
-   u(1) = perturb_uy(x(0), x(1));
+   if (g_dim == 2)
+   {
+      u(1) = perturb_uy_2d(x(0), x(1), t);
+   }
+   else
+   {
+      u(1) = perturb_uy_3d(x(1), x(2), t);
+   }
 }
 
 
 // Dirichlet BC function for top wall: constant u=Utop
 void vel_top(const Vector &, real_t, Vector &u)
 {
-   u.SetSize(2);
+   u.SetSize(g_dim);
    u = 0.0;
    u(0) = g_Utop;
 }
@@ -144,7 +208,7 @@ void vel_top(const Vector &, real_t, Vector &u)
 // Dirichlet BC function for bottom wall: constant u=Ubot
 void vel_bottom(const Vector &, real_t, Vector &u)
 {
-   u.SetSize(2);
+   u.SetSize(g_dim);
    u = 0.0;
    u(0) = g_Ubot;
 }
@@ -152,10 +216,17 @@ void vel_bottom(const Vector &, real_t, Vector &u)
 // Initial condition: start from the inflow shear profile everywhere (simple)
 void vel_ic(const Vector &x, Vector &u)
 {
-   u.SetSize(2);
+   u.SetSize(g_dim);
    u = 0.0;
    u(0) = shear_profile_u(x(1));
-   u(1) = 0.0;
+   if (g_dim > 1)
+   {
+      u(1) = 0.0;
+   }
+   if (g_dim > 2)
+   {
+      u(2) = 0.0;
+   }
 }
 
 
@@ -219,19 +290,25 @@ int main(int argc, char *argv[])
    // -------------------------
    // Runtime / mesh parameters
    // -------------------------
+   int dim = 2;
    int nx = 128;
    int ny = 64;
+   int nz = 32;
    real_t lx = 4.0;
    real_t ly = 1.0;
+   real_t lz = 1.0;
 
    int visport = 19916;
    bool glvis  = true;
 
    OptionsParser args(argc, argv);
+   args.AddOption(&dim, "-dim", "--dim", "Problem dimension: 2 or 3.");
    args.AddOption(&nx, "-nx", "--nx", "Number of elements in x.");
    args.AddOption(&ny, "-ny", "--ny", "Number of elements in y.");
+   args.AddOption(&nz, "-nz", "--nz", "Number of elements in z (3D only).");
    args.AddOption(&lx, "-lx", "--lx", "Domain length in x.");
    args.AddOption(&ly, "-ly", "--ly", "Domain length in y.");
+   args.AddOption(&lz, "-lz", "--lz", "Domain length in z (3D only).");
 
    args.AddOption(&ctx.order, "-o", "--order", "Velocity polynomial order.");
    args.AddOption(&ctx.reynum, "-Re", "--reynolds", "Reynolds number.");
@@ -255,9 +332,16 @@ int main(int argc, char *argv[])
    args.AddOption(&g_Utop, "-Utop", "--Utop", "Top wall streamwise speed.");
    args.AddOption(&g_Ubot, "-Ubot", "--Ubot", "Bottom wall streamwise speed.");
    args.AddOption(&g_delta, "-delta", "--delta", "Shear thickness in y-units.");
-   args.AddOption(&g_eps, "-eps", "--eps", "Perturbation amplitude for uy at inflow/IC.");
-   args.AddOption(&g_k, "-k", "--k", "Perturbation wavenumber in x (integer).");
+   args.AddOption(&g_eps, "-eps", "--eps", "Perturbation amplitude for uy at inflow.");
+   args.AddOption(&g_k, "-k", "--k", "Perturbation wavenumber in x (2D only).");
    args.AddOption(&g_sigma, "-sig", "--sigma", "Perturbation Gaussian width in y-units.");
+   args.AddOption(&g_nmodes, "-nmodes", "--nmodes",
+                  "Number of spanwise Fourier modes (3D only).");
+   args.AddOption(&g_phi0, "-phi0", "--phi0", "Base phase (radians).");
+   args.AddOption(&g_nper, "-nper", "--nper",
+                  "Oscillations per convective time (Lx/Uc).");
+   args.AddOption(&g_per_z, "-per-z", "--per-z", "-no-per-z", "--no-per-z",
+                  "Enable/disable periodicity in z (3D only).");
 
 
    args.Parse();
@@ -268,22 +352,53 @@ int main(int argc, char *argv[])
    }
    if (myid == 0) { args.PrintOptions(std::cout); }
 
+   if (dim != 2 && dim != 3)
+   {
+      if (myid == 0) { std::cout << "Unsupported -dim " << dim << "\n"; }
+      return 2;
+   }
+   g_dim = dim;
+
    ctx.kinvis = 1.0 / ctx.reynum;
 
    // Domain bounds for BC functions
    g_xmin = 0.0; g_xmax = lx;
    g_ymin = 0.0; g_ymax = ly;
+   g_zmin = 0.0; g_zmax = lz;
 
    // -------------------------
    // Build a cartesian mesh
    // -------------------------
-   Mesh mesh = Mesh::MakeCartesian2D(nx, ny, Element::QUADRILATERAL,
-                                    /*gen_edges=*/true, lx, ly);
+   Mesh mesh;
+   if (g_dim == 2)
+   {
+      mesh = Mesh::MakeCartesian2D(nx, ny, Element::QUADRILATERAL,
+                                   /*gen_edges=*/true, lx, ly);
+   }
+   else
+   {
+      mesh = Mesh::MakeCartesian3D(nx, ny, nz, Element::HEXAHEDRON,
+                                   /*sx=*/lx, /*sy=*/ly, /*sz=*/lz,
+                                   /*sfc_ordering=*/true);
+   }
    mesh.SetCurvature(ctx.order, /*discont=*/false);
 
    for (int lev = 0; lev < ctx.ref_levels; lev++) { mesh.UniformRefinement(); }
 
-   ParMesh pmesh(MPI_COMM_WORLD, mesh);
+   std::unique_ptr<Mesh> periodic_mesh;
+   Mesh *mesh_ptr = &mesh;
+   if (g_dim == 3 && g_per_z)
+   {
+      Vector z_translation(3);
+      z_translation = 0.0;
+      z_translation(2) = lz;
+      std::vector<Vector> translations = { z_translation };
+      periodic_mesh = std::make_unique<Mesh>(
+         Mesh::MakePeriodic(mesh, mesh.CreatePeriodicVertexMapping(translations)));
+      mesh_ptr = periodic_mesh.get();
+   }
+
+   ParMesh pmesh(MPI_COMM_WORLD, *mesh_ptr);
 
    if (myid == 0)
    {
@@ -305,21 +420,25 @@ flowsolver.EnablePA(ctx.pa);
 // Dirichlet markers and BC registration (do this BEFORE Setup)
 Array<int> bdr(pmesh.bdr_attributes.Max());
 
-// Inflow (left boundary attr=4)
-bdr = 0; bdr[BDR_LEFT - 1] = 1;
+int inflow_attr = (g_dim == 2) ? BDR_LEFT : BDR_XMIN;
+int top_attr    = (g_dim == 2) ? BDR_TOP : BDR_YMAX;
+int bottom_attr = (g_dim == 2) ? BDR_BOTTOM : BDR_YMIN;
+
+// Inflow (x-min)
+bdr = 0; bdr[inflow_attr - 1] = 1;
 flowsolver.AddVelDirichletBC(vel_inflow, bdr);
 
-// Top (attr=3)
-bdr = 0; bdr[BDR_TOP - 1] = 1;
+// Top (y-max)
+bdr = 0; bdr[top_attr - 1] = 1;
 flowsolver.AddVelDirichletBC(vel_top, bdr);
 
-// Bottom (attr=1)
-bdr = 0; bdr[BDR_BOTTOM - 1] = 1;
+// Bottom (y-min)
+bdr = 0; bdr[bottom_attr - 1] = 1;
 flowsolver.AddVelDirichletBC(vel_bottom, bdr);
 
 // ---- Initialize velocity BEFORE Setup ----
 ParGridFunction *u = flowsolver.GetCurrentVelocity();
-VectorFunctionCoefficient u0(2, vel_ic);
+VectorFunctionCoefficient u0(g_dim, vel_ic);
 u->ProjectCoefficient(u0);
 u->SetTrueVector(); // keep tdofs consistent
 
