@@ -76,6 +76,7 @@ if (MFEM_USE_MPI)
     ex14p.cpp
     ex15p.cpp
     ex16p.cpp
+    ex16p_victor.cpp
     ex17p.cpp
     ex18p.cpp
     ex19p.cpp

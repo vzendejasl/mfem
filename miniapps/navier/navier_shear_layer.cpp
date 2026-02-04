@@ -20,6 +20,8 @@
 //   mpirun -n 4 ./navier_shear_layer -no-vis -visit -dc 100 -dt 0.001 -Re 2000 -o 2 -eps 0.08 -pa -delta 0.01 -tf 8
 // 3D (spanwise modes, periodic in z):
 //   mpirun -n 8 ./navier_shear_layer -dim 3 -nx 64 -ny 32 -nz 32 -lx 4 -ly 1 -lz 1 -nmodes 3 -nper 4 -no-vis -visit
+// mpirun -n 8 ./navier_shear_layer -dim 3 -nx 32 -ny 16 -nz 8 -lx 4 -ly 1 -lz 0.5 -nmodes 3 -nper 4 -no-vis -visit -dt 0.001 -tf 1.0 -Re 2000 -pa -delta 0.01 -eps 0.08
+// mpirun -n 8 ./navier_shear_layer -dim 3 -nx 128 -ny 32 -nz 16 -lx 4 -ly 1 -lz 0.5 -nmodes 3 -nper 4 -no-vis -visit -dt 0.0005 -tf 8.0 -Re 2000 -pa -delta 0.01 -eps 0.08
 
 
 #include "mfem.hpp"
