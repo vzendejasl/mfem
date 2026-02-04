@@ -10,6 +10,7 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <memory>
 
 using namespace std;
 using namespace mfem;
@@ -28,7 +29,7 @@ protected:
    CGSolver M_solver;
    Solver *M_prec;
    CGSolver T_solver;
-   Solver *T_prec;
+   HypreSmoother T_prec;
 
    real_t alpha, kappa, sigma, kappa_dg;
    bool periodic, pa;
@@ -76,58 +77,150 @@ int main(int argc, char *argv[])
    real_t x1 = 0.0, x2 = 1.0, y1 = 0.0, y2 = 1.0, z1 = 0.0, z2 = 1.0;
 
    OptionsParser args(argc, argv);
-   args.AddOption(&mesh_file, "-m", "--mesh", "Mesh file to use.");
-   args.AddOption(&order, "-o", "--order", "Order.");
-   args.AddOption(&ser_ref_levels, "-rs", "--refine-serial", "Serial refinement.");
-   args.AddOption(&par_ref_levels, "-rp", "--refine-parallel", "Parallel refinement.");
-   args.AddOption(&ode_solver_type, "-s", "--ode-solver", "Solver.");
-   args.AddOption(&alpha, "-a", "--alpha", "Alpha.");
-   args.AddOption(&kappa, "-k", "--kappa", "Kappa.");
-   args.AddOption(&dt, "-dt", "--time-step", "Time step.");
-   args.AddOption(&t_final, "-tf", "--t-final", "Final time.");
-   args.AddOption(&use_inline_mesh, "-inline", "--inline-mesh", "-no-inline", "--no-inline-mesh", "Inline mesh.");
-   args.AddOption(&periodic, "-p", "--periodic", "-no-p", "--no-periodic", "Periodic.");
-   args.AddOption(&pa, "-pa", "--partial-assembly", "-no-pa", "--no-partial-assembly", "Partial assembly.");
-   args.AddOption(&structured_mesh, "-structured", "--structured-mesh", "-no-structured", "--no-structured-mesh", "Structured.");
-   args.AddOption(&nx, "-nx", "--nx", "nx.");
-   args.AddOption(&ny, "-ny", "--ny", "ny.");
-   args.AddOption(&nz, "-nz", "--nz", "nz.");
-   args.AddOption(&visualization, "-vis", "--visualization", "-no-vis", "--no-visualization", "Vis.");
-   args.AddOption(&visit, "-visit", "--visit", "-no-visit", "--no-visit", "Visit.");
-   args.AddOption(&vis_steps, "-vs", "--vis-steps", "Vis steps.");
+   args.AddOption(&mesh_file, "-m", "--mesh",
+                  "Mesh file to use.");
+   args.AddOption(&order, "-o", "--order",
+                  "Order (degree) of the DG finite elements.");
+   args.AddOption(&ser_ref_levels, "-rs", "--refine-serial",
+                  "Number of serial uniform refinements.");
+   args.AddOption(&par_ref_levels, "-rp", "--refine-parallel",
+                  "Number of parallel uniform refinements.");
+   args.AddOption(&ode_solver_type, "-s", "--ode-solver",
+                  ODESolver::Types.c_str());
+   args.AddOption(&alpha, "-a", "--alpha",
+                  "Alpha coefficient.");
+   args.AddOption(&kappa, "-k", "--kappa",
+                  "Base diffusivity coefficient.");
+   args.AddOption(&dt, "-dt", "--time-step",
+                  "Time step.");
+   args.AddOption(&t_final, "-tf", "--t-final",
+                  "Final time.");
+   args.AddOption(&use_inline_mesh, "-inline", "--inline-mesh", "-no-inline",
+                  "--no-inline-mesh",
+                  "Enable or disable inline mesh generation.");
+   args.AddOption(&periodic, "-p", "--periodic", "-no-p", "--no-periodic",
+                  "Enable or disable periodic boundary conditions.");
+   args.AddOption(&pa, "-pa", "--partial-assembly", "-no-pa",
+                  "--no-partial-assembly",
+                  "Enable or disable partial assembly.");
+   args.AddOption(&structured_mesh, "-structured", "--structured-mesh",
+                  "-no-structured", "--no-structured-mesh",
+                  "Use structured mesh (hex/quad) for inline generation.");
+   args.AddOption(&nx, "-nx", "--nx",
+                  "Number of elements in x for inline mesh.");
+   args.AddOption(&ny, "-ny", "--ny",
+                  "Number of elements in y for inline mesh.");
+   args.AddOption(&nz, "-nz", "--nz",
+                  "Number of elements in z for inline mesh.");
+   args.AddOption(&visualization, "-vis", "--visualization", "-no-vis",
+                  "--no-visualization",
+                  "Enable or disable GLVis visualization.");
+   args.AddOption(&visit, "-visit", "--visit", "-no-visit", "--no-visit",
+                  "Save data files for VisIt visualization.");
+   args.AddOption(&vis_steps, "-vs", "--vis-steps",
+                  "Save/print every n-th time step.");
    args.Parse();
-   if (!args.Good()) { if (myid == 0) args.PrintUsage(cout); return 1; }
+   if (!args.Good())
+   {
+      if (myid == 0)
+      {
+         args.PrintUsage(cout);
+      }
+      return 1;
+   }
+
+   if (myid == 0)
+   {
+      args.PrintOptions(cout);
+   }
 
    Mesh *mesh = nullptr;
    if (use_inline_mesh)
    {
       Mesh *init_mesh = nullptr;
-      if (nz > 1) {
-         if (structured_mesh) init_mesh = new Mesh(Mesh::MakeCartesian3D(nx, ny, nz, Element::HEXAHEDRON, x2-x1, y2-y1, z2-z1));
-         else init_mesh = new Mesh(Mesh::MakeCartesian3DWith24TetsPerHex(nx, ny, nz, x2-x1, y2-y1, z2-z1));
-         if (periodic) {
-            std::vector<Vector> translations = {Vector({x2-x1, 0.0, 0.0}), Vector({0.0, y2-y1, 0.0}), Vector({0.0, 0.0, z2-z1})};
-            mesh = new Mesh(Mesh::MakePeriodic(*init_mesh, init_mesh->CreatePeriodicVertexMapping(translations)));
-            delete init_mesh;
-         } else mesh = init_mesh;
-      } else {
-         if (structured_mesh) init_mesh = new Mesh(Mesh::MakeCartesian2D(nx, ny, Element::QUADRILATERAL, false, x2-x1, y2-y1));
-         else init_mesh = new Mesh(Mesh::MakeCartesian2DWith5QuadsPerQuad(nx, ny, x2-x1, y2-y1));
-         if (periodic) {
-            std::vector<Vector> translations = {Vector({x2-x1, 0.0}), Vector({0.0, y2-y1})};
-            mesh = new Mesh(Mesh::MakePeriodic(*init_mesh, init_mesh->CreatePeriodicVertexMapping(translations)));
-            delete init_mesh;
-         } else mesh = init_mesh;
-      }
-   } else mesh = new Mesh(mesh_file, 1, 1);
+      if (nz > 1)
+      {
+         if (structured_mesh)
+         {
+            init_mesh = new Mesh(Mesh::MakeCartesian3D(nx, ny, nz,
+                                                       Element::HEXAHEDRON,
+                                                       x2 - x1, y2 - y1, z2 - z1));
+         }
+         else
+         {
+            init_mesh = new Mesh(Mesh::MakeCartesian3DWith24TetsPerHex(
+                                    nx, ny, nz, x2 - x1, y2 - y1, z2 - z1));
+         }
 
-   for (int l = 0; l < ser_ref_levels; l++) mesh->UniformRefinement();
+         if (periodic)
+         {
+            std::vector<Vector> translations =
+            {
+               Vector({x2 - x1, 0.0, 0.0}),
+               Vector({0.0, y2 - y1, 0.0}),
+               Vector({0.0, 0.0, z2 - z1})
+            };
+            mesh = new Mesh(Mesh::MakePeriodic(
+                               *init_mesh,
+                               init_mesh->CreatePeriodicVertexMapping(translations)));
+            delete init_mesh;
+         }
+         else
+         {
+            mesh = init_mesh;
+         }
+      }
+      else
+      {
+         if (structured_mesh)
+         {
+            init_mesh = new Mesh(Mesh::MakeCartesian2D(nx, ny,
+                                                       Element::QUADRILATERAL,
+                                                       false,
+                                                       x2 - x1, y2 - y1));
+         }
+         else
+         {
+            init_mesh = new Mesh(Mesh::MakeCartesian2DWith5QuadsPerQuad(
+                                    nx, ny, x2 - x1, y2 - y1));
+         }
+
+         if (periodic)
+         {
+            std::vector<Vector> translations =
+            {
+               Vector({x2 - x1, 0.0}),
+               Vector({0.0, y2 - y1})
+            };
+            mesh = new Mesh(Mesh::MakePeriodic(
+                               *init_mesh,
+                               init_mesh->CreatePeriodicVertexMapping(translations)));
+            delete init_mesh;
+         }
+         else
+         {
+            mesh = init_mesh;
+         }
+      }
+   }
+   else
+   {
+      mesh = new Mesh(mesh_file, 1, 1);
+   }
+
+   for (int l = 0; l < ser_ref_levels; l++)
+   {
+      mesh->UniformRefinement();
+   }
 
    mesh->GetBoundingBox(bb_min, bb_max);
    ParMesh *pmesh = new ParMesh(MPI_COMM_WORLD, *mesh);
    delete mesh;
 
-   for (int l = 0; l < par_ref_levels; l++) pmesh->UniformRefinement();
+   for (int l = 0; l < par_ref_levels; l++)
+   {
+      pmesh->UniformRefinement();
+   }
 
    L2_FECollection fe_coll(order, pmesh->Dimension(), BasisType::GaussLobatto);
    ParFiniteElementSpace fespace(pmesh, &fe_coll);
@@ -139,22 +232,20 @@ int main(int argc, char *argv[])
       h_min = std::min(h_min, pmesh->GetElementSize(i));
    }
    real_t global_h_min;
-   MPI_Allreduce(&h_min, &global_h_min, 1, MPI_DOUBLE, MPI_MIN, pmesh->GetComm());
+   MPI_Allreduce(&h_min, &global_h_min, 1, MPITypeMap<real_t>::mpi_type,
+                 MPI_MIN, pmesh->GetComm());
 
    ParGridFunction u_gf(&fespace);
    FunctionCoefficient u_0(InitialTemperature);
    u_gf.ProjectCoefficient(u_0);
-   Vector u; u_gf.GetTrueDofs(u);
+   Vector u;
+   u_gf.GetTrueDofs(u);
 
    real_t kappa_dg = (order + 1) * (order + 1);
    DGConductionOperator oper(fespace, alpha, kappa, -1.0, kappa_dg, periodic, pa, u);
 
-   ODESolver *ode_solver = nullptr;
-   switch (ode_solver_type) {
-      case 2: ode_solver = new RK2Solver(0.5); break;
-      case 4: ode_solver = new RK4Solver; break;
-      default: ode_solver = new ForwardEulerSolver;
-   }
+   unique_ptr<ODESolver> ode_solver = ODESolver::Select(ode_solver_type);
+   MFEM_VERIFY(ode_solver != nullptr, "Unknown ODE solver type.");
 
    ode_solver->Init(oper);
    real_t t = 0.0;
@@ -184,10 +275,19 @@ int main(int argc, char *argv[])
       cout << "Initial total integral: " << integral_init << endl;
    }
 
-   for (int ti = 1; t < t_final - dt/2; ti++)
+   const int output_steps = max(vis_steps, 1);
+   const real_t p_factor = pow(order + 1.0, 4.0);
+
+   bool last_step = false;
+   for (int ti = 1; !last_step; ti++)
    {
+      if (t + dt >= t_final - dt/2)
+      {
+         last_step = true;
+      }
+
       ode_solver->Step(u, t, dt);
-      if (ti % vis_steps == 0)
+      if (last_step || (ti % output_steps) == 0)
       {
          u_gf.SetFromTrueDofs(u);
          loc_energy = u_gf * u_gf;
@@ -202,11 +302,11 @@ int main(int argc, char *argv[])
          // Heuristic: dt < h^2 / (kappa * (p+1)^4)
          real_t u_max = u.Max();
          real_t global_u_max;
-         MPI_Allreduce(&u_max, &global_u_max, 1, MPI_DOUBLE, MPI_MAX, pmesh->GetComm());
+         MPI_Allreduce(&u_max, &global_u_max, 1, MPITypeMap<real_t>::mpi_type,
+                       MPI_MAX, pmesh->GetComm());
          real_t kappa_max = kappa + alpha * global_u_max;
          
          // p_factor accounts for the clustering of DOFs in high-order DG
-         real_t p_factor = pow(order + 1.0, 4.0);
          real_t suggested_dt = (global_h_min * global_h_min) / (kappa_max * p_factor);
 
          if (myid == 0)
@@ -245,16 +345,41 @@ int main(int argc, char *argv[])
       cout << "Integral change:   " << integral_final - integral_init << endl;
    }
 
-   delete ode_solver;
    delete pmesh;
    return 0;
 }
 
-DGConductionOperator::DGConductionOperator(ParFiniteElementSpace &f, real_t alpha_, real_t kappa_, real_t sigma_, real_t kappa_dg_, bool periodic_, bool pa_, const Vector &u)
-   : TimeDependentOperator(f.GetTrueVSize(), 0.0), fespace(f), M_bf(nullptr), K_bf(nullptr), T(nullptr), current_dt(0.0), M_solver(f.GetComm()), M_prec(nullptr), T_solver(f.GetComm()), T_prec(nullptr), alpha(alpha_), kappa(kappa_), sigma(sigma_), kappa_dg(kappa_dg_), periodic(periodic_), pa(pa_), z(height), u_coeff_gf(nullptr), diff_coeff(nullptr)
+DGConductionOperator::DGConductionOperator(ParFiniteElementSpace &f,
+                                           real_t alpha_, real_t kappa_,
+                                           real_t sigma_, real_t kappa_dg_,
+                                           bool periodic_, bool pa_,
+                                           const Vector &u)
+   : TimeDependentOperator(f.GetTrueVSize(), 0.0),
+     fespace(f),
+     M_bf(nullptr),
+     K_bf(nullptr),
+     T(nullptr),
+     current_dt(0.0),
+     M_solver(f.GetComm()),
+     M_prec(nullptr),
+     T_solver(f.GetComm()),
+     alpha(alpha_),
+     kappa(kappa_),
+     sigma(sigma_),
+     kappa_dg(kappa_dg_),
+     periodic(periodic_),
+     pa(pa_),
+     z(height),
+     u_coeff_gf(nullptr),
+     diff_coeff(nullptr)
 {
+   const real_t rel_tol = 1e-8;
+
    M_bf = new ParBilinearForm(&fespace);
-   if (pa) M_bf->SetAssemblyLevel(AssemblyLevel::PARTIAL);
+   if (pa)
+   {
+      M_bf->SetAssemblyLevel(AssemblyLevel::PARTIAL);
+   }
    M_bf->AddDomainIntegrator(new MassIntegrator());
    M_bf->Assemble();
    if (pa)
@@ -267,8 +392,12 @@ DGConductionOperator::DGConductionOperator(ParFiniteElementSpace &f, real_t alph
       M.Reset(M_bf->ParallelAssemble(), true);
    }
 
-   M_solver.SetOperator(*M);
-   M_solver.SetRelTol(1e-8); M_solver.SetMaxIter(100); M_solver.SetPrintLevel(0);
+   M_solver.iterative_mode = false;
+   M_solver.SetRelTol(rel_tol);
+   M_solver.SetAbsTol(0.0);
+   M_solver.SetMaxIter(100);
+   M_solver.SetPrintLevel(0);
+
    if (pa)
    {
       M_prec = new OperatorJacobiSmoother(*M_bf, ess_tdof_list);
@@ -281,8 +410,18 @@ DGConductionOperator::DGConductionOperator(ParFiniteElementSpace &f, real_t alph
       M_prec = h_prec;
    }
    M_solver.SetPreconditioner(*M_prec);
+   M_solver.SetOperator(*M);
 
-   T_solver.SetRelTol(1e-8); T_solver.SetMaxIter(100); T_solver.SetPrintLevel(0);
+   T_solver.iterative_mode = false;
+   T_solver.SetRelTol(rel_tol);
+   T_solver.SetAbsTol(0.0);
+   T_solver.SetMaxIter(100);
+   T_solver.SetPrintLevel(0);
+   T_prec.SetType(HypreSmoother::Jacobi);
+   if (!pa)
+   {
+      T_solver.SetPreconditioner(T_prec);
+   }
 
    u_coeff_gf = new ParGridFunction(&fespace);
    diff_coeff = new GridFunctionCoefficient(u_coeff_gf);
@@ -292,7 +431,8 @@ DGConductionOperator::DGConductionOperator(ParFiniteElementSpace &f, real_t alph
 
 void DGConductionOperator::Mult(const Vector &u, Vector &du_dt) const
 {
-   K->Mult(u, z); z.Neg();
+   K->Mult(u, z);
+   z.Neg();
    M_solver.Mult(z, du_dt);
 }
 
@@ -303,10 +443,12 @@ void DGConductionOperator::ImplicitSolve(const real_t dt, const Vector &u, Vecto
    {
       T = Add(1.0, *M.As<HypreParMatrix>(), dt, *K.As<HypreParMatrix>());
       current_dt = dt;
+      T_prec.SetOperator(*T);
       T_solver.SetOperator(*T);
    }
    MFEM_VERIFY(dt == current_dt, "dt changed");
-   K->Mult(u, z); z.Neg();
+   K->Mult(u, z);
+   z.Neg();
    T_solver.Mult(z, k);
 }
 
@@ -322,10 +464,16 @@ void DGConductionOperator::SetParameters(const Vector &u)
    K.Clear();
    delete K_bf;
    K_bf = new ParBilinearForm(&fespace);
-   if (pa) K_bf->SetAssemblyLevel(AssemblyLevel::PARTIAL);
+   if (pa)
+   {
+      K_bf->SetAssemblyLevel(AssemblyLevel::PARTIAL);
+   }
    K_bf->AddDomainIntegrator(new DiffusionIntegrator(*diff_coeff));
    K_bf->AddInteriorFaceIntegrator(new DGDiffusionIntegrator(*diff_coeff, sigma, kappa_dg));
-   if (!periodic) K_bf->AddBdrFaceIntegrator(new DGDiffusionIntegrator(*diff_coeff, sigma, kappa_dg));
+   if (!periodic)
+   {
+      K_bf->AddBdrFaceIntegrator(new DGDiffusionIntegrator(*diff_coeff, sigma, kappa_dg));
+   }
    K_bf->Assemble();
    if (pa)
    {
@@ -339,19 +487,23 @@ void DGConductionOperator::SetParameters(const Vector &u)
    delete T; T = nullptr;
 }
 
-DGConductionOperator::~DGConductionOperator() 
-{ 
-   delete M_bf; delete K_bf; delete T; 
-   delete M_prec; delete T_prec;
-   delete diff_coeff; delete u_coeff_gf;
+DGConductionOperator::~DGConductionOperator()
+{
+   delete M_bf;
+   delete K_bf;
+   delete T;
+   delete M_prec;
+   delete diff_coeff;
+   delete u_coeff_gf;
 }
 
 real_t InitialTemperature(const Vector &x)
 {
    real_t r2 = 0.0;
-   real_t L = bb_max(0) - bb_min(0);
-   real_t sigma_gauss = 0.15 * L;
-   for (int i = 0; i < x.Size(); i++) {
+   real_t length = bb_max(0) - bb_min(0);
+   real_t sigma_gauss = 0.15 * length;
+   for (int i = 0; i < x.Size(); i++)
+   {
       real_t mid = (bb_min(i) + bb_max(i)) * 0.5 + 0.2;
       r2 += (x(i) - mid) * (x(i) - mid);
    }
