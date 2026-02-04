@@ -4,7 +4,7 @@
 //
 // Sample runs:
 //   mpirun -np 4 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -p -s 4 -dt 1e-4 -tf 0.001 -no-vis
-//
+//   mpirun -np 4 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -s 2 -dt 1e-4 -tf 0.2 -visit -rs 1 -p --alpha 0.0 --kappa 0.2 
 #include "mfem.hpp"
 #include <fstream>
 #include <iostream>
@@ -53,8 +53,10 @@ int main(int argc, char *argv[])
    int myid = Mpi::WorldRank();
    Hypre::Init();
 
-   const char *mesh_file = "../data/star.mesh";
    int order = 2;
+   int ser_ref_levels = 0;
+   int par_ref_levels = 0;
+   const char *mesh_file = "../data/star.mesh";
    int ode_solver_type = 4;
    real_t t_final = 0.5;
    real_t dt = 1.0e-4;
@@ -70,7 +72,10 @@ int main(int argc, char *argv[])
    real_t x1 = 0.0, x2 = 1.0, y1 = 0.0, y2 = 1.0, z1 = 0.0, z2 = 1.0;
 
    OptionsParser args(argc, argv);
+   args.AddOption(&mesh_file, "-m", "--mesh", "Mesh file to use.");
    args.AddOption(&order, "-o", "--order", "Order.");
+   args.AddOption(&ser_ref_levels, "-rs", "--refine-serial", "Serial refinement.");
+   args.AddOption(&par_ref_levels, "-rp", "--refine-parallel", "Parallel refinement.");
    args.AddOption(&ode_solver_type, "-s", "--ode-solver", "Solver.");
    args.AddOption(&alpha, "-a", "--alpha", "Alpha.");
    args.AddOption(&kappa, "-k", "--kappa", "Kappa.");
@@ -111,12 +116,25 @@ int main(int argc, char *argv[])
       }
    } else mesh = new Mesh(mesh_file, 1, 1);
 
+   for (int l = 0; l < ser_ref_levels; l++) mesh->UniformRefinement();
+
    mesh->GetBoundingBox(bb_min, bb_max);
    ParMesh *pmesh = new ParMesh(MPI_COMM_WORLD, *mesh);
    delete mesh;
 
+   for (int l = 0; l < par_ref_levels; l++) pmesh->UniformRefinement();
+
    L2_FECollection fe_coll(order, pmesh->Dimension(), BasisType::GaussLobatto);
    ParFiniteElementSpace fespace(pmesh, &fe_coll);
+
+   // Determine h_min for CFL calculation
+   real_t h_min = 1e10;
+   for (int i = 0; i < pmesh->GetNE(); i++)
+   {
+      h_min = std::min(h_min, pmesh->GetElementSize(i));
+   }
+   real_t global_h_min;
+   MPI_Allreduce(&h_min, &global_h_min, 1, MPI_DOUBLE, MPI_MIN, pmesh->GetComm());
 
    ParGridFunction u_gf(&fespace);
    FunctionCoefficient u_0(InitialTemperature);
@@ -139,12 +157,27 @@ int main(int argc, char *argv[])
    VisItDataCollection visit_dc("DataVisit/heat_conduction_example16_dg", pmesh);
    visit_dc.RegisterField("temperature", &u_gf);
 
-   // Compute initial energy
+   // Linear form for computing the integral of the solution (total heat)
+   ParLinearForm LF(&fespace);
+   ConstantCoefficient one(1.0);
+   LF.AddDomainIntegrator(new DomainLFIntegrator(one));
+   LF.Assemble();
+
+   // Compute initial energy and integral
    u_gf.SetFromTrueDofs(u);
    double loc_energy = u_gf * u_gf;
    double energy_init;
    MPI_Allreduce(&loc_energy, &energy_init, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
-   if (myid == 0) cout << "Initial energy: " << energy_init << endl;
+   
+   double loc_integral = LF(u_gf);
+   double integral_init;
+   MPI_Allreduce(&loc_integral, &integral_init, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+   if (myid == 0)
+   {
+      cout << "Initial L2 energy: " << energy_init << endl;
+      cout << "Initial total integral: " << integral_init << endl;
+   }
 
    for (int ti = 1; t < t_final - dt/2; ti++)
    {
@@ -155,7 +188,29 @@ int main(int argc, char *argv[])
          loc_energy = u_gf * u_gf;
          double energy;
          MPI_Allreduce(&loc_energy, &energy, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
-         if (myid == 0) cout << "step " << ti << ", t = " << t << ", energy = " << energy << endl;
+
+         loc_integral = LF(u_gf);
+         double integral;
+         MPI_Allreduce(&loc_integral, &integral, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+         // Compute Suggested dt for explicit DG diffusion
+         // Heuristic: dt < h^2 / (kappa * (p+1)^4)
+         real_t u_max = u.Max();
+         real_t global_u_max;
+         MPI_Allreduce(&u_max, &global_u_max, 1, MPI_DOUBLE, MPI_MAX, pmesh->GetComm());
+         real_t kappa_max = kappa + alpha * global_u_max;
+         
+         // p_factor accounts for the clustering of DOFs in high-order DG
+         real_t p_factor = pow(order + 1.0, 4.0);
+         real_t suggested_dt = (global_h_min * global_h_min) / (kappa_max * p_factor);
+
+         if (myid == 0)
+         {
+            cout << "step " << ti << ", t = " << t 
+                 << ", energy = " << energy 
+                 << ", integral = " << integral 
+                 << ", suggested dt = " << suggested_dt << endl;
+         }
 
          if (visit)
          {
@@ -171,10 +226,18 @@ int main(int argc, char *argv[])
    loc_energy = u_gf * u_gf;
    double energy_final;
    MPI_Allreduce(&loc_energy, &energy_final, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+   loc_integral = LF(u_gf);
+   double integral_final;
+   MPI_Allreduce(&loc_integral, &integral_final, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
    if (myid == 0)
    {
-      cout << "Final energy: " << energy_final << endl;
-      cout << "Energy change: " << energy_final - energy_init << endl;
+      cout << "\n=== Final Results ===" << endl;
+      cout << "Final L2 energy:   " << energy_final << " (should decrease)" << endl;
+      cout << "Energy change:     " << energy_final - energy_init << endl;
+      cout << "Final integral:    " << integral_final << " (should be conserved for periodic BC)" << endl;
+      cout << "Integral change:   " << integral_final - integral_init << endl;
    }
 
    delete ode_solver;
@@ -252,9 +315,11 @@ DGConductionOperator::~DGConductionOperator()
 real_t InitialTemperature(const Vector &x)
 {
    real_t r2 = 0.0;
+   real_t L = bb_max(0) - bb_min(0);
+   real_t sigma_gauss = 0.15 * L;
    for (int i = 0; i < x.Size(); i++) {
-      real_t mid = (bb_min(i) + bb_max(i)) * 0.5;
+      real_t mid = (bb_min(i) + bb_max(i)) * 0.5 + 0.2;
       r2 += (x(i) - mid) * (x(i) - mid);
    }
-   return exp(-r2 / (2.0 * 0.15 * 0.15));
+   return 1.0 + exp(-r2 / (2.0 * sigma_gauss * sigma_gauss));
 }
