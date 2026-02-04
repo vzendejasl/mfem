@@ -10,6 +10,7 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <limits>
 #include <memory>
 
 using namespace std;
@@ -128,7 +129,6 @@ int main(int argc, char *argv[])
       }
       return 1;
    }
-
    if (myid == 0)
    {
       args.PrintOptions(cout);
@@ -138,89 +138,32 @@ int main(int argc, char *argv[])
    if (use_inline_mesh)
    {
       Mesh *init_mesh = nullptr;
-      if (nz > 1)
-      {
-         if (structured_mesh)
-         {
-            init_mesh = new Mesh(Mesh::MakeCartesian3D(nx, ny, nz,
-                                                       Element::HEXAHEDRON,
-                                                       x2 - x1, y2 - y1, z2 - z1));
-         }
-         else
-         {
-            init_mesh = new Mesh(Mesh::MakeCartesian3DWith24TetsPerHex(
-                                    nx, ny, nz, x2 - x1, y2 - y1, z2 - z1));
-         }
-
-         if (periodic)
-         {
-            std::vector<Vector> translations =
-            {
-               Vector({x2 - x1, 0.0, 0.0}),
-               Vector({0.0, y2 - y1, 0.0}),
-               Vector({0.0, 0.0, z2 - z1})
-            };
-            mesh = new Mesh(Mesh::MakePeriodic(
-                               *init_mesh,
-                               init_mesh->CreatePeriodicVertexMapping(translations)));
+      if (nz > 1) {
+         if (structured_mesh) init_mesh = new Mesh(Mesh::MakeCartesian3D(nx, ny, nz, Element::HEXAHEDRON, x2-x1, y2-y1, z2-z1));
+         else init_mesh = new Mesh(Mesh::MakeCartesian3DWith24TetsPerHex(nx, ny, nz, x2-x1, y2-y1, z2-z1));
+         if (periodic) {
+            std::vector<Vector> translations = {Vector({x2-x1, 0.0, 0.0}), Vector({0.0, y2-y1, 0.0}), Vector({0.0, 0.0, z2-z1})};
+            mesh = new Mesh(Mesh::MakePeriodic(*init_mesh, init_mesh->CreatePeriodicVertexMapping(translations)));
             delete init_mesh;
-         }
-         else
-         {
-            mesh = init_mesh;
-         }
-      }
-      else
-      {
-         if (structured_mesh)
-         {
-            init_mesh = new Mesh(Mesh::MakeCartesian2D(nx, ny,
-                                                       Element::QUADRILATERAL,
-                                                       false,
-                                                       x2 - x1, y2 - y1));
-         }
-         else
-         {
-            init_mesh = new Mesh(Mesh::MakeCartesian2DWith5QuadsPerQuad(
-                                    nx, ny, x2 - x1, y2 - y1));
-         }
-
-         if (periodic)
-         {
-            std::vector<Vector> translations =
-            {
-               Vector({x2 - x1, 0.0}),
-               Vector({0.0, y2 - y1})
-            };
-            mesh = new Mesh(Mesh::MakePeriodic(
-                               *init_mesh,
-                               init_mesh->CreatePeriodicVertexMapping(translations)));
+         } else mesh = init_mesh;
+      } else {
+         if (structured_mesh) init_mesh = new Mesh(Mesh::MakeCartesian2D(nx, ny, Element::QUADRILATERAL, false, x2-x1, y2-y1));
+         else init_mesh = new Mesh(Mesh::MakeCartesian2DWith5QuadsPerQuad(nx, ny, x2-x1, y2-y1));
+         if (periodic) {
+            std::vector<Vector> translations = {Vector({x2-x1, 0.0}), Vector({0.0, y2-y1})};
+            mesh = new Mesh(Mesh::MakePeriodic(*init_mesh, init_mesh->CreatePeriodicVertexMapping(translations)));
             delete init_mesh;
-         }
-         else
-         {
-            mesh = init_mesh;
-         }
+         } else mesh = init_mesh;
       }
-   }
-   else
-   {
-      mesh = new Mesh(mesh_file, 1, 1);
-   }
+   } else mesh = new Mesh(mesh_file, 1, 1);
 
-   for (int l = 0; l < ser_ref_levels; l++)
-   {
-      mesh->UniformRefinement();
-   }
+   for (int l = 0; l < ser_ref_levels; l++) mesh->UniformRefinement();
 
    mesh->GetBoundingBox(bb_min, bb_max);
    ParMesh *pmesh = new ParMesh(MPI_COMM_WORLD, *mesh);
    delete mesh;
 
-   for (int l = 0; l < par_ref_levels; l++)
-   {
-      pmesh->UniformRefinement();
-   }
+   for (int l = 0; l < par_ref_levels; l++) pmesh->UniformRefinement();
 
    L2_FECollection fe_coll(order, pmesh->Dimension(), BasisType::GaussLobatto);
    ParFiniteElementSpace fespace(pmesh, &fe_coll);
@@ -275,7 +218,7 @@ int main(int argc, char *argv[])
       cout << "Initial total integral: " << integral_init << endl;
    }
 
-   const int output_steps = max(vis_steps, 1);
+   const int output_steps = std::max(vis_steps, 1);
    const real_t p_factor = pow(order + 1.0, 4.0);
 
    bool last_step = false;
@@ -305,7 +248,7 @@ int main(int argc, char *argv[])
          MPI_Allreduce(&u_max, &global_u_max, 1, MPITypeMap<real_t>::mpi_type,
                        MPI_MAX, pmesh->GetComm());
          real_t kappa_max = kappa + alpha * global_u_max;
-         
+
          // p_factor accounts for the clustering of DOFs in high-order DG
          real_t suggested_dt = (global_h_min * global_h_min) / (kappa_max * p_factor);
 
@@ -349,37 +292,20 @@ int main(int argc, char *argv[])
    return 0;
 }
 
-DGConductionOperator::DGConductionOperator(ParFiniteElementSpace &f,
-                                           real_t alpha_, real_t kappa_,
-                                           real_t sigma_, real_t kappa_dg_,
-                                           bool periodic_, bool pa_,
-                                           const Vector &u)
-   : TimeDependentOperator(f.GetTrueVSize(), 0.0),
-     fespace(f),
-     M_bf(nullptr),
-     K_bf(nullptr),
-     T(nullptr),
-     current_dt(0.0),
-     M_solver(f.GetComm()),
-     M_prec(nullptr),
-     T_solver(f.GetComm()),
-     alpha(alpha_),
-     kappa(kappa_),
-     sigma(sigma_),
-     kappa_dg(kappa_dg_),
-     periodic(periodic_),
-     pa(pa_),
-     z(height),
-     u_coeff_gf(nullptr),
-     diff_coeff(nullptr)
+DGConductionOperator::DGConductionOperator(ParFiniteElementSpace &f, real_t alpha_,
+                                           real_t kappa_, real_t sigma_,
+                                           real_t kappa_dg_, bool periodic_,
+                                           bool pa_, const Vector &u)
+   : TimeDependentOperator(f.GetTrueVSize(), 0.0), fespace(f), M_bf(nullptr),
+     K_bf(nullptr), T(nullptr), current_dt(0.0), M_solver(f.GetComm()),
+     M_prec(nullptr), T_solver(f.GetComm()), alpha(alpha_), kappa(kappa_),
+     sigma(sigma_), kappa_dg(kappa_dg_), periodic(periodic_), pa(pa_),
+     z(height), u_coeff_gf(nullptr), diff_coeff(nullptr)
 {
    const real_t rel_tol = 1e-8;
 
    M_bf = new ParBilinearForm(&fespace);
-   if (pa)
-   {
-      M_bf->SetAssemblyLevel(AssemblyLevel::PARTIAL);
-   }
+   if (pa) M_bf->SetAssemblyLevel(AssemblyLevel::PARTIAL);
    M_bf->AddDomainIntegrator(new MassIntegrator());
    M_bf->Assemble();
    if (pa)
@@ -397,7 +323,6 @@ DGConductionOperator::DGConductionOperator(ParFiniteElementSpace &f,
    M_solver.SetAbsTol(0.0);
    M_solver.SetMaxIter(100);
    M_solver.SetPrintLevel(0);
-
    if (pa)
    {
       M_prec = new OperatorJacobiSmoother(*M_bf, ess_tdof_list);
@@ -431,8 +356,7 @@ DGConductionOperator::DGConductionOperator(ParFiniteElementSpace &f,
 
 void DGConductionOperator::Mult(const Vector &u, Vector &du_dt) const
 {
-   K->Mult(u, z);
-   z.Neg();
+   K->Mult(u, z); z.Neg();
    M_solver.Mult(z, du_dt);
 }
 
@@ -447,8 +371,7 @@ void DGConductionOperator::ImplicitSolve(const real_t dt, const Vector &u, Vecto
       T_solver.SetOperator(*T);
    }
    MFEM_VERIFY(dt == current_dt, "dt changed");
-   K->Mult(u, z);
-   z.Neg();
+   K->Mult(u, z); z.Neg();
    T_solver.Mult(z, k);
 }
 
@@ -464,16 +387,10 @@ void DGConductionOperator::SetParameters(const Vector &u)
    K.Clear();
    delete K_bf;
    K_bf = new ParBilinearForm(&fespace);
-   if (pa)
-   {
-      K_bf->SetAssemblyLevel(AssemblyLevel::PARTIAL);
-   }
+   if (pa) K_bf->SetAssemblyLevel(AssemblyLevel::PARTIAL);
    K_bf->AddDomainIntegrator(new DiffusionIntegrator(*diff_coeff));
    K_bf->AddInteriorFaceIntegrator(new DGDiffusionIntegrator(*diff_coeff, sigma, kappa_dg));
-   if (!periodic)
-   {
-      K_bf->AddBdrFaceIntegrator(new DGDiffusionIntegrator(*diff_coeff, sigma, kappa_dg));
-   }
+   if (!periodic) K_bf->AddBdrFaceIntegrator(new DGDiffusionIntegrator(*diff_coeff, sigma, kappa_dg));
    K_bf->Assemble();
    if (pa)
    {
@@ -487,25 +404,34 @@ void DGConductionOperator::SetParameters(const Vector &u)
    delete T; T = nullptr;
 }
 
-DGConductionOperator::~DGConductionOperator()
-{
-   delete M_bf;
-   delete K_bf;
-   delete T;
+DGConductionOperator::~DGConductionOperator() 
+{ 
+   delete M_bf; delete K_bf; delete T; 
    delete M_prec;
-   delete diff_coeff;
-   delete u_coeff_gf;
+   delete diff_coeff; delete u_coeff_gf;
 }
 
 real_t InitialTemperature(const Vector &x)
 {
-   real_t r2 = 0.0;
-   real_t length = bb_max(0) - bb_min(0);
-   real_t sigma_gauss = 0.15 * length;
+   Vector center(x.Size());
+   real_t min_box_span = std::numeric_limits<real_t>::max();
+
    for (int i = 0; i < x.Size(); i++)
    {
-      real_t mid = (bb_min(i) + bb_max(i)) * 0.5 + 0.2;
-      r2 += (x(i) - mid) * (x(i) - mid);
+      center(i) = 0.5 * (bb_min(i) + bb_max(i));
+      min_box_span = std::min(min_box_span, bb_max(i) - bb_min(i));
    }
-   return 1.0 + exp(-r2 / (2.0 * sigma_gauss * sigma_gauss));
+
+   // For a unit box this gives a centered sphere (circle in 2D) of radius 0.2.
+   const real_t radius = 0.2 * min_box_span;
+   const real_t radius2 = radius * radius;
+
+   real_t r2 = 0.0;
+   for (int i = 0; i < x.Size(); i++)
+   {
+      const real_t dx = x(i) - center(i);
+      r2 += dx * dx;
+   }
+
+   return (r2 <= radius2) ? 2.0 : 1.0;
 }
