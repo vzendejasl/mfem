@@ -4,7 +4,7 @@
 //
 // Sample runs:
 //   mpirun -np 4 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -p -s 4 -dt 1e-4 -tf 0.001 -no-vis
-//   mpirun -np 4 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -s 2 -dt 1e-4 -tf 0.2 -visit -rs 1 -p --alpha 0.0 --kappa 0.2 
+//   mpirun -np 4 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -s 2 -dt 1e-4 -tf 0.2 -visit -rs 1 -p --alpha 0.0 --kappa 0.2 -pa
 #include "mfem.hpp"
 #include <fstream>
 #include <iostream>
@@ -18,17 +18,20 @@ class DGConductionOperator : public TimeDependentOperator
 {
 protected:
    ParFiniteElementSpace &fespace;
-   ParBilinearForm *M;
-   ParBilinearForm *K;
-   HypreParMatrix Mmat, Kmat;
+   Array<int> ess_tdof_list;
+   ParBilinearForm *M_bf;
+   ParBilinearForm *K_bf;
+   OperatorHandle M, K;
    HypreParMatrix *T;
    real_t current_dt;
+
    CGSolver M_solver;
-   HypreSmoother M_prec;
+   Solver *M_prec;
    CGSolver T_solver;
-   HypreSmoother T_prec;
+   Solver *T_prec;
+
    real_t alpha, kappa, sigma, kappa_dg;
-   bool periodic;
+   bool periodic, pa;
    mutable Vector z;
 
    ParGridFunction *u_coeff_gf;
@@ -37,7 +40,7 @@ protected:
 public:
    DGConductionOperator(ParFiniteElementSpace &f, real_t alpha_, real_t kappa_,
                         real_t sigma_ = -1.0, real_t kappa_dg_ = -1.0, 
-                        bool periodic_ = false, const Vector &u = Vector());
+                        bool periodic_ = false, bool pa_ = false, const Vector &u = Vector());
    void Mult(const Vector &u, Vector &du_dt) const override;
    void ImplicitSolve(const real_t dt, const Vector &u, Vector &k) override;
    void SetParameters(const Vector &u);
@@ -66,6 +69,7 @@ int main(int argc, char *argv[])
    bool use_inline_mesh = false;
    bool periodic = false;
    bool structured_mesh = false;
+   bool pa = false;
    bool visit = false;
    int vis_steps = 10;
    int nx = 8, ny = 8, nz = 1;
@@ -83,6 +87,7 @@ int main(int argc, char *argv[])
    args.AddOption(&t_final, "-tf", "--t-final", "Final time.");
    args.AddOption(&use_inline_mesh, "-inline", "--inline-mesh", "-no-inline", "--no-inline-mesh", "Inline mesh.");
    args.AddOption(&periodic, "-p", "--periodic", "-no-p", "--no-periodic", "Periodic.");
+   args.AddOption(&pa, "-pa", "--partial-assembly", "-no-pa", "--no-partial-assembly", "Partial assembly.");
    args.AddOption(&structured_mesh, "-structured", "--structured-mesh", "-no-structured", "--no-structured-mesh", "Structured.");
    args.AddOption(&nx, "-nx", "--nx", "nx.");
    args.AddOption(&ny, "-ny", "--ny", "ny.");
@@ -142,7 +147,7 @@ int main(int argc, char *argv[])
    Vector u; u_gf.GetTrueDofs(u);
 
    real_t kappa_dg = (order + 1) * (order + 1);
-   DGConductionOperator oper(fespace, alpha, kappa, -1.0, kappa_dg, periodic, u);
+   DGConductionOperator oper(fespace, alpha, kappa, -1.0, kappa_dg, periodic, pa, u);
 
    ODESolver *ode_solver = nullptr;
    switch (ode_solver_type) {
@@ -245,22 +250,39 @@ int main(int argc, char *argv[])
    return 0;
 }
 
-DGConductionOperator::DGConductionOperator(ParFiniteElementSpace &f, real_t alpha_, real_t kappa_, real_t sigma_, real_t kappa_dg_, bool periodic_, const Vector &u)
-   : TimeDependentOperator(f.GetTrueVSize(), 0.0), fespace(f), M(nullptr), K(nullptr), T(nullptr), current_dt(0.0), M_solver(f.GetComm()), T_solver(f.GetComm()), alpha(alpha_), kappa(kappa_), sigma(sigma_), kappa_dg(kappa_dg_), periodic(periodic_), z(height), u_coeff_gf(nullptr), diff_coeff(nullptr)
+DGConductionOperator::DGConductionOperator(ParFiniteElementSpace &f, real_t alpha_, real_t kappa_, real_t sigma_, real_t kappa_dg_, bool periodic_, bool pa_, const Vector &u)
+   : TimeDependentOperator(f.GetTrueVSize(), 0.0), fespace(f), M_bf(nullptr), K_bf(nullptr), T(nullptr), current_dt(0.0), M_solver(f.GetComm()), M_prec(nullptr), T_solver(f.GetComm()), T_prec(nullptr), alpha(alpha_), kappa(kappa_), sigma(sigma_), kappa_dg(kappa_dg_), periodic(periodic_), pa(pa_), z(height), u_coeff_gf(nullptr), diff_coeff(nullptr)
 {
-   M = new ParBilinearForm(&fespace);
-   M->AddDomainIntegrator(new MassIntegrator());
-   M->Assemble(); M->Finalize();
-   M->FormSystemMatrix(Array<int>(), Mmat);
+   M_bf = new ParBilinearForm(&fespace);
+   if (pa) M_bf->SetAssemblyLevel(AssemblyLevel::PARTIAL);
+   M_bf->AddDomainIntegrator(new MassIntegrator());
+   M_bf->Assemble();
+   if (pa)
+   {
+      M.Reset(M_bf, false);
+   }
+   else
+   {
+      M_bf->Finalize();
+      M.Reset(M_bf->ParallelAssemble(), true);
+   }
 
-   M_solver.SetOperator(Mmat);
+   M_solver.SetOperator(*M);
    M_solver.SetRelTol(1e-8); M_solver.SetMaxIter(100); M_solver.SetPrintLevel(0);
-   M_prec.SetType(HypreSmoother::Jacobi);
-   M_prec.SetOperator(Mmat);
-   M_solver.SetPreconditioner(M_prec);
+   if (pa)
+   {
+      M_prec = new OperatorJacobiSmoother(*M_bf, ess_tdof_list);
+   }
+   else
+   {
+      HypreSmoother *h_prec = new HypreSmoother();
+      h_prec->SetType(HypreSmoother::Jacobi);
+      h_prec->SetOperator(*M.As<HypreParMatrix>());
+      M_prec = h_prec;
+   }
+   M_solver.SetPreconditioner(*M_prec);
 
    T_solver.SetRelTol(1e-8); T_solver.SetMaxIter(100); T_solver.SetPrintLevel(0);
-   T_solver.SetPreconditioner(T_prec);
 
    u_coeff_gf = new ParGridFunction(&fespace);
    diff_coeff = new GridFunctionCoefficient(u_coeff_gf);
@@ -270,20 +292,21 @@ DGConductionOperator::DGConductionOperator(ParFiniteElementSpace &f, real_t alph
 
 void DGConductionOperator::Mult(const Vector &u, Vector &du_dt) const
 {
-   Kmat.Mult(u, z); z.Neg();
+   K->Mult(u, z); z.Neg();
    M_solver.Mult(z, du_dt);
 }
 
 void DGConductionOperator::ImplicitSolve(const real_t dt, const Vector &u, Vector &k)
 {
+   if (pa) mfem_error("ImplicitSolve not supported with PA yet");
    if (!T)
    {
-      T = Add(1.0, Mmat, dt, Kmat);
+      T = Add(1.0, *M.As<HypreParMatrix>(), dt, *K.As<HypreParMatrix>());
       current_dt = dt;
       T_solver.SetOperator(*T);
    }
    MFEM_VERIFY(dt == current_dt, "dt changed");
-   Kmat.Mult(u, z); z.Neg();
+   K->Mult(u, z); z.Neg();
    T_solver.Mult(z, k);
 }
 
@@ -296,19 +319,30 @@ void DGConductionOperator::SetParameters(const Vector &u)
    }
    u_coeff_gf->ExchangeFaceNbrData();
 
-   delete K;
-   K = new ParBilinearForm(&fespace);
-   K->AddDomainIntegrator(new DiffusionIntegrator(*diff_coeff));
-   K->AddInteriorFaceIntegrator(new DGDiffusionIntegrator(*diff_coeff, sigma, kappa_dg));
-   if (!periodic) K->AddBdrFaceIntegrator(new DGDiffusionIntegrator(*diff_coeff, sigma, kappa_dg));
-   K->Assemble(); K->Finalize();
-   K->FormSystemMatrix(Array<int>(), Kmat);
+   K.Clear();
+   delete K_bf;
+   K_bf = new ParBilinearForm(&fespace);
+   if (pa) K_bf->SetAssemblyLevel(AssemblyLevel::PARTIAL);
+   K_bf->AddDomainIntegrator(new DiffusionIntegrator(*diff_coeff));
+   K_bf->AddInteriorFaceIntegrator(new DGDiffusionIntegrator(*diff_coeff, sigma, kappa_dg));
+   if (!periodic) K_bf->AddBdrFaceIntegrator(new DGDiffusionIntegrator(*diff_coeff, sigma, kappa_dg));
+   K_bf->Assemble();
+   if (pa)
+   {
+      K.Reset(K_bf, false);
+   }
+   else
+   {
+      K_bf->Finalize();
+      K.Reset(K_bf->ParallelAssemble(), true);
+   }
    delete T; T = nullptr;
 }
 
 DGConductionOperator::~DGConductionOperator() 
 { 
-   delete M; delete K; delete T; 
+   delete M_bf; delete K_bf; delete T; 
+   delete M_prec; delete T_prec;
    delete diff_coeff; delete u_coeff_gf;
 }
 
