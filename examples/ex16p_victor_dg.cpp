@@ -5,6 +5,7 @@
 // Sample runs:
 //   mpirun -np 4 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -p -s 4 -dt 1e-4 -tf 0.001 -no-vis
 //   mpirun -np 4 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -s 2 -dt 1e-4 -tf 0.2 -visit -rs 1 -p --alpha 0.0 --kappa 0.2 -pa
+//   mpirun -np 8 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -rs 1 -rp 1 -o 1 -s 2 -dt 1e-4 -tf 0.1 --alpha 0.0 --kappa 0.0056035 -pa -visit
 #include "mfem.hpp"
 #include <fstream>
 #include <iostream>
@@ -165,8 +166,27 @@ int main(int argc, char *argv[])
 
    for (int l = 0; l < par_ref_levels; l++) pmesh->UniformRefinement();
 
-   L2_FECollection fe_coll(order, pmesh->Dimension(), BasisType::GaussLobatto);
+   // L2_FECollection fe_coll(order, pmesh->Dimension(), BasisType::Positive);
+   // ParFiniteElementSpace fespace(pmesh, &fe_coll);
+
+   L2_FECollection fe_coll(order, pmesh->Dimension(), BasisType::Positive);
    ParFiniteElementSpace fespace(pmesh, &fe_coll);
+
+   // Laghos-style: non-positive L2 basis (default is GaussLegendre).
+   L2_FECollection fe_coll_np(order, pmesh->Dimension(), BasisType::GaussLegendre);
+   ParFiniteElementSpace fespace_np(pmesh, &fe_coll_np);
+
+   ParGridFunction u_gf(&fespace);
+   ParGridFunction u_np(&fespace_np);
+
+   FunctionCoefficient u_0(InitialTemperature);
+   u_np.ProjectCoefficient(u_0);
+   u_gf.ProjectGridFunction(u_np);
+   if (myid == 0)
+   {
+      cout << "u min/max: " << u_gf.Min() << " " << u_gf.Max() << endl;
+   }
+
 
    // Determine h_min for CFL calculation
    real_t h_min = 1e10;
@@ -178,9 +198,9 @@ int main(int argc, char *argv[])
    MPI_Allreduce(&h_min, &global_h_min, 1, MPITypeMap<real_t>::mpi_type,
                  MPI_MIN, pmesh->GetComm());
 
-   ParGridFunction u_gf(&fespace);
-   FunctionCoefficient u_0(InitialTemperature);
-   u_gf.ProjectCoefficient(u_0);
+   // ParGridFunction u_gf(&fespace);
+   // FunctionCoefficient u_0(InitialTemperature);
+   // u_gf.ProjectCoefficient(u_0);
    Vector u;
    u_gf.GetTrueDofs(u);
 
@@ -433,5 +453,5 @@ real_t InitialTemperature(const Vector &x)
       r2 += dx * dx;
    }
 
-   return (r2 <= radius2) ? 2.0 : 1.0;
+   return (r2 <= radius2) ? 2.0 : 0.0;
 }

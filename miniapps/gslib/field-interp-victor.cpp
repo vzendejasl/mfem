@@ -6,6 +6,7 @@
 #include <fstream>
 #include <vector>
 #include <array>
+#include <iomanip>
 
 // =============================================================
 // Problem setup
@@ -440,6 +441,7 @@ int main(int argc, char *argv[])
    args.AddOption(&nx, "-n", "--num_el", "Elements per direction.");
    args.AddOption(&order, "-o", "--order", "Polynomial order.");
    args.AddOption(&ref_levels, "-r", "--refine", "Target mesh refinements.");
+   args.AddOption(&g_amp, "-amp", "--amplitude", "Mesh perturbation amplitude.");
    args.AddOption(&src_fieldtype, "-fts", "--field-type-src", "0-H1, 1-L2, 2-RT, 3-ND.");
    args.AddOption(&src_ncomp, "-nc", "--ncomp", "Components for H1/L2.");
    args.AddOption(&src_gf_ordering, "-gfo", "--gfo", "GridFunction ordering: 0(byNodes), 1(byVDim).");
@@ -585,6 +587,25 @@ int main(int argc, char *argv[])
    mfem::VectorFunctionCoefficient F(src_vdim, vector_func);
    func_source.ProjectCoefficient(F);
 
+   double source_norm = 0.0;
+   {
+      if (func_source.VectorDim() == 1)
+      {
+         mfem::ConstantCoefficient zero(0.0);
+         source_norm = func_source.ComputeL2Error(zero);
+      }
+      else
+      {
+         mfem::Vector zero_v(func_source.VectorDim()); zero_v = 0.0;
+         mfem::VectorConstantCoefficient zero_c(zero_v);
+         source_norm = func_source.ComputeL2Error(zero_c);
+      }
+      if (myid == 0)
+      {
+         std::cout << "Source L2 norm: " << source_norm << std::endl;
+      }
+   }
+
    // Create desired solution for comparison
    mfem::ParFiniteElementSpace des_fes(&mesh_2, src_fec, src_ncomp, src_gf_ordering);
    mfem::ParGridFunction func_desired(&des_fes);
@@ -593,6 +614,25 @@ int main(int argc, char *argv[])
    // ---------------- Interpolate using modular function ----------------
    mfem::ParGridFunction *func_target = InterpolateFieldPeriodic(
       mesh_1, func_source, mesh_2, fieldtype, order, Lx, Ly, Lz);
+
+   double target_norm = 0.0;
+   {
+      if (func_target->VectorDim() == 1)
+      {
+         mfem::ConstantCoefficient zero(0.0);
+         target_norm = func_target->ComputeL2Error(zero);
+      }
+      else
+      {
+         mfem::Vector zero_v(func_target->VectorDim()); zero_v = 0.0;
+         mfem::VectorConstantCoefficient zero_c(zero_v);
+         target_norm = func_target->ComputeL2Error(zero_c);
+      }
+      if (myid == 0)
+      {
+         std::cout << "Target L2 norm: " << target_norm << std::endl;
+      }
+   }
 
    // ---------------- Visualization ----------------
    if (visualization)
@@ -655,6 +695,31 @@ int main(int argc, char *argv[])
       std::ofstream ofs("interpolated.gf");
       ofs.precision(8);
       func_target->Save(ofs);
+
+      // Save results to CSV
+      const char *csv_name = "simulation_results.csv";
+      bool exists = std::ifstream(csv_name).good();
+      std::ofstream csv(csv_name, std::ios::app);
+      if (!exists)
+      {
+         csv << std::setw(24) << "nx" << ","
+             << std::setw(24) << "order" << ","
+             << std::setw(24) << "ref_levels" << ","
+             << std::setw(24) << "src_fieldtype" << ","
+             << std::setw(24) << "ncomp" << ","
+             << std::setw(24) << "amplitude" << ","
+             << std::setw(24) << "source_norm" << ","
+             << std::setw(24) << "target_norm" << "\n";
+      }
+      csv << std::scientific << std::setprecision(16)
+          << std::setw(24) << (double)nx << ","
+          << std::setw(24) << (double)order << ","
+          << std::setw(24) << (double)ref_levels << ","
+          << std::setw(24) << (double)src_fieldtype << ","
+          << std::setw(24) << (double)src_ncomp << ","
+          << std::setw(24) << g_amp << ","
+          << std::setw(24) << source_norm << ","
+          << std::setw(24) << target_norm << "\n";
    }
 
    // ---------------- Cleanup ----------------

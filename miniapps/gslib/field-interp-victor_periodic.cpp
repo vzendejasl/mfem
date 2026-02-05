@@ -1,7 +1,8 @@
 // Copyright (c) 2010-2025,
 // Lawrence Livermore National Security, LLC. LLNL-CODE-806117.
 // See LICENSE and NOTICE for details.
-
+// Examples to run
+// mpirun -np 8 ./field-interp-victor -n 32 -o 2 -nc 3 -ft -1 -fts 1
 #include "mfem.hpp"
 #include <fstream>
 #include <vector>
@@ -400,45 +401,6 @@ if (!missing.empty()) {
     }
 }
 
-
-   // Final brute-force - SAME AS ORIGINAL
-   if (!missing.empty()) {
-      vector<array<double,3>> offsets = {
-         {Lx,0,0}, {-Lx,0,0}, {0,Ly,0}, {0,-Ly,0}, {0,0,Lz}, {0,0,-Lz},
-         {Lx,Ly,0}, {Lx,-Ly,0}, {-Lx,Ly,0}, {-Lx,-Ly,0},
-         {Lx,0,Lz}, {Lx,0,-Lz}, {-Lx,0,Lz}, {-Lx,0,-Lz},
-         {0,Ly,Lz}, {0,Ly,-Lz}, {0,-Ly,Lz}, {0,-Ly,-Lz},
-         {Lx,Ly,Lz}, {Lx,Ly,-Lz}, {Lx,-Ly,Lz}, {Lx,-Ly,-Lz},
-         {-Lx,Ly,Lz}, {-Lx,Ly,-Lz}, {-Lx,-Ly,Lz}, {-Lx,-Ly,-Lz}
-      };
-
-      for (const auto &offset : offsets) {
-         if (missing.empty()) break;
-         Vector sub_coords;
-         BuildSubsetCoordsByNodes(vxyz_bn, dim, missing, sub_coords);
-         const int subN = missing.size();
-
-         for (int k = 0; k < subN; ++k) sub_coords[k] += offset[0];
-         if (dim > 1) for (int k = 0; k < subN; ++k) sub_coords[subN + k] += offset[1];
-         if (dim > 2) for (int k = 0; k < subN; ++k) sub_coords[2 * subN + k] += offset[2];
-
-         Vector sub_vals(subN * tar_ncomp);
-         finder.Interpolate(sub_coords, *func_source, sub_vals, Ordering::byNODES);
-         const Array<unsigned int> &sub_codes = finder.GetCode();
-
-         vector<int> still_missing;
-         for (int i = 0; i < subN; ++i) {
-            if (sub_codes[i] != 2) {
-               for (int d = 0; d < tar_ncomp; ++d) {
-                  interp_vals[d * nodes_cnt + missing[i]] = sub_vals[d * subN + i];
-               }
-            } else {
-               still_missing.push_back(missing[i]);
-            }
-         }
-         missing = still_missing;
-      }
-   }
 
    // Project to target space - SAME AS ORIGINAL
    if (fieldtype <= 1) {
