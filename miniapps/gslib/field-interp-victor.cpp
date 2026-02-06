@@ -588,6 +588,8 @@ int main(int argc, char *argv[])
    func_source.ProjectCoefficient(F);
 
    double source_norm = 0.0;
+   double source_mass = 0.0;
+   double source_ke   = 0.0;
    {
       if (func_source.VectorDim() == 1)
       {
@@ -600,9 +602,23 @@ int main(int argc, char *argv[])
          mfem::VectorConstantCoefficient zero_c(zero_v);
          source_norm = func_source.ComputeL2Error(zero_c);
       }
+      source_ke = 0.5 * source_norm * source_norm;
+
+      // Calculate Mass: Integral of the field components
+      mfem::ConstantCoefficient one(1.0);
+      mfem::ParLinearForm lf(&src_fes);
+      lf.AddDomainIntegrator(new mfem::DomainLFIntegrator(one));
+      lf.Assemble();
+      source_mass = lf(func_source);
+      double global_mass = 0.0;
+      MPI_Allreduce(&source_mass, &global_mass, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      source_mass = global_mass;
+
       if (myid == 0)
       {
          std::cout << "Source L2 norm: " << source_norm << std::endl;
+         std::cout << "Source Mass:    " << source_mass << std::endl;
+         std::cout << "Source KE:      " << source_ke << std::endl;
       }
    }
 
@@ -616,6 +632,8 @@ int main(int argc, char *argv[])
       mesh_1, func_source, mesh_2, fieldtype, order, Lx, Ly, Lz);
 
    double target_norm = 0.0;
+   double target_mass = 0.0;
+   double target_ke   = 0.0;
    {
       if (func_target->VectorDim() == 1)
       {
@@ -628,10 +646,31 @@ int main(int argc, char *argv[])
          mfem::VectorConstantCoefficient zero_c(zero_v);
          target_norm = func_target->ComputeL2Error(zero_c);
       }
+      target_ke = 0.5 * target_norm * target_norm;
+
+      // Calculate Mass
+      mfem::ConstantCoefficient one(1.0);
+      mfem::ParLinearForm lf(func_target->ParFESpace());
+      lf.AddDomainIntegrator(new mfem::DomainLFIntegrator(one));
+      lf.Assemble();
+      target_mass = lf(*func_target);
+      double global_mass = 0.0;
+      MPI_Allreduce(&target_mass, &global_mass, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      target_mass = global_mass;
+
       if (myid == 0)
       {
          std::cout << "Target L2 norm: " << target_norm << std::endl;
+         std::cout << "Target Mass:    " << target_mass << std::endl;
+         std::cout << "Target KE:      " << target_ke << std::endl;
       }
+   }
+
+   // Calculate L2 error vs desired
+   double l2_error = func_target->ComputeL2Error(F);
+   if (myid == 0)
+   {
+      std::cout << "L2 Error vs Exact: " << l2_error << std::endl;
    }
 
    // ---------------- Visualization ----------------
@@ -709,7 +748,12 @@ int main(int argc, char *argv[])
              << std::setw(24) << "ncomp" << ","
              << std::setw(24) << "amplitude" << ","
              << std::setw(24) << "source_norm" << ","
-             << std::setw(24) << "target_norm" << "\n";
+             << std::setw(24) << "target_norm" << ","
+             << std::setw(24) << "source_mass" << ","
+             << std::setw(24) << "target_mass" << ","
+             << std::setw(24) << "source_ke" << ","
+             << std::setw(24) << "target_ke" << ","
+             << std::setw(24) << "l2_error" << "\n";
       }
       csv << std::scientific << std::setprecision(16)
           << std::setw(24) << (double)nx << ","
@@ -719,7 +763,12 @@ int main(int argc, char *argv[])
           << std::setw(24) << (double)src_ncomp << ","
           << std::setw(24) << g_amp << ","
           << std::setw(24) << source_norm << ","
-          << std::setw(24) << target_norm << "\n";
+          << std::setw(24) << target_norm << ","
+          << std::setw(24) << source_mass << ","
+          << std::setw(24) << target_mass << ","
+          << std::setw(24) << source_ke << ","
+          << std::setw(24) << target_ke << ","
+          << std::setw(24) << l2_error << "\n";
    }
 
    // ---------------- Cleanup ----------------
