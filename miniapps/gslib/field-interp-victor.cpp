@@ -720,6 +720,13 @@ int main(int argc, char *argv[])
    // ---------------- Output ----------------
    if (visit_output)
    {
+      mfem::VisItDataCollection dc_src("SourceMesh", &mesh_1);
+      dc_src.SetPrecision(8);
+      dc_src.RegisterField("u_source", &func_source);
+      dc_src.SetCycle(0);
+      dc_src.SetTime(0.0);
+      dc_src.Save();
+
       mfem::VisItDataCollection dc("TargetMesh", &mesh_2);
       dc.SetPrecision(8);
       dc.RegisterField("u_interp", func_target);
