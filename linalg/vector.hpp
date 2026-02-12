@@ -129,7 +129,8 @@ public:
    /// Create a vector using a braced initializer list
    template <typename CT, typename std::enable_if<
                 std::is_convertible<CT,real_t>::value,bool>::type = true>
-   explicit Vector(std::initializer_list<CT> values) : Vector(values.size())
+   explicit Vector(std::initializer_list<CT> values) :
+      Vector(static_cast<int> (values.size()))
    { std::copy(values.begin(), values.end(), begin()); }
 
    /// Enable execution of Vector operations using the mfem::Device.
@@ -170,6 +171,13 @@ public:
 
    /// Resize the vector to size @a s using the MemoryType of @a v.
    void SetSize(int s, const Vector &v) { SetSize(s, v.GetMemory().GetMemoryType()); }
+
+   /// Update \ref Capacity() to @a res (if less than current), keeping existing entries.
+   void Reserve(int res);
+
+   /// Delete entries at @a indices and resize vector accordingly.
+   /// @warning Indices must be unique!
+   void DeleteAt(const Array<int> &indices);
 
    /// Set the Vector data.
    /// @warning This method should be called only when OwnsData() is false.
@@ -360,7 +368,14 @@ public:
    /// (*this)(i) = 1.0 / (*this)(i)
    void Reciprocal();
 
+   /// (*this)(i) = abs((*this)(i))
+   void Abs();
+
+   /// (*this)(i) = pow((*this)(i), p)
+   void Pow(const real_t p);
+
    /// Swap the contents of two Vectors
+   /** Implemented without using move assignment, avoiding Destroy() calls. */
    inline void Swap(Vector &other);
 
    /// Set v = v1 + v2.
@@ -615,6 +630,18 @@ inline void Vector::SetSize(int s, MemoryType mt)
    data.UseDevice(use_dev);
 }
 
+inline void Vector::Reserve(int res)
+{
+   if (res > Capacity())
+   {
+      Memory<real_t> p(res, data.GetMemoryType());
+      p.CopyFrom(data, size);
+      p.UseDevice(data.UseDevice());
+      data.Delete();
+      data = p;
+   }
+}
+
 inline void Vector::NewMemoryAndSize(const Memory<real_t> &mem, int s,
                                      bool own_mem)
 {
@@ -646,9 +673,8 @@ inline void Vector::MakeRef(Vector &base, int offset)
 inline void Vector::Destroy()
 {
    const bool use_dev = data.UseDevice();
-   data.Delete();
+   data.Delete();  // calls data.Reset(h_mt) as well
    size = 0;
-   data.Reset();
    data.UseDevice(use_dev);
 }
 
@@ -674,8 +700,9 @@ inline void Vector::Swap(Vector &other)
    mfem::Swap(size, other.size);
 }
 
-/// Specialization of the template function Swap<> for class Vector
-template<> inline void Swap<Vector>(Vector &a, Vector &b)
+/** @brief Swap of Vector objects for use with standard library algorithms.
+    Also, used by mfem::Swap(). */
+inline void swap(Vector &a, Vector &b)
 {
    a.Swap(b);
 }
