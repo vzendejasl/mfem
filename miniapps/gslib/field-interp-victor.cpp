@@ -668,9 +668,13 @@ int main(int argc, char *argv[])
 
    // Calculate L2 error vs desired
    double l2_error = func_target->ComputeL2Error(F);
+   const double ke_abs_err = std::abs(target_ke - source_ke);
+   const double ke_rel_err = (source_ke != 0.0) ? (ke_abs_err / std::abs(source_ke)) : 0.0;
    if (myid == 0)
    {
       std::cout << "L2 Error vs Exact: " << l2_error << std::endl;
+      std::cout << "KE Abs Error:      " << ke_abs_err << std::endl;
+      std::cout << "KE Rel Error:      " << ke_rel_err << std::endl;
    }
 
    // ---------------- Visualization ----------------
