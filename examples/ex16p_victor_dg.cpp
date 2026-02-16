@@ -6,9 +6,11 @@
 //   mpirun -np 4 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -p -s 4 -dt 1e-4 -tf 0.001 -no-vis
 //   mpirun -np 4 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -s 2 -dt 1e-4 -tf 0.2 -visit -rs 1 -p --alpha 0.0 --kappa 0.2 -pa
 //   mpirun -np 8 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -rs 1 -rp 1 -o 1 -s 2 -dt 1e-4 -tf 0.1 --alpha 0.0 --kappa 0.0056035 -pa -visit
+//   mpirun -np 8 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -rs 1 -rp 1 -o 1 -s 2 -dt 1e-4 -tf 0.1 --alpha 0.0 --kappa 0.0056035 -pa -visit
 #include "mfem.hpp"
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 #include <vector>
 #include <cmath>
 #include <limits>
@@ -52,6 +54,73 @@ public:
 
 Vector bb_min, bb_max;
 real_t InitialTemperature(const Vector &x);
+
+// Compute the L2 integral of a scalar field squared: integral(f^2 dV)
+// Uses proper quadrature integration over the domain
+double ComputeL2FieldSquared(ParFiniteElementSpace &fes, const Vector &field_tdofs)
+{
+   ParMesh *pmesh = fes.GetParMesh();
+   const int dim = pmesh->Dimension();
+   const int order = fes.GetOrder(0);
+
+   // Use quadrature rule with sufficient accuracy for L2 norm
+   const int ir_order = 2 * order + 2;
+
+   ParGridFunction field_gf(&fes);
+   field_gf.SetFromTrueDofs(field_tdofs);
+
+   double local_integral = 0.0;
+
+   for (int e = 0; e < fes.GetNE(); e++)
+   {
+      ElementTransformation *Tr = fes.GetElementTransformation(e);
+      const IntegrationRule &ir = IntRules.Get(fes.GetFE(e)->GetGeomType(), ir_order);
+
+      for (int q = 0; q < ir.GetNPoints(); q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         Tr->SetIntPoint(&ip);
+
+         double f_val = field_gf.GetValue(*Tr, ip);
+         double w = ip.weight * Tr->Weight();
+
+         local_integral += f_val * f_val * w;
+      }
+   }
+
+   double global_integral;
+   MPI_Allreduce(&local_integral, &global_integral, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+   return global_integral;
+}
+
+// Compute the domain volume
+double ComputeDomainVolume(ParFiniteElementSpace &fes)
+{
+   ParMesh *pmesh = fes.GetParMesh();
+   const int order = fes.GetOrder(0);
+   const int ir_order = 2 * order;
+
+   double local_vol = 0.0;
+
+   for (int e = 0; e < fes.GetNE(); e++)
+   {
+      ElementTransformation *Tr = fes.GetElementTransformation(e);
+      const IntegrationRule &ir = IntRules.Get(fes.GetFE(e)->GetGeomType(), ir_order);
+
+      for (int q = 0; q < ir.GetNPoints(); q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         Tr->SetIntPoint(&ip);
+         local_vol += ip.weight * Tr->Weight();
+      }
+   }
+
+   double global_vol;
+   MPI_Allreduce(&local_vol, &global_vol, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+   return global_vol;
+}
 
 int main(int argc, char *argv[])
 {
@@ -216,6 +285,23 @@ int main(int argc, char *argv[])
    VisItDataCollection visit_dc("DataVisit/heat_conduction_example16_dg", pmesh);
    visit_dc.RegisterField("temperature", &u_gf);
 
+   // Open CSV file for diagnostics output
+   std::ofstream csv_file;
+   const int csv_width = 26;  // Column width for alignment
+   if (myid == 0)
+   {
+      csv_file.open("output.csv");
+      csv_file << std::scientific << std::setprecision(16) << std::right;
+      csv_file << std::setw(csv_width) << "Cycle" << ","
+               << std::setw(csv_width) << "Time" << ","
+               << std::setw(csv_width) << "dt" << ","
+               << std::setw(csv_width) << "L2Energy" << ","
+               << std::setw(csv_width) << "RHS_RMS" << endl;
+   }
+
+   // Vector for storing RHS
+   Vector rhs(u.Size());
+
    // Linear form for computing the integral of the solution (total heat)
    ParLinearForm LF(&fespace);
    ConstantCoefficient one(1.0);
@@ -232,10 +318,40 @@ int main(int argc, char *argv[])
    double integral_init;
    MPI_Allreduce(&loc_integral, &integral_init, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
 
+   // Compute domain volume for RMS calculations
+   double domain_volume = ComputeDomainVolume(fespace);
    if (myid == 0)
    {
-      cout << "Initial L2 energy: " << energy_init << endl;
-      cout << "Initial total integral: " << integral_init << endl;
+      cout << "Domain volume: " << domain_volume << endl;
+   }
+
+   // Compute initial RHS RMS using proper L2 quadrature integration
+   // RMS = sqrt( integral(f^2 dV) / Volume )
+   oper.Mult(u, rhs);
+   double rhs_l2_sq_init = ComputeL2FieldSquared(fespace, rhs);
+   double rhs_rms_init = sqrt(rhs_l2_sq_init / domain_volume);
+
+   if (myid == 0)
+   {
+      cout << "step 0, t = 0"
+           << ", energy = " << energy_init
+           << ", integral = " << integral_init
+           << ", rhs_rms = " << rhs_rms_init << endl;
+
+      // Write initial state to CSV (cycle 0)
+      csv_file << std::setw(csv_width) << 0 << ","
+               << std::setw(csv_width) << 0.0 << ","
+               << std::setw(csv_width) << dt << ","
+               << std::setw(csv_width) << energy_init << ","
+               << std::setw(csv_width) << rhs_rms_init << endl;
+   }
+
+   // Save initial state to VisIt (cycle 0, t=0)
+   if (visit)
+   {
+      visit_dc.SetCycle(0);
+      visit_dc.SetTime(0.0);
+      visit_dc.Save();
    }
 
    const int output_steps = std::max(vis_steps, 1);
@@ -272,12 +388,25 @@ int main(int argc, char *argv[])
          // p_factor accounts for the clustering of DOFs in high-order DG
          real_t suggested_dt = (global_h_min * global_h_min) / (kappa_max * p_factor);
 
+         // Compute RHS and its RMS using proper L2 quadrature integration
+         oper.Mult(u, rhs);
+         double rhs_l2_sq = ComputeL2FieldSquared(fespace, rhs);
+         double rhs_rms = sqrt(rhs_l2_sq / domain_volume);
+
          if (myid == 0)
          {
-            cout << "step " << ti << ", t = " << t 
-                 << ", energy = " << energy 
-                 << ", integral = " << integral 
+            cout << "step " << ti << ", t = " << t
+                 << ", energy = " << energy
+                 << ", integral = " << integral
+                 << ", rhs_rms = " << rhs_rms
                  << ", suggested dt = " << suggested_dt << endl;
+
+            // Write to CSV
+            csv_file << std::setw(csv_width) << ti << ","
+                     << std::setw(csv_width) << t << ","
+                     << std::setw(csv_width) << dt << ","
+                     << std::setw(csv_width) << energy << ","
+                     << std::setw(csv_width) << rhs_rms << endl;
          }
 
          if (visit)
@@ -306,6 +435,9 @@ int main(int argc, char *argv[])
       cout << "Energy change:     " << energy_final - energy_init << endl;
       cout << "Final integral:    " << integral_final << " (should be conserved for periodic BC)" << endl;
       cout << "Integral change:   " << integral_final - integral_init << endl;
+
+      csv_file.close();
+      cout << "Diagnostics written to output.csv" << endl;
    }
 
    delete pmesh;
