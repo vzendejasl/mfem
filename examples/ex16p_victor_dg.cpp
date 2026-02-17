@@ -7,6 +7,9 @@
 //   mpirun -np 4 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -s 2 -dt 1e-4 -tf 0.2 -visit -rs 1 -p --alpha 0.0 --kappa 0.2 -pa
 //   mpirun -np 8 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -rs 1 -rp 1 -o 1 -s 2 -dt 1e-4 -tf 0.1 --alpha 0.0 --kappa 0.0056035 -pa -visit
 //   mpirun -np 8 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -rs 1 -rp 1 -o 1 -s 2 -dt 1e-4 -tf 0.1 --alpha 0.0 --kappa 0.0056035 -pa -visit
+//   mpirun -np 4 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -rs 2   -s 2 -dt 1e-4 -tf 0.2 --kappa 7.845666208755404e-4 -o 1 -pa -a 0.0 -visit 
+// With mesh perturbation (time-dependent mesh oscillation):
+//   mpirun -np 4 ./ex16p_victor_dg -inline -structured -nx 4 -ny 4 -nz 4 -s 2 -dt 1e-4 -tf 0.1 --kappa 0.1 -mamp 0.02 -momega 20.0 -visit
 #include "mfem.hpp"
 #include <fstream>
 #include <iostream>
@@ -54,6 +57,66 @@ public:
 
 Vector bb_min, bb_max;
 real_t InitialTemperature(const Vector &x);
+
+// Mesh perturbation: apply a time-dependent sinusoidal displacement to mesh nodes
+// Nodes oscillate radially from the center: x_new = x_orig + A*sin(ω*t)*r_hat
+// where r_hat is the unit radial direction from the center
+void ApplyMeshPerturbation(ParMesh *pmesh, const Vector &orig_nodes,
+                           real_t amp, real_t omega, real_t t)
+{
+   const int dim = pmesh->Dimension();
+   Vector *mesh_nodes = pmesh->GetNodes();
+   if (!mesh_nodes) return;  // Linear mesh without nodes GridFunction
+
+   const int num_nodes = mesh_nodes->Size() / dim;
+
+   Vector center(dim);
+   for (int d = 0; d < dim; d++)
+   {
+      center(d) = 0.5 * (bb_min(d) + bb_max(d));
+   }
+
+   real_t temporal = amp * sin(omega * t);
+
+   for (int i = 0; i < num_nodes; i++)
+   {
+      // Get original position
+      Vector x_orig(dim), x_new(dim);
+      for (int d = 0; d < dim; d++)
+      {
+         x_orig(d) = orig_nodes(i * dim + d);
+      }
+
+      // Compute radial direction from center
+      Vector r_vec(dim);
+      real_t r_mag = 0.0;
+      for (int d = 0; d < dim; d++)
+      {
+         r_vec(d) = x_orig(d) - center(d);
+         r_mag += r_vec(d) * r_vec(d);
+      }
+      r_mag = sqrt(r_mag);
+
+      // Apply displacement (avoid division by zero at center)
+      if (r_mag > 1e-12)
+      {
+         for (int d = 0; d < dim; d++)
+         {
+            (*mesh_nodes)(i * dim + d) = x_orig(d) + temporal * (r_vec(d) / r_mag);
+         }
+      }
+      else
+      {
+         for (int d = 0; d < dim; d++)
+         {
+            (*mesh_nodes)(i * dim + d) = x_orig(d);
+         }
+      }
+   }
+
+   // Exchange face neighbor node data for parallel consistency
+   pmesh->ExchangeFaceNbrNodes();
+}
 
 // Compute the L2 integral of a scalar field squared: integral(f^2 dV)
 // Uses proper quadrature integration over the domain
@@ -146,6 +209,8 @@ int main(int argc, char *argv[])
    int vis_steps = 10;
    int nx = 8, ny = 8, nz = 1;
    real_t x1 = 0.0, x2 = 1.0, y1 = 0.0, y2 = 1.0, z1 = 0.0, z2 = 1.0;
+   real_t mesh_perturb_amp = 0.0;    // Mesh perturbation amplitude (0 = disabled)
+   real_t mesh_perturb_omega = 10.0; // Angular frequency for mesh perturbation
 
    OptionsParser args(argc, argv);
    args.AddOption(&mesh_file, "-m", "--mesh",
@@ -190,6 +255,10 @@ int main(int argc, char *argv[])
                   "Save data files for VisIt visualization.");
    args.AddOption(&vis_steps, "-vs", "--vis-steps",
                   "Save/print every n-th time step.");
+   args.AddOption(&mesh_perturb_amp, "-mamp", "--mesh-perturb-amp",
+                  "Amplitude of time-dependent mesh perturbation (0 = disabled).");
+   args.AddOption(&mesh_perturb_omega, "-momega", "--mesh-perturb-omega",
+                  "Angular frequency for mesh perturbation.");
    args.Parse();
    if (!args.Good())
    {
@@ -234,6 +303,25 @@ int main(int argc, char *argv[])
    delete mesh;
 
    for (int l = 0; l < par_ref_levels; l++) pmesh->UniformRefinement();
+
+   // Set mesh curvature to ensure nodes exist (needed for mesh perturbation)
+   // Using order 2 geometry for smooth deformations
+   if (mesh_perturb_amp != 0.0)
+   {
+      pmesh->SetCurvature(std::max(2, order));
+   }
+
+   // Store original mesh nodes for perturbation
+   Vector orig_mesh_nodes;
+   if (mesh_perturb_amp != 0.0 && pmesh->GetNodes())
+   {
+      orig_mesh_nodes = *pmesh->GetNodes();
+      if (myid == 0)
+      {
+         cout << "Mesh perturbation enabled: amp = " << mesh_perturb_amp
+              << ", omega = " << mesh_perturb_omega << endl;
+      }
+   }
 
    // L2_FECollection fe_coll(order, pmesh->Dimension(), BasisType::Positive);
    // ParFiniteElementSpace fespace(pmesh, &fe_coll);
@@ -282,7 +370,7 @@ int main(int argc, char *argv[])
    ode_solver->Init(oper);
    real_t t = 0.0;
 
-   VisItDataCollection visit_dc("DataVisit/heat_conduction_example16_dg", pmesh);
+   VisItDataCollection visit_dc("DataVisit/heat_conduction_DG", pmesh);
    visit_dc.RegisterField("temperature", &u_gf);
 
    // Open CSV file for diagnostics output
@@ -290,7 +378,7 @@ int main(int argc, char *argv[])
    const int csv_width = 26;  // Column width for alignment
    if (myid == 0)
    {
-      csv_file.open("output.csv");
+      csv_file.open("output_dg.csv");
       csv_file << std::scientific << std::setprecision(16) << std::right;
       csv_file << std::setw(csv_width) << "Cycle" << ","
                << std::setw(csv_width) << "Time" << ","
@@ -365,18 +453,45 @@ int main(int argc, char *argv[])
          last_step = true;
       }
 
+      // Apply time-dependent mesh perturbation before each step
+      if (mesh_perturb_amp != 0.0 && orig_mesh_nodes.Size() > 0)
+      {
+         ApplyMeshPerturbation(pmesh, orig_mesh_nodes, mesh_perturb_amp,
+                               mesh_perturb_omega, t + dt);
+         // Rebuild operators after mesh change
+         oper.SetParameters(u);
+      }
+
       ode_solver->Step(u, t, dt);
+
+      // Compute diagnostics every time step for CSV output
+      u_gf.SetFromTrueDofs(u);
+      loc_energy = u_gf * u_gf;
+      double energy;
+      MPI_Allreduce(&loc_energy, &energy, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+      loc_integral = LF(u_gf);
+      double integral;
+      MPI_Allreduce(&loc_integral, &integral, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+      // Compute RHS and its RMS using proper L2 quadrature integration
+      oper.Mult(u, rhs);
+      double rhs_l2_sq = ComputeL2FieldSquared(fespace, rhs);
+      double rhs_rms = sqrt(rhs_l2_sq / domain_volume);
+
+      // Write to CSV every time step
+      if (myid == 0)
+      {
+         csv_file << std::setw(csv_width) << ti << ","
+                  << std::setw(csv_width) << t << ","
+                  << std::setw(csv_width) << dt << ","
+                  << std::setw(csv_width) << energy << ","
+                  << std::setw(csv_width) << rhs_rms << endl;
+      }
+
+      // Console and VisIt output at vis_steps intervals
       if (last_step || (ti % output_steps) == 0)
       {
-         u_gf.SetFromTrueDofs(u);
-         loc_energy = u_gf * u_gf;
-         double energy;
-         MPI_Allreduce(&loc_energy, &energy, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
-
-         loc_integral = LF(u_gf);
-         double integral;
-         MPI_Allreduce(&loc_integral, &integral, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
-
          // Compute Suggested dt for explicit DG diffusion
          // Heuristic: dt < h^2 / (kappa * (p+1)^4)
          real_t u_max = u.Max();
@@ -388,11 +503,6 @@ int main(int argc, char *argv[])
          // p_factor accounts for the clustering of DOFs in high-order DG
          real_t suggested_dt = (global_h_min * global_h_min) / (kappa_max * p_factor);
 
-         // Compute RHS and its RMS using proper L2 quadrature integration
-         oper.Mult(u, rhs);
-         double rhs_l2_sq = ComputeL2FieldSquared(fespace, rhs);
-         double rhs_rms = sqrt(rhs_l2_sq / domain_volume);
-
          if (myid == 0)
          {
             cout << "step " << ti << ", t = " << t
@@ -400,13 +510,6 @@ int main(int argc, char *argv[])
                  << ", integral = " << integral
                  << ", rhs_rms = " << rhs_rms
                  << ", suggested dt = " << suggested_dt << endl;
-
-            // Write to CSV
-            csv_file << std::setw(csv_width) << ti << ","
-                     << std::setw(csv_width) << t << ","
-                     << std::setw(csv_width) << dt << ","
-                     << std::setw(csv_width) << energy << ","
-                     << std::setw(csv_width) << rhs_rms << endl;
          }
 
          if (visit)
@@ -437,7 +540,7 @@ int main(int argc, char *argv[])
       cout << "Integral change:   " << integral_final - integral_init << endl;
 
       csv_file.close();
-      cout << "Diagnostics written to output.csv" << endl;
+      cout << "Diagnostics written to output_dg.csv" << endl;
    }
 
    delete pmesh;
