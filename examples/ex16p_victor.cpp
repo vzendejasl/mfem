@@ -61,27 +61,30 @@ protected:
    ParFiniteElementSpace &fespace;
    Array<int> ess_tdof_list; // this list remains empty for pure Neumann b.c.
 
-   ParBilinearForm *M;
-   ParBilinearForm *K;
+   ParBilinearForm *M_bf;
+   ParBilinearForm *K_bf;
+   OperatorHandle M, K;  // Operators (can hold BilinearForm for PA or HypreParMatrix)
 
-   HypreParMatrix Mmat;
-   HypreParMatrix Kmat;
-   HypreParMatrix *T; // T = M + dt K
+   HypreParMatrix *T; // T = M + dt K (only used for non-PA implicit solves)
    real_t current_dt;
 
    CGSolver M_solver;    // Krylov solver for inverting the mass matrix M
-   HypreSmoother M_prec; // Preconditioner for the mass matrix M
+   Solver *M_prec;       // Preconditioner for the mass matrix M
 
    CGSolver T_solver;    // Implicit solver for T = M + dt K
    HypreSmoother T_prec; // Preconditioner for the implicit solver
 
    real_t alpha, kappa;
+   bool pa;  // Partial assembly flag
 
    mutable Vector z; // auxiliary vector
 
+   ParGridFunction *u_coeff_gf;    // For storing diffusion coefficient
+   GridFunctionCoefficient *diff_coeff;
+
 public:
    ConductionOperator(ParFiniteElementSpace &f, real_t alpha, real_t kappa,
-                      const Vector &u);
+                      bool pa, const Vector &u);
 
    void Mult(const Vector &u, Vector &du_dt) const override;
    /** Solve the Backward-Euler equation: k = f(u + dt*k, t), for the unknown k.
@@ -249,6 +252,7 @@ int main(int argc, char *argv[])
    bool visit = false;
    int vis_steps = 5;
    bool adios2 = false;
+   bool pa = false;  // Partial assembly
 
    // Mesh generation options
    bool use_inline_mesh = false;
@@ -316,6 +320,9 @@ int main(int argc, char *argv[])
                   "Amplitude of time-dependent mesh perturbation (0 = disabled).");
    args.AddOption(&mesh_perturb_omega, "-momega", "--mesh-perturb-omega",
                   "Angular frequency for mesh perturbation.");
+   args.AddOption(&pa, "-pa", "--partial-assembly", "-no-pa",
+                  "--no-partial-assembly",
+                  "Enable or disable partial assembly.");
 
    args.Parse();
    if (!args.Good())
@@ -480,7 +487,7 @@ int main(int argc, char *argv[])
    u_gf.GetTrueDofs(u);
 
    // 9. Initialize the conduction operator and the VisIt visualization.
-   ConductionOperator oper(fespace, alpha, kappa, u);
+   ConductionOperator oper(fespace, alpha, kappa, pa, u);
 
    u_gf.SetFromTrueDofs(u);
    {
@@ -751,26 +758,40 @@ int main(int argc, char *argv[])
 }
 
 ConductionOperator::ConductionOperator(ParFiniteElementSpace &f, real_t al,
-                                       real_t kap, const Vector &u)
+                                       real_t kap, bool pa_, const Vector &u)
    : TimeDependentOperator(f.GetTrueVSize(), (real_t) 0.0), fespace(f),
-     M(NULL), K(NULL), T(NULL), current_dt(0.0),
-     M_solver(f.GetComm()), T_solver(f.GetComm()), z(height)
+     M_bf(nullptr), K_bf(nullptr), T(nullptr), current_dt(0.0),
+     M_solver(f.GetComm()), M_prec(nullptr), T_solver(f.GetComm()),
+     pa(pa_), z(height), u_coeff_gf(nullptr), diff_coeff(nullptr)
 {
    const real_t rel_tol = 1e-8;
 
-   M = new ParBilinearForm(&fespace);
-   M->AddDomainIntegrator(new MassIntegrator());
-   M->Assemble(0); // keep sparsity pattern of M and K the same
-   M->FormSystemMatrix(ess_tdof_list, Mmat);
+   M_bf = new ParBilinearForm(&fespace);
+   if (pa) M_bf->SetAssemblyLevel(AssemblyLevel::PARTIAL);
+   M_bf->AddDomainIntegrator(new MassIntegrator());
+   M_bf->Assemble();
+   // Use FormSystemMatrix to get operator that works with true DOFs
+   M.SetType(pa ? Operator::ANY_TYPE : Operator::Hypre_ParCSR);
+   M_bf->FormSystemMatrix(ess_tdof_list, M);
 
    M_solver.iterative_mode = false;
    M_solver.SetRelTol(rel_tol);
    M_solver.SetAbsTol(0.0);
    M_solver.SetMaxIter(100);
    M_solver.SetPrintLevel(0);
-   M_prec.SetType(HypreSmoother::Jacobi);
-   M_solver.SetPreconditioner(M_prec);
-   M_solver.SetOperator(Mmat);
+   if (pa)
+   {
+      M_prec = new OperatorJacobiSmoother(*M_bf, ess_tdof_list);
+   }
+   else
+   {
+      HypreSmoother *h_prec = new HypreSmoother();
+      h_prec->SetType(HypreSmoother::Jacobi);
+      h_prec->SetOperator(*M.As<HypreParMatrix>());
+      M_prec = h_prec;
+   }
+   M_solver.SetPreconditioner(*M_prec);
+   M_solver.SetOperator(*M);
 
    alpha = al;
    kappa = kap;
@@ -780,7 +801,14 @@ ConductionOperator::ConductionOperator(ParFiniteElementSpace &f, real_t al,
    T_solver.SetAbsTol(0.0);
    T_solver.SetMaxIter(100);
    T_solver.SetPrintLevel(0);
-   T_solver.SetPreconditioner(T_prec);
+   T_prec.SetType(HypreSmoother::Jacobi);
+   if (!pa)
+   {
+      T_solver.SetPreconditioner(T_prec);
+   }
+
+   u_coeff_gf = new ParGridFunction(&fespace);
+   diff_coeff = new GridFunctionCoefficient(u_coeff_gf);
 
    SetParameters(u);
 }
@@ -790,7 +818,7 @@ void ConductionOperator::Mult(const Vector &u, Vector &du_dt) const
    // Compute:
    //    du_dt = M^{-1}*-Ku
    // for du_dt, where K is linearized by using u from the previous timestep
-   Kmat.Mult(u, z);
+   K->Mult(u, z);
    z.Neg(); // z = -z
    M_solver.Mult(z, du_dt);
 }
@@ -801,44 +829,50 @@ void ConductionOperator::ImplicitSolve(const real_t dt,
    // Solve the equation:
    //    du_dt = M^{-1}*[-K(u + dt*du_dt)]
    // for du_dt, where K is linearized by using u from the previous timestep
+   if (pa) mfem_error("ImplicitSolve not supported with PA yet");
    if (!T)
    {
-      T = Add(1.0, Mmat, dt, Kmat);
+      T = Add(1.0, *M.As<HypreParMatrix>(), dt, *K.As<HypreParMatrix>());
       current_dt = dt;
+      T_prec.SetOperator(*T);
       T_solver.SetOperator(*T);
    }
    MFEM_VERIFY(dt == current_dt, ""); // SDIRK methods use the same dt
-   Kmat.Mult(u, z);
+   K->Mult(u, z);
    z.Neg();
    T_solver.Mult(z, du_dt);
 }
 
 void ConductionOperator::SetParameters(const Vector &u)
 {
-   ParGridFunction u_alpha_gf(&fespace);
-   u_alpha_gf.SetFromTrueDofs(u);
-   for (int i = 0; i < u_alpha_gf.Size(); i++)
+   u_coeff_gf->SetFromTrueDofs(u);
+   for (int i = 0; i < u_coeff_gf->Size(); i++)
    {
-      u_alpha_gf(i) = kappa + alpha*u_alpha_gf(i);
+      (*u_coeff_gf)(i) = kappa + alpha * (*u_coeff_gf)(i);
    }
 
-   delete K;
-   K = new ParBilinearForm(&fespace);
+   K.Clear();
+   delete K_bf;
+   K_bf = new ParBilinearForm(&fespace);
+   if (pa) K_bf->SetAssemblyLevel(AssemblyLevel::PARTIAL);
+   K_bf->AddDomainIntegrator(new DiffusionIntegrator(*diff_coeff));
+   K_bf->Assemble();
+   // Use FormSystemMatrix to get operator that works with true DOFs
+   K.SetType(pa ? Operator::ANY_TYPE : Operator::Hypre_ParCSR);
+   K_bf->FormSystemMatrix(ess_tdof_list, K);
 
-   GridFunctionCoefficient u_coeff(&u_alpha_gf);
-
-   K->AddDomainIntegrator(new DiffusionIntegrator(u_coeff));
-   K->Assemble(0); // keep sparsity pattern of M and K the same
-   K->FormSystemMatrix(ess_tdof_list, Kmat);
    delete T;
-   T = NULL; // re-compute T on the next ImplicitSolve
+   T = nullptr; // re-compute T on the next ImplicitSolve
 }
 
 ConductionOperator::~ConductionOperator()
 {
    delete T;
-   delete M;
-   delete K;
+   delete M_bf;
+   delete K_bf;
+   delete M_prec;
+   delete u_coeff_gf;
+   delete diff_coeff;
 }
 
 real_t InitialTemperature(const Vector &x)
