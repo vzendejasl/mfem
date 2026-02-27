@@ -36,8 +36,11 @@
 #include "mfem.hpp"
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 #include <vector>
 #include <cmath>
+#include <limits>
+#include <memory>
 
 using namespace std;
 using namespace mfem;
@@ -96,6 +99,132 @@ Vector bb_min, bb_max;
 
 real_t InitialTemperature(const Vector &x);
 
+// Mesh perturbation: apply a time-dependent sinusoidal displacement to mesh nodes
+// Nodes oscillate radially from the center: x_new = x_orig + A*sin(ω*t)*r_hat
+// where r_hat is the unit radial direction from the center
+void ApplyMeshPerturbation(ParMesh *pmesh, const Vector &orig_nodes,
+                           real_t amp, real_t omega, real_t t)
+{
+   const int dim = pmesh->Dimension();
+   Vector *mesh_nodes = pmesh->GetNodes();
+   if (!mesh_nodes) return;  // Linear mesh without nodes GridFunction
+
+   const int num_nodes = mesh_nodes->Size() / dim;
+
+   Vector center(dim);
+   for (int d = 0; d < dim; d++)
+   {
+      center(d) = 0.5 * (bb_min(d) + bb_max(d));
+   }
+
+   real_t temporal = amp * sin(omega * t);
+
+   for (int i = 0; i < num_nodes; i++)
+   {
+      // Get original position
+      Vector x_orig(dim);
+      for (int d = 0; d < dim; d++)
+      {
+         x_orig(d) = orig_nodes(i * dim + d);
+      }
+
+      // Compute radial direction from center
+      Vector r_vec(dim);
+      real_t r_mag = 0.0;
+      for (int d = 0; d < dim; d++)
+      {
+         r_vec(d) = x_orig(d) - center(d);
+         r_mag += r_vec(d) * r_vec(d);
+      }
+      r_mag = sqrt(r_mag);
+
+      // Apply displacement (avoid division by zero at center)
+      if (r_mag > 1e-12)
+      {
+         for (int d = 0; d < dim; d++)
+         {
+            (*mesh_nodes)(i * dim + d) = x_orig(d) + temporal * (r_vec(d) / r_mag);
+         }
+      }
+      else
+      {
+         for (int d = 0; d < dim; d++)
+         {
+            (*mesh_nodes)(i * dim + d) = x_orig(d);
+         }
+      }
+   }
+
+   // Exchange face neighbor node data for parallel consistency
+   pmesh->ExchangeFaceNbrNodes();
+}
+
+// Compute the L2 integral of a scalar field squared: integral(f^2 dV)
+// Uses proper quadrature integration over the domain
+double ComputeL2FieldSquared(ParFiniteElementSpace &fes, const Vector &field_tdofs)
+{
+   ParMesh *pmesh = fes.GetParMesh();
+   const int order = fes.GetOrder(0);
+
+   // Use quadrature rule with sufficient accuracy for L2 norm
+   const int ir_order = 2 * order + 2;
+
+   ParGridFunction field_gf(&fes);
+   field_gf.SetFromTrueDofs(field_tdofs);
+
+   double local_integral = 0.0;
+
+   for (int e = 0; e < fes.GetNE(); e++)
+   {
+      ElementTransformation *Tr = fes.GetElementTransformation(e);
+      const IntegrationRule &ir = IntRules.Get(fes.GetFE(e)->GetGeomType(), ir_order);
+
+      for (int q = 0; q < ir.GetNPoints(); q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         Tr->SetIntPoint(&ip);
+
+         double f_val = field_gf.GetValue(*Tr, ip);
+         double w = ip.weight * Tr->Weight();
+
+         local_integral += f_val * f_val * w;
+      }
+   }
+
+   double global_integral;
+   MPI_Allreduce(&local_integral, &global_integral, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+   return global_integral;
+}
+
+// Compute the domain volume
+double ComputeDomainVolume(ParFiniteElementSpace &fes)
+{
+   ParMesh *pmesh = fes.GetParMesh();
+   const int order = fes.GetOrder(0);
+   const int ir_order = 2 * order;
+
+   double local_vol = 0.0;
+
+   for (int e = 0; e < fes.GetNE(); e++)
+   {
+      ElementTransformation *Tr = fes.GetElementTransformation(e);
+      const IntegrationRule &ir = IntRules.Get(fes.GetFE(e)->GetGeomType(), ir_order);
+
+      for (int q = 0; q < ir.GetNPoints(); q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         Tr->SetIntPoint(&ip);
+         local_vol += ip.weight * Tr->Weight();
+      }
+   }
+
+   double global_vol;
+   MPI_Allreduce(&local_vol, &global_vol, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+   return global_vol;
+}
+
 int main(int argc, char *argv[])
 {
    // 1. Initialize MPI and HYPRE.
@@ -131,6 +260,8 @@ int main(int argc, char *argv[])
    real_t x1 = 0.0, x2 = 1.0;
    real_t y1 = 0.0, y2 = 1.0;
    real_t z1 = 0.0, z2 = 1.0;
+   real_t mesh_perturb_amp = 0.0;    // Mesh perturbation amplitude (0 = disabled)
+   real_t mesh_perturb_omega = 10.0; // Angular frequency for mesh perturbation
 
    int precision = 8;
    cout.precision(precision);
@@ -181,6 +312,10 @@ int main(int argc, char *argv[])
    args.AddOption(&y2, "-y2", "--y-max", "Max y coordinate.");
    args.AddOption(&z1, "-z1", "--z-min", "Min z coordinate.");
    args.AddOption(&z2, "-z2", "--z-max", "Max z coordinate.");
+   args.AddOption(&mesh_perturb_amp, "-mamp", "--mesh-perturb-amp",
+                  "Amplitude of time-dependent mesh perturbation (0 = disabled).");
+   args.AddOption(&mesh_perturb_omega, "-momega", "--mesh-perturb-omega",
+                  "Angular frequency for mesh perturbation.");
 
    args.Parse();
    if (!args.Good())
@@ -306,6 +441,24 @@ int main(int argc, char *argv[])
       pmesh->UniformRefinement();
    }
 
+   // Set mesh curvature to ensure nodes exist (needed for mesh perturbation)
+   if (mesh_perturb_amp != 0.0)
+   {
+      pmesh->SetCurvature(std::max(2, order));
+   }
+
+   // Store original mesh nodes for perturbation
+   Vector orig_mesh_nodes;
+   if (mesh_perturb_amp != 0.0 && pmesh->GetNodes())
+   {
+      orig_mesh_nodes = *pmesh->GetNodes();
+      if (myid == 0)
+      {
+         cout << "Mesh perturbation enabled: amp = " << mesh_perturb_amp
+              << ", omega = " << mesh_perturb_omega << endl;
+      }
+   }
+
    // 7. Define the vector finite element space representing the current and the
    //    initial temperature, u_ref.
    H1_FECollection fe_coll(order, dim);
@@ -332,8 +485,8 @@ int main(int argc, char *argv[])
    u_gf.SetFromTrueDofs(u);
    {
       ostringstream mesh_name, sol_name;
-      mesh_name << "ex16-mesh." << setfill('0') << setw(6) << myid;
-      sol_name << "ex16-init." << setfill('0') << setw(6) << myid;
+      mesh_name << "ex16_cg-mesh." << setfill('0') << setw(6) << myid;
+      sol_name << "ex16_cg-init." << setfill('0') << setw(6) << myid;
       ofstream omesh(mesh_name.str().c_str());
       omesh.precision(precision);
       pmesh->Print(omesh);
@@ -342,7 +495,7 @@ int main(int argc, char *argv[])
       u_gf.Save(osol);
    }
 
-   VisItDataCollection visit_dc("DataVisit/heat_conduction_example16", pmesh);
+   VisItDataCollection visit_dc("DataVisit/heat_conduction_CG", pmesh);
    visit_dc.RegisterField("temperature", &u_gf);
    if (visit)
    {
@@ -406,6 +559,67 @@ int main(int argc, char *argv[])
       }
    }
 
+   // Open CSV file for diagnostics output
+   std::ofstream csv_file;
+   const int csv_width = 26;  // Column width for alignment
+   if (myid == 0)
+   {
+      csv_file.open("output_cg.csv");
+      csv_file << std::scientific << std::setprecision(16) << std::right;
+      csv_file << std::setw(csv_width) << "Cycle" << ","
+               << std::setw(csv_width) << "Time" << ","
+               << std::setw(csv_width) << "dt" << ","
+               << std::setw(csv_width) << "L2Energy" << ","
+               << std::setw(csv_width) << "RHS_RMS" << endl;
+   }
+
+   // Vector for storing RHS
+   Vector rhs(u.Size());
+
+   // Linear form for computing the integral of the solution (total heat)
+   ParLinearForm LF(&fespace);
+   ConstantCoefficient one(1.0);
+   LF.AddDomainIntegrator(new DomainLFIntegrator(one));
+   LF.Assemble();
+
+   // Compute initial energy and integral
+   u_gf.SetFromTrueDofs(u);
+   double loc_energy = u_gf * u_gf;
+   double energy_init;
+   MPI_Allreduce(&loc_energy, &energy_init, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+   double loc_integral = LF(u_gf);
+   double integral_init;
+   MPI_Allreduce(&loc_integral, &integral_init, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+   // Compute domain volume for RMS calculations
+   double domain_volume = ComputeDomainVolume(fespace);
+   if (myid == 0)
+   {
+      cout << "Domain volume: " << domain_volume << endl;
+   }
+
+   // Compute initial RHS RMS using proper L2 quadrature integration
+   // RMS = sqrt( integral(f^2 dV) / Volume )
+   oper.Mult(u, rhs);
+   double rhs_l2_sq_init = ComputeL2FieldSquared(fespace, rhs);
+   double rhs_rms_init = sqrt(rhs_l2_sq_init / domain_volume);
+
+   if (myid == 0)
+   {
+      cout << "step 0, t = 0"
+           << ", energy = " << energy_init
+           << ", integral = " << integral_init
+           << ", rhs_rms = " << rhs_rms_init << endl;
+
+      // Write initial state to CSV (cycle 0)
+      csv_file << std::setw(csv_width) << 0 << ","
+               << std::setw(csv_width) << 0.0 << ","
+               << std::setw(csv_width) << dt << ","
+               << std::setw(csv_width) << energy_init << ","
+               << std::setw(csv_width) << rhs_rms_init << endl;
+   }
+
    // 10. Perform time-integration (looping over the time iterations, ti, with a
    //     time-step dt).
    ode_solver->Init(oper);
@@ -419,16 +633,53 @@ int main(int argc, char *argv[])
          last_step = true;
       }
 
+      // Apply time-dependent mesh perturbation before each step
+      if (mesh_perturb_amp != 0.0 && orig_mesh_nodes.Size() > 0)
+      {
+         ApplyMeshPerturbation(pmesh, orig_mesh_nodes, mesh_perturb_amp,
+                               mesh_perturb_omega, t + dt);
+         // Rebuild operators after mesh change
+         oper.SetParameters(u);
+      }
+
       ode_solver->Step(u, t, dt);
 
+      // Compute diagnostics every time step for CSV output
+      u_gf.SetFromTrueDofs(u);
+      loc_energy = u_gf * u_gf;
+      double energy;
+      MPI_Allreduce(&loc_energy, &energy, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+      loc_integral = LF(u_gf);
+      double integral;
+      MPI_Allreduce(&loc_integral, &integral, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+      // Compute RHS and its RMS using proper L2 quadrature integration
+      oper.Mult(u, rhs);
+      double rhs_l2_sq = ComputeL2FieldSquared(fespace, rhs);
+      double rhs_rms = sqrt(rhs_l2_sq / domain_volume);
+
+      // Write to CSV every time step
+      if (myid == 0)
+      {
+         csv_file << std::setw(csv_width) << ti << ","
+                  << std::setw(csv_width) << t << ","
+                  << std::setw(csv_width) << dt << ","
+                  << std::setw(csv_width) << energy << ","
+                  << std::setw(csv_width) << rhs_rms << endl;
+      }
+
+      // Console and VisIt output at vis_steps intervals
       if (last_step || (ti % vis_steps) == 0)
       {
          if (myid == 0)
          {
-            cout << "step " << ti << ", t = " << t << endl;
+            cout << "step " << ti << ", t = " << t
+                 << ", energy = " << energy
+                 << ", integral = " << integral
+                 << ", rhs_rms = " << rhs_rms << endl;
          }
 
-         u_gf.SetFromTrueDofs(u);
          if (visualization)
          {
             sout << "parallel " << num_procs << " " << myid << "\n";
@@ -454,6 +705,28 @@ int main(int argc, char *argv[])
       oper.SetParameters(u);
    }
 
+   // Compute final diagnostics
+   u_gf.SetFromTrueDofs(u);
+   loc_energy = u_gf * u_gf;
+   double energy_final;
+   MPI_Allreduce(&loc_energy, &energy_final, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+   loc_integral = LF(u_gf);
+   double integral_final;
+   MPI_Allreduce(&loc_integral, &integral_final, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+
+   if (myid == 0)
+   {
+      cout << "\n=== Final Results ===" << endl;
+      cout << "Final L2 energy:   " << energy_final << " (should decrease)" << endl;
+      cout << "Energy change:     " << energy_final - energy_init << endl;
+      cout << "Final integral:    " << integral_final << " (should be conserved for periodic BC)" << endl;
+      cout << "Integral change:   " << integral_final - integral_init << endl;
+
+      csv_file.close();
+      cout << "Diagnostics written to output_cg.csv" << endl;
+   }
+
 #ifdef MFEM_USE_ADIOS2
    if (adios2)
    {
@@ -462,10 +735,10 @@ int main(int argc, char *argv[])
 #endif
 
    // 11. Save the final solution in parallel. This output can be viewed later
-   //     using GLVis: "glvis -np <np> -m ex16-mesh -g ex16-final".
+   //     using GLVis: "glvis -np <np> -m ex16_cg-mesh -g ex16_cg-final".
    {
       ostringstream sol_name;
-      sol_name << "ex16-final." << setfill('0') << setw(6) << myid;
+      sol_name << "ex16_cg-final." << setfill('0') << setw(6) << myid;
       ofstream osol(sol_name.str().c_str());
       osol.precision(precision);
       u_gf.Save(osol);
