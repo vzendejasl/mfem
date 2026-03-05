@@ -506,7 +506,7 @@ def print_table(headers, rows):
             widths[i] = max(widths[i], len(cell))
 
     def fmt(row):
-        return "| " + " | ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)) + " |"
+        return "| " + " | ".join(cell.rjust(widths[i]) for i, cell in enumerate(row)) + " |"
 
     sep = "+-" + "-+-".join("-" * w for w in widths) + "-+"
     print(sep)
@@ -521,31 +521,28 @@ def print_table(headers, rows):
 #  Step 5: Save / plot
 # ------------------------------------------------------------------ #
 def save_fg_csv(out_csv, fg, step_number, time_value):
-    n = len(fg["r"])
-    try:
-        step_numeric = int(step_number)
-    except (ValueError, TypeError):
-        step_numeric = -1
+    columns = [
+        ("r", fg["r"]),
+        ("f_norm", fg["f"]),
+        ("g_norm", fg["g"]),
+        ("f_raw_avg", fg["f_raw_avg"]),
+        ("g_raw_avg", fg["g_raw_avg"]),
+        ("f_x", fg["f_x"]),
+        ("f_y", fg["f_y"]),
+        ("f_z", fg["f_z"]),
+        ("f_x_norm", fg["f_x_norm"]),
+        ("f_y_norm", fg["f_y_norm"]),
+        ("f_z_norm", fg["f_z_norm"]),
+        ("g_x", fg["g_x"]),
+        ("g_y", fg["g_y"]),
+        ("g_z", fg["g_z"]),
+    ]
 
-    df = pd.DataFrame({
-        "step": np.full(n, step_numeric, dtype=np.int64),
-        "time": np.full(n, float(time_value), dtype=np.float64),
-        "r": fg["r"],
-        "f_norm": fg["f"],
-        "g_norm": fg["g"],
-        "f_raw_avg": fg["f_raw_avg"],
-        "g_raw_avg": fg["g_raw_avg"],
-        "f_x": fg["f_x"],
-        "f_y": fg["f_y"],
-        "f_z": fg["f_z"],
-        "f_x_norm": fg["f_x_norm"],
-        "f_y_norm": fg["f_y_norm"],
-        "f_z_norm": fg["f_z_norm"],
-        "g_x": fg["g_x"],
-        "g_y": fg["g_y"],
-        "g_z": fg["g_z"],
-    })
-    df.to_csv(out_csv, index=False, float_format="%.12e")
+    colw = 24
+    with open(out_csv, "w", encoding="utf-8") as f:
+        f.write(", ".join(name.rjust(colw) for name, _ in columns) + "\n")
+        for row in zip(*(arr for _, arr in columns)):
+            f.write(", ".join(f"{val:>{colw}.16e}" for val in row) + "\n")
 
 
 def plot_fg(fg, step_number, time_value, show=True):
