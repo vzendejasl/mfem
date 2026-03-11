@@ -9,9 +9,53 @@ ComputeSpectraCompressiveVorticalModes.py:
 2) chunked read (text or HDF5)
 3) coordinate-index map reconstruction onto a structured grid
 4) automatic periodic endpoint removal (last point in each direction)
+
+How to run:
+  1) MFEM sampled text file:
+     python3 python_scripts/ComputeFGFromVelocityFFT.py \
+       SamplePointsVelocity_Re400NumPtsPerDir8RefLv2P2/cycle_0/SampledData0.txt \
+       --header-lines 6
+
+  2) Dedalus stitched HDF5 file (tasks/u):
+     python3 python_scripts/ComputeFGFromVelocityFFT.py \
+       spectralDNS_tgv_incomp_Re400NumPtsPerDir128/tgv_out_Re400NumPtsPerDir128_fields/tgv_out_Re400NumPtsPerDir128_fields_s1.h5 \
+       --snapshot-index 0
+
+  3) Dedalus directory auto-detection:
+     python3 python_scripts/ComputeFGFromVelocityFFT.py \
+       spectralDNS_tgv_incomp_Re400NumPtsPerDir128 \
+       --snapshot-index 0
+
+  Snapshot index examples (Dedalus HDF5 only):
+    --snapshot-index 0   = first saved snapshot
+    --snapshot-index 5   = 6th saved snapshot
+    --snapshot-index -1  = last saved snapshot (default)
+    --snapshot-index -2  = second-to-last saved snapshot
+
+  4) Verification (Taylor-Green on [0,1)^3):
+     python3 python_scripts/ComputeFGFromVelocityFFT.py --verify --verify-n 32
+
+  5) Batch/headless mode:
+     python3 python_scripts/ComputeFGFromVelocityFFT.py <input_path> --no-plot
+
+  6) Spectra mode (diagonal tensor shells + derived E11/E(k) from R11):
+     python3 python_scripts/ComputeFGFromVelocityFFT.py <input_path> --plot-ek
+
+  7) Verification + spectra:
+     python3 python_scripts/ComputeFGFromVelocityFFT.py --verify --verify-n 32 --plot-ek
+
+  8) Cross-correlation spectra (off-diagonal Phi_ij):
+     python3 python_scripts/ComputeFGFromVelocityFFT.py <input_path> --plot-cross-spectrum
+     # plots 2D kx-ky fields (default kz~0 slice) + shell-binned summary
+
+Related script:
+  For FluidSF-style 3D structure functions (ASF_V, LL, LLL, LTT) on the same
+  MFEM/Dedalus inputs, use:
+    python3 python_scripts/ComputeStructureFunctions3D.py <input_path>
 """
 
 import argparse
+import glob
 import os
 import re
 
@@ -88,6 +132,195 @@ def read_data_file_header(filename, header_lines):
 
     print(f"  Step: {step_number}, Time: {time_value:.3e}")
     return step_number, time_value
+
+
+def resolve_dedalus_input_file(input_path):
+    """Resolve Dedalus input path (file or directory) to a concrete HDF5 file."""
+    if os.path.isfile(input_path):
+        return input_path
+    if not os.path.isdir(input_path):
+        raise FileNotFoundError(f"Input path not found: {input_path}")
+
+    patterns = [
+        os.path.join(input_path, "**", "*_fields_s*.h5"),
+        os.path.join(input_path, "**", "*.h5"),
+    ]
+    candidates = []
+    for pat in patterns:
+        for p in glob.glob(pat, recursive=True):
+            b = os.path.basename(p)
+            if "_p" in b:
+                continue
+            if "checkpoints" in p or "restart_history" in p:
+                continue
+            candidates.append(p)
+        if candidates:
+            break
+
+    if not candidates:
+        raise FileNotFoundError(f"No Dedalus-compatible .h5 files found in {input_path}")
+
+    def set_num(path):
+        m = re.search(r"_s(\d+)\.h5$", os.path.basename(path))
+        return int(m.group(1)) if m else -1
+
+    return sorted(candidates, key=set_num)[-1]
+
+
+def is_dedalus_velocity_h5(filename):
+    if not filename.endswith(".h5"):
+        return False
+    if not os.path.isfile(filename):
+        return False
+    try:
+        with h5py.File(filename, "r") as f:
+            return ("tasks" in f) and ("u" in f["tasks"])
+    except Exception:
+        return False
+
+
+def _read_time_cycle_from_dedalus(top_file, idx):
+    """Read step (cycle) and time metadata from Dedalus HDF5."""
+    with h5py.File(top_file, "r") as f:
+        time_val = 0.0
+        step_num = "unknown"
+        if "scales" in f and "sim_time" in f["scales"]:
+            sim_time = np.array(f["scales/sim_time"][:]).reshape(-1)
+            if sim_time.size:
+                time_val = float(sim_time[idx])
+        elif "tasks" in f and "sim_time" in f["tasks"]:
+            sim_time = np.array(f["tasks/sim_time"][:]).reshape(-1)
+            if sim_time.size:
+                time_val = float(sim_time[idx])
+
+        if "scales" in f and "iteration" in f["scales"]:
+            it = np.array(f["scales/iteration"][:]).reshape(-1)
+            if it.size:
+                step_num = str(int(it[idx]))
+        elif "tasks" in f and "cycle" in f["tasks"]:
+            cyc = np.array(f["tasks/cycle"][:]).reshape(-1)
+            if cyc.size:
+                step_num = str(int(cyc[idx]))
+
+    return step_num, time_val
+
+
+def _read_xyz_scales_from_dedalus(top_file, nx, ny, nz):
+    with h5py.File(top_file, "r") as f:
+        if "scales" in f:
+            s = f["scales"]
+            x_key = next((k for k in s.keys() if k.startswith("x_")), None)
+            y_key = next((k for k in s.keys() if k.startswith("y_")), None)
+            z_key = next((k for k in s.keys() if k.startswith("z_")), None)
+            if x_key and y_key and z_key:
+                x = np.array(s[x_key][:], dtype=np.float64)
+                y = np.array(s[y_key][:], dtype=np.float64)
+                z = np.array(s[z_key][:], dtype=np.float64)
+                if x.size == nx and y.size == ny and z.size == nz:
+                    return x, y, z
+
+    # Fallback: assume periodic [0,1)^3 grid.
+    x = np.linspace(0.0, 1.0, nx, endpoint=False, dtype=np.float64)
+    y = np.linspace(0.0, 1.0, ny, endpoint=False, dtype=np.float64)
+    z = np.linspace(0.0, 1.0, nz, endpoint=False, dtype=np.float64)
+    return x, y, z
+
+
+def _stitch_dedalus_shards(shard_file, task_name, idx):
+    """Stitch distributed Dedalus shard files (*_p*.h5) into a global array."""
+    base = os.path.basename(shard_file)
+    m = re.match(r"(.+)_p\d+\.h5$", base)
+    if not m:
+        raise ValueError(f"Not a shard filename: {shard_file}")
+    prefix = m.group(1)
+    shard_dir = os.path.dirname(shard_file)
+    shard_paths = sorted(
+        glob.glob(os.path.join(shard_dir, f"{prefix}_p*.h5")),
+        key=lambda p: int(re.search(r"_p(\d+)\.h5$", os.path.basename(p)).group(1))
+    )
+    if not shard_paths:
+        raise RuntimeError(f"No shard files found for {shard_file}")
+
+    global_shape = None
+    dtype = None
+    for p in shard_paths:
+        with h5py.File(p, "r") as f:
+            dset = f[f"tasks/{task_name}"]
+            if global_shape is None:
+                global_shape = tuple(int(v) for v in dset.attrs["global_shape"][-3:])
+                dtype = dset.dtype
+
+    nx, ny, nz = global_shape
+    arr = np.zeros((3, nx, ny, nz), dtype=dtype)
+
+    for p in shard_paths:
+        with h5py.File(p, "r") as f:
+            dset = f[f"tasks/{task_name}"]
+            chunk = np.array(dset[idx], dtype=np.float64)
+            start = np.array(dset.attrs["local_start"], dtype=int)
+            count = np.array(dset.attrs["local_shape"], dtype=int)
+            xs = slice(start[-3], start[-3] + count[-3])
+            ys = slice(start[-2], start[-2] + count[-2])
+            zs = slice(start[-1], start[-1] + count[-1])
+            arr[:, xs, ys, zs] = chunk
+
+    return arr
+
+
+def read_dedalus_velocity_h5(input_path, snapshot_index=-1, task_name="u"):
+    """
+    Read Dedalus-style velocity output:
+      tasks/u shape = (nt, 3, nx, ny, nz) (stitched) or distributed shards.
+    Returns the same tuple shape used by the rest of this script.
+    """
+    filename = resolve_dedalus_input_file(input_path)
+    print(f"Reading Dedalus velocity from: {filename}")
+
+    is_shard = re.search(r"_p\d+\.h5$", os.path.basename(filename)) is not None
+
+    with h5py.File(filename, "r") as f:
+        if "tasks" not in f or task_name not in f["tasks"]:
+            raise ValueError(f"Dedalus file missing tasks/{task_name}: {filename}")
+        dset = f[f"tasks/{task_name}"]
+        nt = int(dset.shape[0])
+
+    idx = snapshot_index if snapshot_index >= 0 else (nt + snapshot_index)
+    if idx < 0 or idx >= nt:
+        raise IndexError(f"snapshot-index {snapshot_index} is out of bounds for nt={nt}")
+
+    # If this is a shard file, stitch from all shard pieces.
+    if is_shard:
+        u_all = _stitch_dedalus_shards(filename, task_name, idx)
+        # Try to find the stitched/top-level file for metadata and scales.
+        shard_dir = os.path.dirname(filename)
+        set_name = re.sub(r"_p\d+\.h5$", "", os.path.basename(filename))
+        top_file = os.path.join(os.path.dirname(shard_dir), f"{set_name}.h5")
+        if not os.path.isfile(top_file):
+            top_file = filename
+    else:
+        with h5py.File(filename, "r") as f:
+            u_all = np.array(f[f"tasks/{task_name}"][idx], dtype=np.float64)
+        top_file = filename
+
+    if u_all.ndim != 4 or u_all.shape[0] != 3:
+        raise ValueError(f"Expected tasks/{task_name}[idx] shape (3,nx,ny,nz), got {u_all.shape}")
+
+    nx, ny, nz = u_all.shape[1], u_all.shape[2], u_all.shape[3]
+    x_coords, y_coords, z_coords = _read_xyz_scales_from_dedalus(top_file, nx, ny, nz)
+    dx = x_coords[1] - x_coords[0] if nx > 1 else 1.0
+    dy = y_coords[1] - y_coords[0] if ny > 1 else 1.0
+    dz = z_coords[1] - z_coords[0] if nz > 1 else 1.0
+
+    step_number, time_value = _read_time_cycle_from_dedalus(top_file, idx)
+    print(f"  Snapshot index: {idx}/{nt-1}")
+    print(f"  Step: {step_number}, Time: {time_value:.6e}")
+    print(f"  Grid dimensions: {nx} × {ny} × {nz}")
+    print(f"  Grid spacing: dx={dx:.8f}, dy={dy:.8f}, dz={dz:.8f}")
+
+    vx = u_all[0]
+    vy = u_all[1]
+    vz = u_all[2]
+    return vx, vy, vz, x_coords, y_coords, z_coords, dx, dy, dz, step_number, time_value
 
 
 def read_data_file_chunked(filename, chunk_size=5_000_000, skiprows=5, decimals=10):
@@ -224,15 +457,12 @@ def read_data_file_chunked(filename, chunk_size=5_000_000, skiprows=5, decimals=
 # ------------------------------------------------------------------ #
 def compute_tensor_correlations(vx, vy, vz):
     """Compute R_ij(r) from spectral tensor via Wiener-Khinchin."""
-    print("Step 1: Forward FFT of fluctuating velocity")
-    ux = vx - np.mean(vx)
-    uy = vy - np.mean(vy)
-    uz = vz - np.mean(vz)
-    n_tot = ux.size
+    print("Step 1: Forward FFT of velocity")
+    n_tot = vx.size
 
-    ux_k = fft.fftn(ux)
-    uy_k = fft.fftn(uy)
-    uz_k = fft.fftn(uz)
+    ux_k = fft.fftn(vx)
+    uy_k = fft.fftn(vy)
+    uz_k = fft.fftn(vz)
 
     print("Step 2: Spectral tensor Phi_ij(k) = u_i(k) u_j*(k)")
     phi = {
@@ -279,6 +509,193 @@ def compute_energy_spectrum_1d(ux_k, uy_k, uz_k, dx, dy, dz):
     E_k, edges = np.histogram(kmag.ravel(), bins=bins, weights=e_mode.ravel())
     k_center = 0.5 * (edges[:-1] + edges[1:])
     return k_center, E_k
+
+
+def compute_tensor_diagonal_spectrum_binned(ux_k, uy_k, uz_k):
+    """
+    Compute shell-binned diagonal spectral-tensor contributions using the
+    same integer-wavenumber binning style as ComputeSpectraCompressiveVorticalModes.py.
+
+    Returns shell-summed:
+      E11 = 0.5 * sum_shell |u_hat_x|^2
+      E22 = 0.5 * sum_shell |u_hat_y|^2
+      E33 = 0.5 * sum_shell |u_hat_z|^2
+      E_total = E11 + E22 + E33
+    with Fourier coefficients normalized by N = nx*ny*nz.
+    """
+    nx, ny, nz = ux_k.shape
+    n_tot = nx * ny * nz
+
+    ux_n = ux_k / n_tot
+    uy_n = uy_k / n_tot
+    uz_n = uz_k / n_tot
+
+    phi11 = np.abs(ux_n) ** 2
+    phi22 = np.abs(uy_n) ** 2
+    phi33 = np.abs(uz_n) ** 2
+
+    kx_int = np.fft.fftfreq(nx, 1.0 / nx).astype(int)
+    ky_int = np.fft.fftfreq(ny, 1.0 / ny).astype(int)
+    kz_int = np.fft.fftfreq(nz, 1.0 / nz).astype(int)
+    KX_int, KY_int, KZ_int = np.meshgrid(kx_int, ky_int, kz_int, indexing="ij")
+    kmag = np.sqrt(KX_int**2 + KY_int**2 + KZ_int**2)
+
+    from math import ceil
+    k_max_int = ceil(nx * 0.5 * np.sqrt(3.0))
+    k_bin_edges = np.linspace(0.5, k_max_int + 0.5, k_max_int + 1)
+    if nx * 0.5 * np.sqrt(3.0) < k_bin_edges[-2]:
+        k_bin_edges = k_bin_edges[:-1]
+    k_centers = 0.5 * (k_bin_edges[:-1] + k_bin_edges[1:])
+
+    k_flat = kmag.ravel()
+    E11 = np.histogram(k_flat, bins=k_bin_edges, weights=0.5 * phi11.ravel())[0]
+    E22 = np.histogram(k_flat, bins=k_bin_edges, weights=0.5 * phi22.ravel())[0]
+    E33 = np.histogram(k_flat, bins=k_bin_edges, weights=0.5 * phi33.ravel())[0]
+    E_total = E11 + E22 + E33
+    return k_centers, E11, E22, E33, E_total
+
+
+def compute_tensor_cross_spectrum_binned(ux_k, uy_k, uz_k):
+    """
+    Compute shell-binned off-diagonal spectral-tensor terms on the same
+    integer shell bins used for diagonal spectra.
+
+    Returns shell-summed real parts and magnitudes:
+      Re(Phi12), Re(Phi13), Re(Phi23), |Phi12|, |Phi13|, |Phi23|.
+    """
+    nx, ny, nz = ux_k.shape
+    n_tot = nx * ny * nz
+
+    ux_n = ux_k / n_tot
+    uy_n = uy_k / n_tot
+    uz_n = uz_k / n_tot
+
+    phi12 = ux_n * np.conj(uy_n)
+    phi13 = ux_n * np.conj(uz_n)
+    phi23 = uy_n * np.conj(uz_n)
+
+    kx_int = np.fft.fftfreq(nx, 1.0 / nx).astype(int)
+    ky_int = np.fft.fftfreq(ny, 1.0 / ny).astype(int)
+    kz_int = np.fft.fftfreq(nz, 1.0 / nz).astype(int)
+    KX_int, KY_int, KZ_int = np.meshgrid(kx_int, ky_int, kz_int, indexing="ij")
+    kmag = np.sqrt(KX_int**2 + KY_int**2 + KZ_int**2)
+
+    from math import ceil
+    k_max_int = ceil(nx * 0.5 * np.sqrt(3.0))
+    k_bin_edges = np.linspace(0.5, k_max_int + 0.5, k_max_int + 1)
+    if nx * 0.5 * np.sqrt(3.0) < k_bin_edges[-2]:
+        k_bin_edges = k_bin_edges[:-1]
+    k_centers = 0.5 * (k_bin_edges[:-1] + k_bin_edges[1:])
+
+    k_flat = kmag.ravel()
+    re12 = np.histogram(k_flat, bins=k_bin_edges, weights=np.real(phi12).ravel())[0]
+    re13 = np.histogram(k_flat, bins=k_bin_edges, weights=np.real(phi13).ravel())[0]
+    re23 = np.histogram(k_flat, bins=k_bin_edges, weights=np.real(phi23).ravel())[0]
+    ab12 = np.histogram(k_flat, bins=k_bin_edges, weights=np.abs(phi12).ravel())[0]
+    ab13 = np.histogram(k_flat, bins=k_bin_edges, weights=np.abs(phi13).ravel())[0]
+    ab23 = np.histogram(k_flat, bins=k_bin_edges, weights=np.abs(phi23).ravel())[0]
+    return k_centers, re12, re13, re23, ab12, ab13, ab23
+
+
+def compute_tensor_cross_spectrum_2d_slice(ux_k, uy_k, uz_k, dx, dy, dz, kz_index=None):
+    """
+    Compute 2D kx-ky fields of off-diagonal spectral tensor terms on a fixed kz slice.
+    Returns fftshifted kx, ky grids and slice fields for Phi12, Phi13, Phi23.
+    """
+    nx, ny, nz = ux_k.shape
+    n_tot = nx * ny * nz
+
+    ux_n = ux_k / n_tot
+    uy_n = uy_k / n_tot
+    uz_n = uz_k / n_tot
+
+    phi12 = ux_n * np.conj(uy_n)
+    phi13 = ux_n * np.conj(uz_n)
+    phi23 = uy_n * np.conj(uz_n)
+
+    kx = 2.0 * np.pi * fft.fftfreq(nx, d=dx)
+    ky = 2.0 * np.pi * fft.fftfreq(ny, d=dy)
+    kz = 2.0 * np.pi * fft.fftfreq(nz, d=dz)
+
+    if kz_index is None:
+        kz_index = int(np.argmin(np.abs(kz)))
+    else:
+        kz_index = int(kz_index) % nz
+
+    p12 = phi12[:, :, kz_index]
+    p13 = phi13[:, :, kz_index]
+    p23 = phi23[:, :, kz_index]
+
+    # Center the wavenumber origin in the 2D map.
+    kx_s = np.fft.fftshift(kx)
+    ky_s = np.fft.fftshift(ky)
+    p12_s = np.fft.fftshift(p12, axes=(0, 1))
+    p13_s = np.fft.fftshift(p13, axes=(0, 1))
+    p23_s = np.fft.fftshift(p23, axes=(0, 1))
+
+    return {
+        "kx": kx_s,
+        "ky": ky_s,
+        "kz_value": float(kz[kz_index]),
+        "kz_index": kz_index,
+        "phi12": p12_s,
+        "phi13": p13_s,
+        "phi23": p23_s,
+    }
+
+
+def compute_e11_from_r11_longitudinal(fg, k_shell, k0):
+    """
+    Compute E11(k1) from longitudinal correlation R11(r1):
+      E11(k1) = (2/pi) <u1^2> int f(r1) cos(k1 r1) dr1
+              = (2/pi) int R11(r1) cos(k1 r1) dr1
+    where f(r1) = R11(r1)/R11(0).
+    """
+    r = np.asarray(fg["r"], dtype=np.float64)
+    r11 = np.asarray(fg["f_x"], dtype=np.float64)
+    if r.size < 2:
+        raise ValueError("Need at least two r points to compute E11 from R11.")
+
+    # Use the formula exactly as provided by the user.
+    u1_var = r11[0]
+    if np.abs(u1_var) > 0.0:
+        f_long = r11 / u1_var
+    else:
+        f_long = np.zeros_like(r11)
+
+    k_shell = np.asarray(k_shell, dtype=np.float64)
+    k_phys = k_shell * float(k0)
+    e11 = np.empty_like(k_shell, dtype=np.float64)
+    pref = 2.0 / np.pi
+    for i, k in enumerate(k_phys):
+        integrand = f_long * np.cos(k * r)
+        e11[i] = pref * u1_var * np.trapz(integrand, r)
+
+    return e11
+
+
+def compute_ek_from_e11_derivative(k_shell, e11, k0):
+    """
+    Compute isotropic E(k) from E11(k):
+      E(k) = 1/2 * k^3 * d/dk [ (1/k) * dE11/dk ].
+    """
+    k_shell = np.asarray(k_shell, dtype=np.float64)
+    k = k_shell * float(k0)
+    e11 = np.asarray(e11, dtype=np.float64)
+    if k.size < 3:
+        raise ValueError("Need at least 3 k points to compute derivative-based E(k).")
+
+    dedk = np.gradient(e11, k)
+
+    ek = np.full_like(e11, np.nan, dtype=np.float64)
+    mask = k > 0.0
+    if np.count_nonzero(mask) < 3:
+        return ek
+
+    q = dedk[mask] / k[mask]
+    dqdk = np.gradient(q, k[mask])
+    ek[mask] = 0.5 * (k[mask] ** 3) * dqdk
+    return ek
 
 
 def compute_ke_consistency_from_tensor(vx, vy, vz):
@@ -388,11 +805,15 @@ def second_derivative_at_origin(r, y):
     return (2.0*y[0] - 5.0*y[1] + 4.0*y[2] - y[3]) / (h*h)
 
 
-def compute_taylor_microscales_from_curves(r, f_curve, g_curve):
+def compute_taylor_microscales_from_curves(r, f_curve, g_curve, prefactor=1.0):
     """
     Compute Taylor microscales from normalized/unnormalized correlation curves:
-      lambda_L = sqrt(-f(0)/f''(0))
-      lambda_T = sqrt(-g(0)/g''(0))
+      lambda_f = sqrt(-prefactor * f(0) / f''(0))
+      lambda_g = sqrt(-prefactor * g(0) / g''(0))
+
+    Default uses prefactor=1.0 from the small-r expansion:
+      C(r) = C(0) + 0.5 C''(0) r^2 + ...
+      lambda^2 = -C(0)/C''(0)
     """
     d2f0 = second_derivative_at_origin(r, f_curve)
     d2g0 = second_derivative_at_origin(r, g_curve)
@@ -400,17 +821,17 @@ def compute_taylor_microscales_from_curves(r, f_curve, g_curve):
     f0 = f_curve[0]
     g0 = g_curve[0]
 
-    lam_L = np.sqrt(-f0 / d2f0) if d2f0 < 0.0 else np.nan
-    lam_T = np.sqrt(-g0 / d2g0) if d2g0 < 0.0 else np.nan
+    lam_f = np.sqrt(-prefactor * f0 / d2f0) if d2f0 < 0.0 else np.nan
+    lam_g = np.sqrt(-prefactor * g0 / d2g0) if d2g0 < 0.0 else np.nan
 
-    return lam_L, lam_T, d2f0, d2g0
+    return lam_f, lam_g, d2f0, d2g0
 
 
-def compute_component_taylor_microscales_from_f(fg, eps=1e-14):
+def compute_component_taylor_microscales_from_f(fg, eps=1e-14, prefactor=1.0):
     """
     Compute componentwise longitudinal Taylor microscales from:
       f_x(r)=R11(r e_x), f_y(r)=R22(r e_y), f_z(r)=R33(r e_z)
-    using lambda_b = sqrt(-f_b(0) / f_b''(0)).
+    using lambda_b = sqrt(-prefactor * f_b(0) / f_b''(0)).
 
     For zero-energy components (f_b(0) ~ 0), return lambda_b = 0
     to mirror the MFEM-style averaging behavior.
@@ -425,7 +846,33 @@ def compute_component_taylor_microscales_from_f(fg, eps=1e-14):
             continue
 
         d2 = second_derivative_at_origin(r, curve)
-        lam = np.sqrt(-c0 / d2) if d2 < 0.0 else np.nan
+        lam = np.sqrt(-prefactor * c0 / d2) if d2 < 0.0 else np.nan
+        status = "ok" if np.isfinite(lam) else "invalid_curvature"
+        result[tag] = {"lambda": lam, "d2": d2, "c0": c0, "status": status}
+
+    lam_avg = (result["x"]["lambda"] + result["y"]["lambda"] + result["z"]["lambda"]) / 3.0
+    return result, lam_avg
+
+
+def compute_component_taylor_microscales_from_g(fg, eps=1e-14, prefactor=1.0):
+    """
+    Compute componentwise transverse Taylor microscales from:
+      g_x(r)=0.5*(R22(r e_x)+R33(r e_x)),
+      g_y(r)=0.5*(R11(r e_y)+R33(r e_y)),
+      g_z(r)=0.5*(R11(r e_z)+R22(r e_z))
+    using lambda_b = sqrt(-prefactor * g_b(0) / g_b''(0)).
+    """
+    r = fg["r"]
+    result = {}
+    for tag in ("x", "y", "z"):
+        curve = fg[f"g_{tag}"]
+        c0 = curve[0]
+        if np.abs(c0) <= eps:
+            result[tag] = {"lambda": 0.0, "d2": 0.0, "c0": c0, "status": "zero_component"}
+            continue
+
+        d2 = second_derivative_at_origin(r, curve)
+        lam = np.sqrt(-prefactor * c0 / d2) if d2 < 0.0 else np.nan
         status = "ok" if np.isfinite(lam) else "invalid_curvature"
         result[tag] = {"lambda": lam, "d2": d2, "c0": c0, "status": status}
 
@@ -495,6 +942,68 @@ def compute_taylor_microscale_gradient_spectral(vx, vy, vz, dx, dy, dz):
         "z": {"lambda": lam_z, "u2": u2_z, "du2": du2_z},
         "avg": lam_avg,
     }
+
+
+def compute_taylor_microscale_gradient_spectral_transverse(vx, vy, vz, dx, dy, dz):
+    """
+    Componentwise transverse microscales from spectral gradients.
+
+    For each separation direction b, use the two velocity components transverse
+    to b and derivatives with respect to b:
+      lambda_t,b = sqrt(<u_t^2>_b / <(du_t/dx_b)^2>_b)
+    where <u_t^2>_x = 0.5(<u_y^2> + <u_z^2>), etc.
+    """
+    nx, ny, nz = vx.shape
+    n_tot = nx * ny * nz
+    KX, KY, KZ = make_kgrids(nx, ny, nz, dx, dy, dz)
+
+    ux_k = fft.fftn(vx)
+    uy_k = fft.fftn(vy)
+    uz_k = fft.fftn(vz)
+
+    fac = 1.0 / (n_tot * n_tot)
+    u2_x = fac * np.sum(np.abs(ux_k)**2)
+    u2_y = fac * np.sum(np.abs(uy_k)**2)
+    u2_z = fac * np.sum(np.abs(uz_k)**2)
+
+    dux_dx2 = fac * np.sum((KX**2) * (np.abs(ux_k)**2))
+    duy_dx2 = fac * np.sum((KX**2) * (np.abs(uy_k)**2))
+    duz_dx2 = fac * np.sum((KX**2) * (np.abs(uz_k)**2))
+
+    dux_dy2 = fac * np.sum((KY**2) * (np.abs(ux_k)**2))
+    duy_dy2 = fac * np.sum((KY**2) * (np.abs(uy_k)**2))
+    duz_dy2 = fac * np.sum((KY**2) * (np.abs(uz_k)**2))
+
+    dux_dz2 = fac * np.sum((KZ**2) * (np.abs(ux_k)**2))
+    duy_dz2 = fac * np.sum((KZ**2) * (np.abs(uy_k)**2))
+    duz_dz2 = fac * np.sum((KZ**2) * (np.abs(uz_k)**2))
+
+    ut2_x = 0.5 * (u2_y + u2_z)
+    ut2_y = 0.5 * (u2_x + u2_z)
+    ut2_z = 0.5 * (u2_x + u2_y)
+
+    dut2_x = 0.5 * (duy_dx2 + duz_dx2)
+    dut2_y = 0.5 * (dux_dy2 + duz_dy2)
+    dut2_z = 0.5 * (dux_dz2 + duy_dz2)
+
+    lam_x = np.sqrt(ut2_x / dut2_x) if dut2_x > 0.0 else 0.0
+    lam_y = np.sqrt(ut2_y / dut2_y) if dut2_y > 0.0 else 0.0
+    lam_z = np.sqrt(ut2_z / dut2_z) if dut2_z > 0.0 else 0.0
+    lam_avg = (lam_x + lam_y + lam_z) / 3.0
+
+    return {
+        "x": {"lambda": lam_x, "u2": ut2_x, "du2": dut2_x},
+        "y": {"lambda": lam_y, "u2": ut2_y, "du2": dut2_y},
+        "z": {"lambda": lam_z, "u2": ut2_z, "du2": dut2_z},
+        "avg": lam_avg,
+    }
+
+
+def lambda_sq_ratio(lambda_num, lambda_den):
+    """Compute (lambda_num^2 / lambda_den^2) with safe zero handling."""
+    if (not np.isfinite(lambda_num)) or (not np.isfinite(lambda_den)) or abs(lambda_den) <= 1e-30:
+        return np.nan
+    return (lambda_num * lambda_num) / (lambda_den * lambda_den)
 
 
 def print_table(headers, rows):
@@ -591,6 +1100,169 @@ def plot_energy_spectrum(out_png, k, E_k, step_number, time_value, show=True):
         plt.close(fig)
 
 
+def plot_tensor_diagonal_spectrum(k, E11, E22, E33, Etotal, step_number, time_value, show=True):
+    """Separate log-log plot of binned diagonal spectral-tensor contributions."""
+    mask_t = (k > 0.0) & (Etotal > 0.0)
+    mask11 = (k > 0.0) & (E11 > 0.0)
+    mask22 = (k > 0.0) & (E22 > 0.0)
+    mask33 = (k > 0.0) & (E33 > 0.0)
+
+    fig, ax = plt.subplots(figsize=(8.5, 5.5))
+    ax.loglog(k[mask_t], Etotal[mask_t], color="black", lw=2.2, label=r"$\frac{1}{2}\mathrm{Tr}(\Phi)$ shell sum")
+    ax.loglog(k[mask11], E11[mask11], color="tab:blue", lw=1.8, ls="--", label=r"$\frac{1}{2}\Phi_{11}$ shell sum")
+    ax.loglog(k[mask22], E22[mask22], color="tab:orange", lw=1.8, ls="-.", label=r"$\frac{1}{2}\Phi_{22}$ shell sum")
+    ax.loglog(k[mask33], E33[mask33], color="tab:green", lw=1.8, ls=":", label=r"$\frac{1}{2}\Phi_{33}$ shell sum")
+    ax.set_xlabel("Integer shell wavenumber k")
+    ax.set_ylabel("Shell-summed spectral energy")
+    ax.set_title(f"Diagonal Spectral Tensor Spectrum, step={step_number}, t={time_value:.4e}")
+    ax.grid(True, which="both", alpha=0.3, ls="--")
+    ax.legend(loc="best")
+    fig.tight_layout()
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def plot_tensor_cross_spectrum(k, re12, re13, re23, ab12, ab13, ab23, step_number, time_value, show=True):
+    """Plot shell-binned off-diagonal spectral tensor terms."""
+    fig, axes = plt.subplots(1, 2, figsize=(13.0, 5.2))
+
+    ax = axes[0]
+    ax.plot(k, re12, lw=1.8, color="tab:blue", label=r"$\mathrm{Re}\,\Phi_{12}$ shell sum")
+    ax.plot(k, re13, lw=1.8, color="tab:orange", label=r"$\mathrm{Re}\,\Phi_{13}$ shell sum")
+    ax.plot(k, re23, lw=1.8, color="tab:green", label=r"$\mathrm{Re}\,\Phi_{23}$ shell sum")
+    ax.axhline(0.0, color="k", lw=0.8, alpha=0.5)
+    ax.set_xlabel("Integer shell wavenumber k")
+    ax.set_ylabel("Signed shell sum")
+    ax.set_title("Cross-Spectrum (Real Parts)")
+    ax.grid(True, alpha=0.3, ls="--")
+    ax.legend(loc="best")
+
+    ax2 = axes[1]
+    m12 = (k > 0.0) & (ab12 > 0.0)
+    m13 = (k > 0.0) & (ab13 > 0.0)
+    m23 = (k > 0.0) & (ab23 > 0.0)
+    ax2.loglog(k[m12], ab12[m12], lw=1.8, color="tab:blue", label=r"$|\Phi_{12}|$ shell sum")
+    ax2.loglog(k[m13], ab13[m13], lw=1.8, color="tab:orange", label=r"$|\Phi_{13}|$ shell sum")
+    ax2.loglog(k[m23], ab23[m23], lw=1.8, color="tab:green", label=r"$|\Phi_{23}|$ shell sum")
+    ax2.set_xlabel("Integer shell wavenumber k")
+    ax2.set_ylabel("Positive shell sum")
+    ax2.set_title("Cross-Spectrum (Magnitudes)")
+    ax2.grid(True, which="both", alpha=0.3, ls="--")
+    ax2.legend(loc="best")
+
+    fig.suptitle(f"Off-Diagonal Spectral Tensor, step={step_number}, t={time_value:.4e}")
+    fig.tight_layout()
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def plot_tensor_cross_spectrum_2d(cross2d, step_number, time_value, show=True):
+    """Plot 2D kx-ky fields of cross-spectrum on a fixed kz slice."""
+    kx = cross2d["kx"]
+    ky = cross2d["ky"]
+    kz_val = cross2d["kz_value"]
+    phi12 = cross2d["phi12"]
+    phi13 = cross2d["phi13"]
+    phi23 = cross2d["phi23"]
+
+    re12 = np.real(phi12)
+    re13 = np.real(phi13)
+    re23 = np.real(phi23)
+    ab12 = np.abs(phi12)
+    ab13 = np.abs(phi13)
+    ab23 = np.abs(phi23)
+
+    vmax_re = max(
+        float(np.nanmax(np.abs(re12))),
+        float(np.nanmax(np.abs(re13))),
+        float(np.nanmax(np.abs(re23))),
+    )
+    if vmax_re <= 0.0:
+        vmax_re = 1.0
+    eps = 1e-300
+
+    fig, axes = plt.subplots(2, 3, figsize=(14.0, 8.0), constrained_layout=True)
+
+    fields_re = [(re12, r"$\mathrm{Re}\,\Phi_{12}$"), (re13, r"$\mathrm{Re}\,\Phi_{13}$"), (re23, r"$\mathrm{Re}\,\Phi_{23}$")]
+    fields_ab = [(ab12, r"$\log_{10}|\Phi_{12}|$"), (ab13, r"$\log_{10}|\Phi_{13}|$"), (ab23, r"$\log_{10}|\Phi_{23}|$")]
+
+    for j, (fld, ttl) in enumerate(fields_re):
+        im = axes[0, j].pcolormesh(kx, ky, fld.T, shading="auto", cmap="RdBu_r",
+                                   vmin=-vmax_re, vmax=vmax_re)
+        axes[0, j].set_title(ttl)
+        axes[0, j].set_xlabel(r"$k_x$")
+        if j == 0:
+            axes[0, j].set_ylabel(r"$k_y$")
+        fig.colorbar(im, ax=axes[0, j], shrink=0.9)
+
+    for j, (fld, ttl) in enumerate(fields_ab):
+        im = axes[1, j].pcolormesh(kx, ky, np.log10(fld.T + eps), shading="auto", cmap="viridis")
+        axes[1, j].set_title(ttl)
+        axes[1, j].set_xlabel(r"$k_x$")
+        if j == 0:
+            axes[1, j].set_ylabel(r"$k_y$")
+        fig.colorbar(im, ax=axes[1, j], shrink=0.9)
+
+    fig.suptitle(
+        f"2D Cross-Spectral Tensor Slice (kz={kz_val:.4e}), step={step_number}, t={time_value:.4e}"
+    )
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def plot_e11_and_ek_from_r11(
+        k_shell, e11, ek, step_number, time_value,
+        k_regular=None, e_regular=None, show=True):
+    """Separate plot for E11(k1) from R11 and derived E(k), with optional regular-spectrum overlay."""
+    fig, axes = plt.subplots(1, 2, figsize=(13.0, 5.0))
+
+    ax1 = axes[0]
+    ax1.plot(k_shell, e11, color="tab:blue", lw=2.0)
+    ax1.axhline(0.0, color="k", lw=0.8, alpha=0.5)
+    ax1.set_xlabel("Shell wavenumber k")
+    ax1.set_ylabel("E11(k1)")
+    ax1.set_title(r"$E_{11}(k_1)$ from $R_{11}(r_1)$")
+    ax1.grid(True, alpha=0.3, ls="--")
+
+    ax2 = axes[1]
+    knd = np.asarray(k_shell, dtype=np.float64)
+    pos = (knd > 0.0) & np.isfinite(ek) & (ek > 0.0)
+    neg = (knd > 0.0) & np.isfinite(ek) & (ek < 0.0)
+    if np.any(pos):
+        ax2.loglog(knd[pos], ek[pos], color="black", lw=2.0, label="Derived E(k) > 0")
+    if np.any(neg):
+        ax2.loglog(knd[neg], -ek[neg], color="red", marker="x", ls="None", label="-Derived E(k), E(k)<0")
+
+    if k_regular is not None and e_regular is not None:
+        kr = np.asarray(k_regular, dtype=np.float64)
+        er = np.asarray(e_regular, dtype=np.float64)
+        reg_mask = (kr > 0.0) & (er > 0.0) & np.isfinite(kr) & np.isfinite(er)
+        if np.any(reg_mask):
+            # k_regular from shell binning is already dimensionless shell index.
+            ax2.loglog(kr[reg_mask], er[reg_mask], color="tab:blue", lw=1.8, ls="--",
+                       label="Regular shell spectrum")
+
+    ax2.set_xlabel("Shell wavenumber k")
+    ax2.set_ylabel("E(k)")
+    ax2.set_title(r"$E(k)=\frac{1}{2}k^3\frac{d}{dk}\left[\frac{1}{k}\frac{dE_{11}}{dk}\right]$")
+    ax2.grid(True, which="both", alpha=0.3, ls="--")
+    if np.any(pos) or np.any(neg):
+        ax2.legend(loc="best")
+
+    fig.suptitle(f"Derived Spectrum from R11, step={step_number}, t={time_value:.4e}")
+    fig.tight_layout()
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
 # ------------------------------------------------------------------ #
 #  Verification: 3D Taylor-Green vortex
 # ------------------------------------------------------------------ #
@@ -647,7 +1319,9 @@ def plot_tgv_verification(out_png, r, f_num, g_num, f_exact, g_exact, n, show=Tr
         plt.close(fig)
 
 
-def run_tgv_verification(verify_n, max_r_points, out_prefix, no_plot, plot_ek):
+def run_tgv_verification(
+        verify_n, max_r_points, out_prefix, no_plot, plot_ek,
+        plot_cross_spectrum, cross_kz_index):
     print(f"\n{'='*60}")
     print(f"VERIFY MODE: Taylor-Green vortex (N={verify_n})")
     print(f"{'='*60}")
@@ -682,17 +1356,27 @@ def run_tgv_verification(verify_n, max_r_points, out_prefix, no_plot, plot_ek):
     rms_err_f = np.sqrt(np.mean(abs_err_f**2))
     rms_err_g = np.sqrt(np.mean(abs_err_g**2))
 
-    lam_L_axis, lam_T_axis, d2f_axis, d2g_axis = compute_taylor_microscales_from_curves(r, f_num, g_num)
+    lam_f_axis, lam_g_axis, d2f_axis, d2g_axis = compute_taylor_microscales_from_curves(
+        r, f_num, g_num, prefactor=1.0
+    )
+    ratio_axis = lambda_sq_ratio(lam_g_axis, lam_f_axis)
+    ratio_axis_err = abs(ratio_axis - 0.5) if np.isfinite(ratio_axis) else np.nan
     lam_exact = 1.0 / (2.0 * np.pi)
 
-    lam_L_avg, lam_T_avg, d2f_avg, d2g_avg = compute_taylor_microscales_from_curves(
-        fg["r"], fg["f"], fg["g"]
+    lam_f_avg, lam_g_avg, d2f_avg, d2g_avg = compute_taylor_microscales_from_curves(
+        fg["r"], fg["f"], fg["g"], prefactor=1.0
     )
+    ratio_avg = lambda_sq_ratio(lam_g_avg, lam_f_avg)
+    ratio_avg_err = abs(ratio_avg - 0.5) if np.isfinite(ratio_avg) else np.nan
 
-    f_comp, f_comp_avg = compute_component_taylor_microscales_from_f(fg)
+    f_comp, f_comp_avg = compute_component_taylor_microscales_from_f(fg, prefactor=1.0)
+    g_comp, g_comp_avg = compute_component_taylor_microscales_from_g(fg, prefactor=1.0)
     L_comp, L_comp_avg = compute_component_integral_length_scales_from_f(fg)
     L_avg_curve = compute_integral_length_scale_from_curve(fg["r"], fg["f"])
     grad_comp = compute_taylor_microscale_gradient_spectral(vx, vy, vz, dx, dy, dz)
+    grad_comp_trans = compute_taylor_microscale_gradient_spectral_transverse(
+        vx, vy, vz, dx, dy, dz
+    )
 
     tol = 5e-12
     passed = (max_err_f < tol) and (max_err_g < tol)
@@ -707,13 +1391,17 @@ def run_tgv_verification(verify_n, max_r_points, out_prefix, no_plot, plot_ek):
             ["rms|g_num-cos|", f"{rms_err_g:.3e}"],
             ["f''(0) axis", f"{d2f_axis:.8e}"],
             ["g''(0) axis", f"{d2g_axis:.8e}"],
-            ["lambda_L axis", f"{lam_L_axis:.8e}"],
-            ["lambda_T axis", f"{lam_T_axis:.8e}"],
+            ["lambda_longitudinal axis (from f)", f"{lam_f_axis:.8e}"],
+            ["lambda_transverse axis (from g)", f"{lam_g_axis:.8e}"],
+            ["(lambda_transverse^2/lambda_longitudinal^2) axis", f"{ratio_axis:.8e}"],
+            ["|ratio_axis-0.5|", f"{ratio_axis_err:.8e}"],
             ["lambda exact", f"{lam_exact:.8e}"],
             ["f_avg''(0)", f"{d2f_avg:.8e}"],
             ["g_avg''(0)", f"{d2g_avg:.8e}"],
-            ["lambda_L_avg", f"{lam_L_avg:.8e}"],
-            ["lambda_T_avg", f"{lam_T_avg:.8e}"],
+            ["lambda_longitudinal_avg (from f)", f"{lam_f_avg:.8e}"],
+            ["lambda_transverse_avg (from g)", f"{lam_g_avg:.8e}"],
+            ["(lambda_transverse^2/lambda_longitudinal^2)_avg", f"{ratio_avg:.8e}"],
+            ["|ratio_avg-0.5|", f"{ratio_avg_err:.8e}"],
             ["L_int from f_avg", f"{L_avg_curve:.8e}"],
             ["L_int components avg/3", f"{L_comp_avg:.8e}"],
             ["PASS (tol=5e-12)", str(passed)],
@@ -730,12 +1418,37 @@ def run_tgv_verification(verify_n, max_r_points, out_prefix, no_plot, plot_ek):
             [tag, f"{lf:.8e}", f"{lg:.8e}", f"{diff:.3e}", f"{rel:.3e}%"]
         )
     avg_diff = abs(f_comp_avg - grad_comp["avg"])
-    avg_rel = (avg_diff / abs(grad_comp["avg"]) * 100.0) if abs(grad_comp["avg"]) > 0.0 else 0.0
+    avg_rel = (
+        (avg_diff / abs(grad_comp["avg"]) * 100.0) if abs(grad_comp["avg"]) > 0.0 else 0.0
+    )
     comp_rows.append(
-        ["avg/3", f"{f_comp_avg:.8e}", f"{grad_comp['avg']:.8e}", f"{avg_diff:.3e}", f"{avg_rel:.3e}%"]
+        [
+            "avg/3",
+            f"{f_comp_avg:.8e}",
+            f"{grad_comp['avg']:.8e}",
+            f"{avg_diff:.3e}",
+            f"{avg_rel:.3e}%",
+        ]
     )
     print("Componentwise longitudinal Taylor microscale comparison:")
-    print_table(["Comp", "lambda_from_f", "lambda_grad", "abs_diff", "rel_diff"], comp_rows)
+    print_table(["Comp", "lambda_longitudinal_from_f", "lambda_longitudinal_from_grad", "abs_diff", "rel_diff"], comp_rows)
+
+    comp_rows_t = []
+    for tag in ("x", "y", "z"):
+        lt = g_comp[tag]["lambda"]
+        lg = grad_comp_trans[tag]["lambda"]
+        diff = abs(lt - lg)
+        rel = (diff / abs(lg) * 100.0) if abs(lg) > 0.0 else 0.0
+        comp_rows_t.append([tag, f"{lt:.8e}", f"{lg:.8e}", f"{diff:.3e}", f"{rel:.3e}%"])
+    avg_diff_t = abs(g_comp_avg - grad_comp_trans["avg"])
+    avg_rel_t = (
+        (avg_diff_t / abs(grad_comp_trans["avg"]) * 100.0) if abs(grad_comp_trans["avg"]) > 0.0 else 0.0
+    )
+    comp_rows_t.append(
+        ["avg/3", f"{g_comp_avg:.8e}", f"{grad_comp_trans['avg']:.8e}", f"{avg_diff_t:.3e}", f"{avg_rel_t:.3e}%"]
+    )
+    print("Componentwise transverse Taylor microscale comparison:")
+    print_table(["Comp", "lambda_transverse_from_g", "lambda_transverse_from_grad", "abs_diff", "rel_diff"], comp_rows_t)
 
     int_rows = [
         ["x", f"{L_comp['x']['L']:.8e}", L_comp["x"]["status"]],
@@ -816,18 +1529,32 @@ def run_tgv_verification(verify_n, max_r_points, out_prefix, no_plot, plot_ek):
         plt.show()
 
     if plot_ek:
-        print("Step 3 (optional): Compute E(k) from spectral tensor trace")
-        k, E_k = compute_energy_spectrum_1d(hats[0], hats[1], hats[2], dx, dy, dz)
+        print("Step 3 (optional): Compute diagonal spectral-tensor spectrum")
+        kdiag, E11, E22, E33, Etot = compute_tensor_diagonal_spectrum_binned(
+            hats[0], hats[1], hats[2]
+        )
+        print("Step 3b (optional): Compute E11(k1) from R11 and derivative E(k)")
+        k0_x = 2.0 * np.pi / (vx.shape[0] * dx)
+        e11_r11 = compute_e11_from_r11_longitudinal(fg, kdiag, k0_x)
+        ek_r11 = compute_ek_from_e11_derivative(kdiag, e11_r11, k0_x)
         if not no_plot:
-            mask = (k > 0.0) & (E_k > 0.0)
-            fig3, ax3 = plt.subplots(figsize=(8.5, 5.5))
-            ax3.loglog(k[mask], E_k[mask], lw=2.0)
-            ax3.set_xlabel("k")
-            ax3.set_ylabel("E(k)")
-            ax3.set_title("Taylor-Green E(k) (display only)")
-            ax3.grid(True, which="both", alpha=0.3, ls="--")
-            fig3.tight_layout()
-            plt.show()
+            plot_tensor_diagonal_spectrum(kdiag, E11, E22, E33, Etot, "tgv_verify", 0.0, show=True)
+            plot_e11_and_ek_from_r11(
+                kdiag, e11_r11, ek_r11, "tgv_verify", 0.0,
+                k_regular=kdiag, e_regular=Etot, show=True
+            )
+
+    if plot_cross_spectrum:
+        print("Step 3c (optional): Compute cross-correlation spectrum (off-diagonal Phi_ij)")
+        kx, re12, re13, re23, ab12, ab13, ab23 = compute_tensor_cross_spectrum_binned(
+            hats[0], hats[1], hats[2]
+        )
+        cross2d = compute_tensor_cross_spectrum_2d_slice(
+            hats[0], hats[1], hats[2], dx, dy, dz, kz_index=cross_kz_index
+        )
+        if not no_plot:
+            plot_tensor_cross_spectrum_2d(cross2d, "tgv_verify", 0.0, show=True)
+            plot_tensor_cross_spectrum(kx, re12, re13, re23, ab12, ab13, ab23, "tgv_verify", 0.0, show=True)
 
     return passed
 
@@ -847,6 +1574,8 @@ def main():
                         help="Grid size N for Taylor-Green verification on [0,1)^3")
     parser.add_argument("--header-lines", type=int, default=None,
                         help="Number of header lines to skip/read (auto-detect if omitted)")
+    parser.add_argument("--snapshot-index", type=int, default=-1,
+                        help="For Dedalus HDF5 tasks/u: snapshot index in time dimension (default: -1 last)")
     parser.add_argument("--chunk-size", type=int, default=5_000_000,
                         help="Chunk size for loading velocity files")
     parser.add_argument("--decimals", type=int, default=10,
@@ -857,6 +1586,10 @@ def main():
                         help="Output prefix (default: <input>_fg)")
     parser.add_argument("--plot-ek", action="store_true",
                         help="Also compute and plot optional shell-integrated E(k)")
+    parser.add_argument("--plot-cross-spectrum", action="store_true",
+                        help="Also compute and plot off-diagonal cross-correlation spectra")
+    parser.add_argument("--cross-kz-index", type=int, default=None,
+                        help="kz-slice index for 2D cross-spectrum field (default: index nearest kz=0)")
     parser.add_argument("--no-plot", action="store_true",
                         help="Do not open interactive plots (files are still saved)")
     args = parser.parse_args()
@@ -867,7 +1600,9 @@ def main():
             max_r_points=args.max_r_points,
             out_prefix=args.out_prefix,
             no_plot=args.no_plot,
-            plot_ek=args.plot_ek
+            plot_ek=args.plot_ek,
+            plot_cross_spectrum=args.plot_cross_spectrum,
+            cross_kz_index=args.cross_kz_index,
         )
         return
 
@@ -878,40 +1613,65 @@ def main():
     print(f"ANALYZING: {args.data_file}")
     print(f"{'='*60}")
 
-    if args.data_file.endswith('.h5'):
-        header_lines = 0
-    elif args.header_lines is None:
-        header_lines = detect_header_lines(args.data_file)
+    dedalus_candidate = None
+    try:
+        dedalus_candidate = resolve_dedalus_input_file(args.data_file)
+    except Exception:
+        dedalus_candidate = None
+
+    if dedalus_candidate and is_dedalus_velocity_h5(dedalus_candidate):
+        vx, vy, vz, x_coords, y_coords, z_coords, dx, dy, dz, step_number, time_value = (
+            read_dedalus_velocity_h5(
+                args.data_file,
+                snapshot_index=args.snapshot_index,
+                task_name="u"
+            )
+        )
     else:
-        header_lines = args.header_lines
+        if args.data_file.endswith('.h5'):
+            header_lines = 0
+        elif args.header_lines is None:
+            header_lines = detect_header_lines(args.data_file)
+        else:
+            header_lines = args.header_lines
 
-    step_number, time_value = read_data_file_header(args.data_file, header_lines)
+        step_number, time_value = read_data_file_header(args.data_file, header_lines)
 
-    vx, vy, vz, x_coords, y_coords, z_coords, dx, dy, dz = read_data_file_chunked(
-        args.data_file,
-        chunk_size=args.chunk_size,
-        skiprows=header_lines,
-        decimals=args.decimals
-    )
+        vx, vy, vz, x_coords, y_coords, z_coords, dx, dy, dz = read_data_file_chunked(
+            args.data_file,
+            chunk_size=args.chunk_size,
+            skiprows=header_lines,
+            decimals=args.decimals
+        )
     print(f"  Final FFT grid shape: {vx.shape}")
 
     R, hats = compute_tensor_correlations(vx, vy, vz)
     fg = extract_f_g(R, dx, dy, dz, args.max_r_points)
     ke_check = compute_ke_consistency_from_tensor(vx, vy, vz)
-    lam_L, lam_T, d2f0, d2g0 = compute_taylor_microscales_from_curves(fg["r"], fg["f"], fg["g"])
+    lam_f, lam_g, d2f0, d2g0 = compute_taylor_microscales_from_curves(
+        fg["r"], fg["f"], fg["g"], prefactor=1.0
+    )
+    ratio_avg = lambda_sq_ratio(lam_g, lam_f)
+    ratio_avg_err = abs(ratio_avg - 0.5) if np.isfinite(ratio_avg) else np.nan
 
-    f_comp, f_comp_avg = compute_component_taylor_microscales_from_f(fg)
+    f_comp, f_comp_avg = compute_component_taylor_microscales_from_f(fg, prefactor=1.0)
+    g_comp, g_comp_avg = compute_component_taylor_microscales_from_g(fg, prefactor=1.0)
     L_comp, L_comp_avg = compute_component_integral_length_scales_from_f(fg)
     L_avg_curve = compute_integral_length_scale_from_curve(fg["r"], fg["f"])
     grad_comp = compute_taylor_microscale_gradient_spectral(vx, vy, vz, dx, dy, dz)
+    grad_comp_trans = compute_taylor_microscale_gradient_spectral_transverse(
+        vx, vy, vz, dx, dy, dz
+    )
     print("Taylor microscale summary:")
     print_table(
         ["Metric", "Value"],
         [
             ["f''(0) avg", f"{d2f0:.8e}"],
             ["g''(0) avg", f"{d2g0:.8e}"],
-            ["lambda_L avg", f"{lam_L:.8e}"],
-            ["lambda_T avg", f"{lam_T:.8e}"],
+            ["lambda_longitudinal_avg (from f)", f"{lam_f:.8e}"],
+            ["lambda_transverse_avg (from g)", f"{lam_g:.8e}"],
+            ["(lambda_transverse^2/lambda_longitudinal^2)_avg", f"{ratio_avg:.8e}"],
+            ["|ratio_avg-0.5|", f"{ratio_avg_err:.8e}"],
             ["L_int from f_avg", f"{L_avg_curve:.8e}"],
             ["L_int components avg/3", f"{L_comp_avg:.8e}"],
         ],
@@ -926,12 +1686,31 @@ def main():
             [tag, f"{lf:.8e}", f"{lg:.8e}", f"{diff:.3e}", f"{rel:.3e}%"]
         )
     avg_diff = abs(f_comp_avg - grad_comp["avg"])
-    avg_rel = (avg_diff / abs(grad_comp["avg"]) * 100.0) if abs(grad_comp["avg"]) > 0.0 else 0.0
+    avg_rel = (
+        (avg_diff / abs(grad_comp["avg"]) * 100.0) if abs(grad_comp["avg"]) > 0.0 else 0.0
+    )
     comp_rows.append(
         ["avg/3", f"{f_comp_avg:.8e}", f"{grad_comp['avg']:.8e}", f"{avg_diff:.3e}", f"{avg_rel:.3e}%"]
     )
     print("Componentwise longitudinal Taylor microscale comparison:")
-    print_table(["Comp", "lambda_from_f", "lambda_grad", "abs_diff", "rel_diff"], comp_rows)
+    print_table(["Comp", "lambda_longitudinal_from_f", "lambda_longitudinal_from_grad", "abs_diff", "rel_diff"], comp_rows)
+
+    comp_rows_t = []
+    for tag in ("x", "y", "z"):
+        lt = g_comp[tag]["lambda"]
+        lg = grad_comp_trans[tag]["lambda"]
+        diff = abs(lt - lg)
+        rel = (diff / abs(lg) * 100.0) if abs(lg) > 0.0 else 0.0
+        comp_rows_t.append([tag, f"{lt:.8e}", f"{lg:.8e}", f"{diff:.3e}", f"{rel:.3e}%"])
+    avg_diff_t = abs(g_comp_avg - grad_comp_trans["avg"])
+    avg_rel_t = (
+        (avg_diff_t / abs(grad_comp_trans["avg"]) * 100.0) if abs(grad_comp_trans["avg"]) > 0.0 else 0.0
+    )
+    comp_rows_t.append(
+        ["avg/3", f"{g_comp_avg:.8e}", f"{grad_comp_trans['avg']:.8e}", f"{avg_diff_t:.3e}", f"{avg_rel_t:.3e}%"]
+    )
+    print("Componentwise transverse Taylor microscale comparison:")
+    print_table(["Comp", "lambda_transverse_from_g", "lambda_transverse_from_grad", "abs_diff", "rel_diff"], comp_rows_t)
 
     int_rows = [
         ["x", f"{L_comp['x']['L']:.8e}", L_comp["x"]["status"]],
@@ -966,21 +1745,32 @@ def main():
     plot_fg(fg, step_number, time_value, show=(not args.no_plot))
 
     if args.plot_ek:
-        print("Step 3 (optional): Compute E(k) from spectral tensor trace")
-        k, E_k = compute_energy_spectrum_1d(hats[0], hats[1], hats[2], dx, dy, dz)
-
-        out_ek_csv = f"{base}_Ek.csv"
-        out_ek_png = f"{base}_Ek.png"
-        np.savetxt(
-            out_ek_csv,
-            np.column_stack((k, E_k)),
-            delimiter=",",
-            header="k,E(k)",
-            comments=""
+        print("Step 3 (optional): Compute diagonal spectral-tensor spectrum")
+        kdiag, E11, E22, E33, Etot = compute_tensor_diagonal_spectrum_binned(
+            hats[0], hats[1], hats[2]
         )
-        print(f"Saved E(k): {out_ek_csv}")
-        plot_energy_spectrum(out_ek_png, k, E_k, step_number, time_value, show=(not args.no_plot))
-        print(f"Saved E(k) plot: {out_ek_png}")
+        print("Step 3b (optional): Compute E11(k1) from R11 and derivative E(k)")
+        k0_x = 2.0 * np.pi / (vx.shape[0] * dx)
+        e11_r11 = compute_e11_from_r11_longitudinal(fg, kdiag, k0_x)
+        ek_r11 = compute_ek_from_e11_derivative(kdiag, e11_r11, k0_x)
+        if not args.no_plot:
+            plot_tensor_diagonal_spectrum(kdiag, E11, E22, E33, Etot, step_number, time_value, show=True)
+            plot_e11_and_ek_from_r11(
+                kdiag, e11_r11, ek_r11, step_number, time_value,
+                k_regular=kdiag, e_regular=Etot, show=True
+            )
+
+    if args.plot_cross_spectrum:
+        print("Step 3c (optional): Compute cross-correlation spectrum (off-diagonal Phi_ij)")
+        kx, re12, re13, re23, ab12, ab13, ab23 = compute_tensor_cross_spectrum_binned(
+            hats[0], hats[1], hats[2]
+        )
+        cross2d = compute_tensor_cross_spectrum_2d_slice(
+            hats[0], hats[1], hats[2], dx, dy, dz, kz_index=args.cross_kz_index
+        )
+        if not args.no_plot:
+            plot_tensor_cross_spectrum_2d(cross2d, step_number, time_value, show=True)
+            plot_tensor_cross_spectrum(kx, re12, re13, re23, ab12, ab13, ab23, step_number, time_value, show=True)
 
 
 if __name__ == "__main__":
