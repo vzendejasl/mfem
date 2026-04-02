@@ -18,9 +18,9 @@ import math
 import os
 import sys
 
-import h5py
 import numpy as np
 from mpi4py import MPI
+import h5py
 
 try:
     import heffte

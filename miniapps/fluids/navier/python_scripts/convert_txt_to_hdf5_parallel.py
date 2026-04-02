@@ -59,9 +59,9 @@ import os
 import io
 import re
 import numpy as np
+from mpi4py import MPI
 import h5py
 import pandas as pd
-from mpi4py import MPI
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
