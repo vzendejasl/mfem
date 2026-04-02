@@ -440,8 +440,101 @@ def compute_energy_spectrum(vx, vy, vz, nx, ny, nz, dx, dy, dz):
     return k_bin_centers, E_k
 
 
+def compute_enstrophy_spectrum(vx, vy, vz, nx, ny, nz, dx, dy, dz):
+    """Compute enstrophy spectrum Omega(k) using integer-k convention."""
+
+    kx_int = np.fft.fftfreq(nx, 1./nx).astype(int)
+    ky_int = np.fft.fftfreq(ny, 1./ny).astype(int)
+    kz_int = np.fft.fftfreq(nz, 1./nz).astype(int)
+
+    vx_k = np.fft.fftn(vx)
+    vy_k = np.fft.fftn(vy)
+    vz_k = np.fft.fftn(vz)
+
+    norm = nx * ny * nz
+    vx_k /= norm
+    vy_k /= norm
+    vz_k /= norm
+
+    KX_int, KY_int, KZ_int = np.meshgrid(kx_int, ky_int, kz_int, indexing='ij')
+
+    omega_x_k = 1j * (KY_int * vz_k - KZ_int * vy_k)
+    omega_y_k = 1j * (KZ_int * vx_k - KX_int * vz_k)
+    omega_z_k = 1j * (KX_int * vy_k - KY_int * vx_k)
+
+    enstrophy_density = 0.5 * (
+        np.abs(omega_x_k)**2 + np.abs(omega_y_k)**2 + np.abs(omega_z_k)**2
+    )
+    total_enstrophy = np.sum(enstrophy_density)
+    print(f"  Total enstrophy (fourier, code convention): {total_enstrophy:.8f}")
+
+    k_magnitude = np.sqrt(KX_int**2 + KY_int**2 + KZ_int**2)
+
+    from math import ceil
+    k_max_int = ceil(nx * 0.5 * np.sqrt(3.0))
+    k_bin_edges = np.linspace(0.5, k_max_int + 0.5, k_max_int + 1)
+
+    if nx * 0.5 * np.sqrt(3.0) < k_bin_edges[-2]:
+        k_bin_edges = k_bin_edges[:-1]
+
+    k_bin_centers = 0.5 * (k_bin_edges[:-1] + k_bin_edges[1:])
+
+    k_flat = k_magnitude.flatten()
+    enstrophy_flat = enstrophy_density.flatten()
+
+    Enst_k, _ = np.histogram(k_flat, bins=k_bin_edges, weights=enstrophy_flat)
+    return k_bin_centers, Enst_k, total_enstrophy
+
+
+def compute_helicity_spectrum(vx, vy, vz, nx, ny, nz, dx, dy, dz):
+    """Compute helicity spectrum H(k) using integer-k convention."""
+
+    kx_int = np.fft.fftfreq(nx, 1./nx).astype(int)
+    ky_int = np.fft.fftfreq(ny, 1./ny).astype(int)
+    kz_int = np.fft.fftfreq(nz, 1./nz).astype(int)
+
+    vx_k = np.fft.fftn(vx)
+    vy_k = np.fft.fftn(vy)
+    vz_k = np.fft.fftn(vz)
+
+    norm = nx * ny * nz
+    vx_k /= norm
+    vy_k /= norm
+    vz_k /= norm
+
+    KX_int, KY_int, KZ_int = np.meshgrid(kx_int, ky_int, kz_int, indexing='ij')
+
+    omega_x_k = 1j * (KY_int * vz_k - KZ_int * vy_k)
+    omega_y_k = 1j * (KZ_int * vx_k - KX_int * vz_k)
+    omega_z_k = 1j * (KX_int * vy_k - KY_int * vx_k)
+
+    helicity_density = np.real(
+        vx_k * np.conj(omega_x_k) +
+        vy_k * np.conj(omega_y_k) +
+        vz_k * np.conj(omega_z_k)
+    )
+    print(f"  Total helicity (fourier): {np.sum(helicity_density):.8f}")
+
+    k_magnitude = np.sqrt(KX_int**2 + KY_int**2 + KZ_int**2)
+
+    from math import ceil
+    k_max_int = ceil(nx * 0.5 * np.sqrt(3.0))
+    k_bin_edges = np.linspace(0.5, k_max_int + 0.5, k_max_int + 1)
+
+    if nx * 0.5 * np.sqrt(3.0) < k_bin_edges[-2]:
+        k_bin_edges = k_bin_edges[:-1]
+
+    k_bin_centers = 0.5 * (k_bin_edges[:-1] + k_bin_edges[1:])
+
+    k_flat = k_magnitude.flatten()
+    helicity_flat = helicity_density.flatten()
+
+    Hel_k, _ = np.histogram(k_flat, bins=k_bin_edges, weights=helicity_flat)
+    return k_bin_centers, Hel_k
+
+
 def compute_energy_dissipation_enstophy(vx, vy, vz, nx, ny, nz, dx, dy, dz):
-    """Compute enstrophy and dissipation (without the nu) - FIXED"""
+    """Compute code-matched enstrophy and k^2-weighted energy."""
     kx_int = np.fft.fftfreq(nx, 1./nx).astype(int)
     ky_int = np.fft.fftfreq(ny, 1./ny).astype(int)
     kz_int = np.fft.fftfreq(nz, 1./nz).astype(int)
@@ -461,16 +554,15 @@ def compute_energy_dissipation_enstophy(vx, vy, vz, nx, ny, nz, dx, dy, dz):
     KX_int, KY_int, KZ_int = np.meshgrid(kx_int, ky_int, kz_int, indexing='ij')
     k_squared = KX_int**2 + KY_int**2 + KZ_int**2
 
-    k_phys_squared = (2*np.pi)**2 * k_squared
-    total_energy_dissipation = np.sum(energy_density * k_phys_squared)
-    print(f"  Total dissipative energy: {total_energy_dissipation:.8f}")
+    total_energy_dissipation = np.sum(energy_density * k_squared)
+    print(f"  Total k^2-weighted energy: {total_energy_dissipation:.8f}")
 
-    omega_x_k = 1j * 2*np.pi * (KY_int*vz_k - KZ_int*vy_k)
-    omega_y_k = 1j * 2*np.pi * (KZ_int*vx_k - KX_int*vz_k)
-    omega_z_k = 1j * 2*np.pi * (KX_int*vy_k - KY_int*vx_k)
+    omega_x_k = 1j * (KY_int*vz_k - KZ_int*vy_k)
+    omega_y_k = 1j * (KZ_int*vx_k - KX_int*vz_k)
+    omega_z_k = 1j * (KX_int*vy_k - KY_int*vx_k)
 
     enstrophy_fourier = 0.5*np.sum(np.abs(omega_x_k)**2 + np.abs(omega_y_k)**2 + np.abs(omega_z_k)**2)
-    print("enstrophy vs total dissipation comparison (should be close)")
+    print("enstrophy vs total k^2-weighted energy comparison (should be close)")
     print(enstrophy_fourier, total_energy_dissipation)
 
 
@@ -608,8 +700,8 @@ def plot_velocity_slice(x_coords, y_coords, z_coords, vx, vy, vz,
 # ------------------------------------------------------------------ #
 #  Step 8: Save results
 # ------------------------------------------------------------------ #
-def save_spectra(k_centers, E_total, E_comp, E_rot, filename, step_number, time_value,
-                 nx, ny, nz, total_ke, comp_ke, rot_ke):
+def save_spectra(k_centers, E_total, E_comp, E_rot, Enst, Hel, filename, step_number, time_value,
+                 nx, ny, nz, total_ke, comp_ke, rot_ke, total_enstrophy):
     """Save all spectra to a single file, including compensated spectra"""
 
     E_sum = E_comp + E_rot
@@ -623,20 +715,42 @@ def save_spectra(k_centers, E_total, E_comp, E_rot, filename, step_number, time_
     output_filename = os.path.join(os.path.dirname(filename),
                                    f'energy_spectrum_step_{step_number}.txt')
 
+    first_column_width = 21
+    column_width = 23
+    header_names = [
+        "k",
+        "Etot",
+        "Ecomp",
+        "Erot",
+        "Esum",
+        "Enst",
+        "Hel",
+        "EtotC",
+        "EcompC",
+        "ErotC",
+        "EsumC",
+    ]
+
     with open(output_filename, 'w') as f:
         f.write(f"# Energy Spectra for Step {step_number}, Time {time_value:.6e}\n")
         f.write(f"# Domain: [0,1]³, Grid: {nx}x{ny}x{nz}\n")
         f.write(f"# Total KE: {total_ke:.8f}, Compressive KE: {comp_ke:.8f}, Rotational KE: {rot_ke:.8f}\n")
-        f.write("# Columns: wavenumber, E_total, E_compressive, E_rotational, E_sum, "
-                "E_total*k^(5/3), E_compressive*k^(5/3), E_rotational*k^(5/3), E_sum*k^(5/3)\n")
-        f.write("# wavenumber,E_total,E_compressive,E_rotational,E_sum,"
-                "E_total_compensated,E_compressive_compensated,E_rotational_compensated,E_sum_compensated\n")
+        f.write(f"# Total Enstrophy: {total_enstrophy:.15e}\n")
+        f.write("# Columns: k, Etot, Ecomp, Erot, Esum, Enst, Hel, EtotC, EcompC, ErotC, EsumC\n")
+        f.write("#          k = wavenumber; C suffix = field multiplied by k^(5/3)\n")
+        # Compensate for the leading "# " so header labels end at the same
+        # column as the numeric fields below them.
+        header_row = [f"{header_names[0]:>{first_column_width - 2}}"]
+        header_row.extend(f"{name:>{column_width}}" for name in header_names[1:])
+        f.write("# " + ",".join(header_row) + "\n")
 
-        for k, e_tot, e_comp, e_rot, e_sum, e_tot_c, e_comp_c, e_rot_c, e_sum_c in zip(
-                k_centers, E_total, E_comp, E_rot, E_sum,
+        for k, e_tot, e_comp, e_rot, e_sum, enst, hel, e_tot_c, e_comp_c, e_rot_c, e_sum_c in zip(
+                k_centers, E_total, E_comp, E_rot, E_sum, Enst, Hel,
                 E_total_compensated, E_comp_compensated, E_rot_compensated, E_sum_compensated):
-            f.write(f"{k:.6e},{e_tot:.6e},{e_comp:.6e},{e_rot:.6e},{e_sum:.6e},"
-                    f"{e_tot_c:.6e},{e_comp_c:.6e},{e_rot_c:.6e},{e_sum_c:.6e}\n")
+            values = [k, e_tot, e_comp, e_rot, e_sum, enst, hel, e_tot_c, e_comp_c, e_rot_c, e_sum_c]
+            data_row = [f"{values[0]:{first_column_width}.15e}"]
+            data_row.extend(f"{value:{column_width}.15e}" for value in values[1:])
+            f.write(",".join(data_row) + "\n")
 
     print(f"Saved library-matched spectra to: {output_filename}")
     return output_filename
@@ -696,12 +810,14 @@ def analyze_file(filename, header_lines=None, visualize=False, slice_z=None, chu
     k_centers, E_total = compute_energy_spectrum(grid_vx, grid_vy, grid_vz, nx, ny, nz, dx, dy, dz)
     _, E_comp = compute_energy_spectrum(vx_c, vy_c, vz_c, nx, ny, nz, dx, dy, dz)
     _, E_rot = compute_energy_spectrum(vx_r, vy_r, vz_r, nx, ny, nz, dx, dy, dz)
+    _, Enst, total_enstrophy = compute_enstrophy_spectrum(grid_vx, grid_vy, grid_vz, nx, ny, nz, dx, dy, dz)
+    _, Hel = compute_helicity_spectrum(grid_vx, grid_vy, grid_vz, nx, ny, nz, dx, dy, dz)
 
     compute_energy_dissipation_enstophy(grid_vx, grid_vy, grid_vz, nx, ny, nz, dx, dy, dz)
 
     # Step 7: Save
-    save_spectra(k_centers, E_total, E_comp, E_rot, filename, step_number, time_value,
-                 nx, ny, nz, total_ke, comp_ke, rot_ke)
+    save_spectra(k_centers, E_total, E_comp, E_rot, Enst, Hel, filename, step_number, time_value,
+                 nx, ny, nz, total_ke, comp_ke, rot_ke, total_enstrophy)
 
     # Step 8: Visualization (optional)
     if visualize:
@@ -797,4 +913,3 @@ Examples:
     else:
         print(f"\nProcessed {len(results)} files. Spectrum files saved to disk.")
         print("Skipping plot display as requested (--no-plot flag).")
-
