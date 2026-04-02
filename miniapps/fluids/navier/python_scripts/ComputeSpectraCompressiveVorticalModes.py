@@ -22,6 +22,57 @@ import pandas as pd
 import h5py
 
 
+def is_structured_velocity_hdf5(h5_file):
+    """Return True when the file stores explicit grid/field datasets."""
+    return (
+        'grid' in h5_file
+        and 'fields' in h5_file
+        and 'x' in h5_file['grid']
+        and 'y' in h5_file['grid']
+        and 'z' in h5_file['grid']
+        and 'vx' in h5_file['fields']
+        and 'vy' in h5_file['fields']
+        and 'vz' in h5_file['fields']
+    )
+
+
+def load_structured_velocity_hdf5(filename):
+    """Load a structured HDF5 velocity file and apply the FFT periodic trim."""
+    print("  Structured HDF5 read mode: serial h5py read")
+    with h5py.File(filename, 'r') as f:
+        x_full = np.asarray(f['grid']['x'][:], dtype=np.float64)
+        y_full = np.asarray(f['grid']['y'][:], dtype=np.float64)
+        z_full = np.asarray(f['grid']['z'][:], dtype=np.float64)
+
+        vx_full = np.asarray(f['fields']['vx'][:], dtype=np.float64)
+        vy_full = np.asarray(f['fields']['vy'][:], dtype=np.float64)
+        vz_full = np.asarray(f['fields']['vz'][:], dtype=np.float64)
+
+        periodic_duplicate_last = bool(f.attrs.get('periodic_duplicate_last', True))
+
+    dx = x_full[1] - x_full[0] if len(x_full) > 1 else 1.0
+    dy = y_full[1] - y_full[0] if len(y_full) > 1 else 1.0
+    dz = z_full[1] - z_full[0] if len(z_full) > 1 else 1.0
+
+    if periodic_duplicate_last and len(x_full) > 1 and len(y_full) > 1 and len(z_full) > 1:
+        print("  Applying periodic slicing from structured HDF5 (dropping last point)...")
+        x_coords = x_full[:-1]
+        y_coords = y_full[:-1]
+        z_coords = z_full[:-1]
+        vx = vx_full[:-1, :-1, :-1]
+        vy = vy_full[:-1, :-1, :-1]
+        vz = vz_full[:-1, :-1, :-1]
+    else:
+        x_coords = x_full
+        y_coords = y_full
+        z_coords = z_full
+        vx = vx_full
+        vy = vy_full
+        vz = vz_full
+
+    return vx, vy, vz, x_coords, y_coords, z_coords, dx, dy, dz
+
+
 # ------------------------------------------------------------------ #
 #  Step 1: Read and parse data file
 # ------------------------------------------------------------------ #
@@ -108,6 +159,9 @@ def read_data_file_chunked(filename, chunk_size=5_000_000, skiprows=5):
     if filename.endswith('.h5'):
         print(f"  Loading data from HDF5: {filename} (chunked read)")
         with h5py.File(filename, 'r') as f:
+            if is_structured_velocity_hdf5(f):
+                return load_structured_velocity_hdf5(filename)
+
             dset = f['data']
             total_pts = dset.shape[0]
             print(f"  Total data points: {total_pts}")
@@ -123,16 +177,16 @@ def read_data_file_chunked(filename, chunk_size=5_000_000, skiprows=5):
             # Read in chunks
             for i in range(0, total_pts, chunk_size):
                 end_idx = min(i + chunk_size, total_pts)
-                
+
                 # Read raw chunk from HDF5
                 chunk_data = dset[i:end_idx]
-                
+
                 # Distribute to columns
                 # Round coordinates matching text loader logic
                 xpos[i:end_idx] = np.round(chunk_data[:, 0], 10)
                 ypos[i:end_idx] = np.round(chunk_data[:, 1], 10)
                 zpos[i:end_idx] = np.round(chunk_data[:, 2], 10)
-                
+
                 velx[i:end_idx] = chunk_data[:, 3]
                 vely[i:end_idx] = chunk_data[:, 4]
                 velz[i:end_idx] = chunk_data[:, 5]

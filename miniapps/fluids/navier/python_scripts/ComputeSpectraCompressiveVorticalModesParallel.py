@@ -18,6 +18,7 @@ import math
 import os
 import sys
 
+import h5py
 import numpy as np
 from mpi4py import MPI
 
@@ -114,6 +115,58 @@ def scatter_field(field, boxes, comm):
         payload = [flatten_box(field, box) for box in boxes]
     local = comm.scatter(payload, root=0)
     return np.ascontiguousarray(local, dtype=np.float64)
+
+
+def open_h5_for_parallel_read(filename, comm):
+    """Use collective MPI-IO when available, otherwise independent reads."""
+    if h5py.get_config().mpi:
+        return h5py.File(filename, "r", driver="mpio", comm=comm)
+    return h5py.File(filename, "r")
+
+
+def structured_h5_metadata(filename):
+    """Return metadata for the FFT-ready HDF5 schema, or None for legacy files."""
+    with h5py.File(filename, "r") as hf:
+        if not serial_impl.is_structured_velocity_hdf5(hf):
+            return None
+
+        x_full = np.asarray(hf["grid"]["x"][:], dtype=np.float64)
+        y_full = np.asarray(hf["grid"]["y"][:], dtype=np.float64)
+        z_full = np.asarray(hf["grid"]["z"][:], dtype=np.float64)
+        periodic_duplicate_last = bool(hf.attrs.get("periodic_duplicate_last", True))
+
+    if periodic_duplicate_last and len(x_full) > 1 and len(y_full) > 1 and len(z_full) > 1:
+        x_coords = x_full[:-1]
+        y_coords = y_full[:-1]
+        z_coords = z_full[:-1]
+    else:
+        x_coords = x_full
+        y_coords = y_full
+        z_coords = z_full
+
+    dx = x_full[1] - x_full[0] if len(x_full) > 1 else 1.0
+    dy = y_full[1] - y_full[0] if len(y_full) > 1 else 1.0
+    dz = z_full[1] - z_full[0] if len(z_full) > 1 else 1.0
+
+    return {
+        "shape": (len(x_coords), len(y_coords), len(z_coords)),
+        "x_coords": x_coords,
+        "y_coords": y_coords,
+        "z_coords": z_coords,
+        "dx": dx,
+        "dy": dy,
+        "dz": dz,
+    }
+
+
+def read_structured_local_fields(filename, local_box, comm):
+    """Read one rank-local structured HDF5 slab directly from disk."""
+    sx, sy, sz = box_slices(local_box)
+    with open_h5_for_parallel_read(filename, comm) as hf:
+        vx = np.asarray(hf["fields"]["vx"][sx, sy, sz], dtype=np.float64)
+        vy = np.asarray(hf["fields"]["vy"][sx, sy, sz], dtype=np.float64)
+        vz = np.asarray(hf["fields"]["vz"][sx, sy, sz], dtype=np.float64)
+    return vx, vy, vz
 
 
 def get_backend(backend_name):
@@ -346,6 +399,7 @@ def compute_energy_dissipation_enstrophy(vx_k, vy_k, vz_k, shape, box, comm, roo
 def analyze_file_parallel(filename, comm, header_lines=None, chunk_size=5_000_000, backend_name="fftw", visualize=False):
     rank = comm.Get_rank()
     root = rank == 0
+    structured_h5 = False
 
     if root:
         print(f"\n{'=' * 60}")
@@ -354,14 +408,26 @@ def analyze_file_parallel(filename, comm, header_lines=None, chunk_size=5_000_00
 
         if filename.endswith(".h5"):
             header_lines = 0
+            meta = structured_h5_metadata(filename)
+            structured_h5 = meta is not None
         elif header_lines is None:
             header_lines = serial_impl.detect_header_lines(filename)
 
         step_number, time_value = serial_impl.read_data_file_header(filename, header_lines)
-        grid_vx, grid_vy, grid_vz, x_unique, y_unique, z_unique, dx, dy, dz = serial_impl.read_data_file_chunked(
-            filename, chunk_size=chunk_size, skiprows=header_lines
-        )
-        shape = (len(x_unique), len(y_unique), len(z_unique))
+        if structured_h5:
+            x_unique = meta["x_coords"]
+            y_unique = meta["y_coords"]
+            z_unique = meta["z_coords"]
+            dx = meta["dx"]
+            dy = meta["dy"]
+            dz = meta["dz"]
+            shape = meta["shape"]
+            grid_vx = grid_vy = grid_vz = None
+        else:
+            grid_vx, grid_vy, grid_vz, x_unique, y_unique, z_unique, dx, dy, dz = serial_impl.read_data_file_chunked(
+                filename, chunk_size=chunk_size, skiprows=header_lines
+            )
+            shape = (len(x_unique), len(y_unique), len(z_unique))
     else:
         step_number = None
         time_value = None
@@ -375,6 +441,7 @@ def analyze_file_parallel(filename, comm, header_lines=None, chunk_size=5_000_00
     header_lines = comm.bcast(header_lines, root=0)
     step_number = comm.bcast(step_number, root=0)
     time_value = comm.bcast(time_value, root=0)
+    structured_h5 = comm.bcast(structured_h5, root=0)
     shape = comm.bcast(shape, root=0)
     dx = comm.bcast(dx, root=0)
     dy = comm.bcast(dy, root=0)
@@ -390,16 +457,26 @@ def analyze_file_parallel(filename, comm, header_lines=None, chunk_size=5_000_00
         print(f"Using processor grid: {proc_grid}")
         print(f"Local box size on rank 0: {local_shape}")
 
-    local_vx_flat = scatter_field(grid_vx, boxes, comm)
-    local_vy_flat = scatter_field(grid_vy, boxes, comm)
-    local_vz_flat = scatter_field(grid_vz, boxes, comm)
+    if structured_h5:
+        if root:
+            if h5py.get_config().mpi:
+                print("Reading structured HDF5 slabs directly on each rank with MPI-enabled parallel HDF5...")
+            else:
+                print("Reading structured HDF5 slabs directly on each rank with serial h5py (independent reads)...")
+        local_vx, local_vy, local_vz = read_structured_local_fields(filename, local_box, comm)
+    else:
+        if root and filename.endswith(".h5"):
+            print("Legacy HDF5 read mode: serial read on rank 0 followed by MPI scatter.")
+        local_vx_flat = scatter_field(grid_vx, boxes, comm)
+        local_vy_flat = scatter_field(grid_vy, boxes, comm)
+        local_vz_flat = scatter_field(grid_vz, boxes, comm)
 
-    if root:
-        del grid_vx, grid_vy, grid_vz
+        if root:
+            del grid_vx, grid_vy, grid_vz
 
-    local_vx = local_vx_flat.reshape(local_shape, order="C")
-    local_vy = local_vy_flat.reshape(local_shape, order="C")
-    local_vz = local_vz_flat.reshape(local_shape, order="C")
+        local_vx = local_vx_flat.reshape(local_shape, order="C")
+        local_vy = local_vy_flat.reshape(local_shape, order="C")
+        local_vz = local_vz_flat.reshape(local_shape, order="C")
 
     total_ke = global_mean_energy(local_vx, local_vy, local_vz, global_points, comm)
 
