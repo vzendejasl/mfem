@@ -19,7 +19,16 @@ import os
 import sys
 
 import numpy as np
+from mpi4py import rc
+
+rc.initialize = False
+rc.finalize = False
+
 from mpi4py import MPI
+
+if not MPI.Is_initialized():
+    MPI.Init_thread()
+
 import h5py
 
 try:
@@ -635,4 +644,13 @@ Examples:
 
 
 if __name__ == "__main__":
-    main()
+    exit_code = 0
+    try:
+        main()
+    except SystemExit as exc:
+        exit_code = exc.code if isinstance(exc.code, int) else 0
+    finally:
+        if MPI.Is_initialized() and not MPI.Is_finalized():
+            MPI.Finalize()
+
+    sys.exit(exit_code)
