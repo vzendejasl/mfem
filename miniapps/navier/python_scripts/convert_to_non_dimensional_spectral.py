@@ -138,14 +138,10 @@ def process_file(
     eps_n = 1e-30
     ens_safe = df["enstrophy"].where(df["enstrophy"].abs() > eps_n, np.nan)
 
-    df["effective_nu_half"] = -df["dk_dt"] / (2.0 * ens_safe)
-    df["effective_nu"] = -df["dk_dt"] / (ens_safe)
-
-    df[["effective_nu_half", "effective_nu"]] = \
-        df[["effective_nu_half", "effective_nu"]].bfill().ffill()
+    df["effective_nu"] = -df["dk_dt"] / (2.0 * ens_safe)
+    df["effective_nu"] = df["effective_nu"].bfill().ffill() 
 
     # 6) Reynolds numbers
-    df["Re_half"] = (U0 * L) / df["effective_nu_half"]
     df["Re"] = (U0 * L) / df["effective_nu"]
 
     # 7) Alternative ReL diagnostic

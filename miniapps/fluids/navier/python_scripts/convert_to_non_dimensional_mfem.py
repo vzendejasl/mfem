@@ -171,17 +171,13 @@ def process_file(fname: str, U0: float, domain_length: float, round_time_decimal
     ens_safe = df['enstrophy'].where(df['enstrophy'].abs() > eps_n, np.nan)
 
     # ν_eff_half = -(dK/dt) / (2 Ω)
-    df['effective_nu_half'] = -df['dk_dt'] / (2.0 * ens_safe)
+    df['effective_nu'] = -df['dk_dt'] / (2.0 * ens_safe)
 
-    # ν_eff = -(dK/dt) / Ω  (often seen; included for comparison)
-    df['effective_nu'] = -df['dk_dt'] / (ens_safe)
-
-    df[['effective_nu_half', 'effective_nu']] = \
-        df[['effective_nu_half', 'effective_nu']].bfill().ffill()
+    df[['effective_nu']] = \
+        df[['effective_nu']].bfill().ffill()
 
     # 6) Reynolds numbers
     # Re_half = U0*L / ν_eff_half ; Re = U0*L / ν_eff
-    df['Re_half'] = (U0 * L) / df['effective_nu_half']
     df['Re'] = (U0 * L) / df['effective_nu']
 
     # 7) Example alternative “ReL” diagnostic (safe denominator)
