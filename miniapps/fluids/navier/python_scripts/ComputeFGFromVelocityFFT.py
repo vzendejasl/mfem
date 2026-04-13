@@ -48,6 +48,17 @@ How to run:
      python3 python_scripts/ComputeFGFromVelocityFFT.py <input_path> --plot-cross-spectrum
      # plots 2D kx-ky fields (default kz~0 slice) + shell-binned summary
 
+  9) Plot S2(r) comparison:
+     python3 python_scripts/ComputeFGFromVelocityFFT.py <input_path> --plot-s2
+     # overlays:
+     #   local S2(r) from shifted velocity differences
+     #   S2_from_f(r) = (4/3) * Ek * (1 - f(r))
+
+  10) Example S2(r) comparison on MFEM sampled text:
+      python3 python_scripts/ComputeFGFromVelocityFFT.py \
+        SamplePointsVelocity_Re400NumPtsPerDir8RefLv2P2/cycle_0/SampledData0.txt \
+        --header-lines 6 --plot-s2
+
 Related script:
   For FluidSF-style 3D structure functions (ASF_V, LL, LLL, LTT) on the same
   MFEM/Dedalus inputs, use:
@@ -1006,6 +1017,101 @@ def lambda_sq_ratio(lambda_num, lambda_den):
     return (lambda_num * lambda_num) / (lambda_den * lambda_den)
 
 
+def compute_s2_from_f_model(fg, ek):
+    """
+    Build the averaged second-order model curve:
+      S2_from_f(r) = (4/3) * Ek * (1 - f(r))
+    where Ek = 0.5 * <u_i u_i>.
+    """
+    r = np.asarray(fg["r"], dtype=np.float64)
+    f = np.asarray(fg["f"], dtype=np.float64)
+    s2 = (4.0 / 3.0) * float(ek) * (1.0 - f)
+    return {"r": r, "f": f, "s2": s2, "Ek": float(ek)}
+
+
+def compute_s2_local_longitudinal(vx, vy, vz, dx, dy, dz, max_r_points=None):
+    """
+    Compute local second-order longitudinal structure functions with the same
+    periodic shift approach used in ComputeStructureFunctions3D.py:
+      S2_x(r) = <(u(x+r e_x) - u(x))^2>
+      S2_y(r) = <(v(x+r e_y) - v(x))^2>
+      S2_z(r) = <(w(x+r e_z) - w(x))^2>
+    and an averaged curve obtained on the common r grid used for f(r).
+    """
+    nx, ny, nz = vx.shape
+    nmax = min(nx, ny, nz) // 2
+    if max_r_points is not None:
+        nmax = min(nmax, max_r_points)
+
+    shift_idx = np.arange(nmax + 1, dtype=int)
+    sx = np.zeros_like(shift_idx, dtype=np.float64)
+    sy = np.zeros_like(shift_idx, dtype=np.float64)
+    sz = np.zeros_like(shift_idx, dtype=np.float64)
+
+    for s in range(1, nmax + 1):
+        dux = np.roll(vx, -s, axis=0) - vx
+        duy = np.roll(vy, -s, axis=1) - vy
+        duz = np.roll(vz, -s, axis=2) - vz
+        sx[s] = np.mean(dux * dux)
+        sy[s] = np.mean(duy * duy)
+        sz[s] = np.mean(duz * duz)
+
+    rx = shift_idx * float(dx)
+    ry = shift_idx * float(dy)
+    rz = shift_idx * float(dz)
+    r_common = shift_idx * float((dx + dy + dz) / 3.0)
+
+    def interp_to_common(r_src, s_src):
+        if len(r_src) < 2:
+            return np.full_like(r_common, np.nan, dtype=np.float64)
+        return np.interp(r_common, r_src, s_src, left=np.nan, right=np.nan)
+
+    sx_c = interp_to_common(rx, sx)
+    sy_c = interp_to_common(ry, sy)
+    sz_c = interp_to_common(rz, sz)
+    s_avg = np.nanmean(np.vstack([sx_c, sy_c, sz_c]), axis=0)
+
+    return {
+        "r": r_common,
+        "s2_x": sx,
+        "s2_y": sy,
+        "s2_z": sz,
+        "s2_x_common": sx_c,
+        "s2_y_common": sy_c,
+        "s2_z_common": sz_c,
+        "s2_avg": s_avg,
+    }
+
+
+def summarize_s2_mismatch(s2_model, s2_local):
+    mask = (
+        np.isfinite(s2_model["r"]) & np.isfinite(s2_model["s2"])
+        & np.isfinite(s2_local["r"]) & np.isfinite(s2_local["s2_avg"])
+    )
+    if not np.any(mask):
+        return {
+            "n_overlap": 0,
+            "max_abs": np.nan,
+            "rms": np.nan,
+            "mean_abs": np.nan,
+            "l2_abs": np.nan,
+            "l2_rel": np.nan,
+        }
+    diff = s2_local["s2_avg"][mask] - s2_model["s2"][mask]
+    r = s2_model["r"][mask]
+    l2_abs = float(np.sqrt(np.trapz(diff * diff, r))) if diff.size > 1 else float(np.abs(diff[0]))
+    ref = s2_local["s2_avg"][mask]
+    ref_l2 = float(np.sqrt(np.trapz(ref * ref, r))) if ref.size > 1 else float(np.abs(ref[0]))
+    return {
+        "n_overlap": int(np.count_nonzero(mask)),
+        "max_abs": float(np.max(np.abs(diff))),
+        "rms": float(np.sqrt(np.mean(diff * diff))),
+        "mean_abs": float(np.mean(np.abs(diff))),
+        "l2_abs": l2_abs,
+        "l2_rel": (l2_abs / ref_l2) if ref_l2 > 0.0 else np.nan,
+    }
+
+
 def print_table(headers, rows):
     """Print a simple fixed-width ASCII table."""
     str_rows = [[str(cell) for cell in row] for row in rows]
@@ -1030,10 +1136,12 @@ def print_table(headers, rows):
 #  Step 5: Save / plot
 # ------------------------------------------------------------------ #
 def save_fg_csv(out_csv, fg, step_number, time_value):
+    s2_model = compute_s2_from_f_model(fg, 0.5 * fg["f_raw_avg"][0] * 3.0)
     columns = [
         ("r", fg["r"]),
         ("f_norm", fg["f"]),
         ("g_norm", fg["g"]),
+        ("s2_from_f_avg", s2_model["s2"]),
         ("f_raw_avg", fg["f_raw_avg"]),
         ("g_raw_avg", fg["g_raw_avg"]),
         ("f_x", fg["f_x"]),
@@ -1077,6 +1185,24 @@ def plot_fg(fg, step_number, time_value, show=True):
     axc.grid(True, alpha=0.3, ls="--")
     axc.legend(loc="best")
 
+    fig.tight_layout()
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def plot_s2_comparison(s2_model, s2_local, step_number, time_value, show=True):
+    fig, ax = plt.subplots(figsize=(7.2, 4.8))
+    ax.plot(s2_model["r"], s2_model["s2"], color="black", lw=2.2, label=r"$\frac{4}{3}E_k(1-f(r))$")
+    ax.plot(s2_local["r"], s2_local["s2_avg"], color="tab:blue", lw=2.0, ls="--", label=r"Local $S_2(r)$")
+    ax.set_xlabel("r")
+    ax.set_ylabel(r"$S_2(r)$")
+    ax.set_title(
+        rf"$S_2(r)$ comparison, step={step_number}, t={time_value:.4e}"
+    )
+    ax.grid(True, alpha=0.3, ls="--")
+    ax.legend(loc="best")
     fig.tight_layout()
     if show:
         plt.show()
@@ -1321,7 +1447,7 @@ def plot_tgv_verification(out_png, r, f_num, g_num, f_exact, g_exact, n, show=Tr
 
 def run_tgv_verification(
         verify_n, max_r_points, out_prefix, no_plot, plot_ek,
-        plot_cross_spectrum, cross_kz_index):
+        plot_cross_spectrum, cross_kz_index, plot_s2):
     print(f"\n{'='*60}")
     print(f"VERIFY MODE: Taylor-Green vortex (N={verify_n})")
     print(f"{'='*60}")
@@ -1332,6 +1458,9 @@ def run_tgv_verification(
     R, hats = compute_tensor_correlations(vx, vy, vz)
     fg = extract_f_g(R, dx, dy, dz, max_r_points)
     ke_check = compute_ke_consistency_from_tensor(vx, vy, vz)
+    s2_model = compute_s2_from_f_model(fg, ke_check["ke_phys"])
+    s2_local = compute_s2_local_longitudinal(vx, vy, vz, dx, dy, dz, max_r_points=max_r_points)
+    s2_cmp = summarize_s2_mismatch(s2_model, s2_local)
 
     nmax = min(vx.shape) // 2
     if max_r_points is not None:
@@ -1469,6 +1598,20 @@ def run_tgv_verification(
             ["rel_diff", f"{100.0*ke_check['rel_diff']:.3e}%"],
         ],
     )
+    print("S2 comparison:")
+    print_table(
+        ["Metric", "Value"],
+        [
+            ["model", "S2_from_f(r) = (4/3) * Ek * (1 - f(r))"],
+            ["Ek", f"{s2_model['Ek']:.12e}"],
+            ["N_overlap", str(s2_cmp["n_overlap"])],
+            ["max_abs", f"{s2_cmp['max_abs']:.3e}"],
+            ["rms", f"{s2_cmp['rms']:.3e}"],
+            ["mean_abs", f"{s2_cmp['mean_abs']:.3e}"],
+            ["L2_abs", f"{s2_cmp['l2_abs']:.3e}"],
+            ["L2_rel", f"{100.0*s2_cmp['l2_rel']:.3e}%"],
+        ],
+    )
 
     # FFT consistency check in physical units for [0,1)^3:
     # fundamental wavenumber should be 2*pi.
@@ -1491,6 +1634,10 @@ def run_tgv_verification(
 
     print("Verification mode: no CSV/PNG files are written.")
     if not no_plot:
+        if plot_s2:
+            plot_s2_comparison(s2_model, s2_local, f"tgv_verify_N{verify_n}", 0.0, show=True)
+            return passed
+
         # Axis-wise exact check plot (display only)
         fig, ax = plt.subplots(figsize=(8.5, 5.5))
         ax.plot(r, f_num, lw=2.0, label="f_num (R11 along x)")
@@ -1588,6 +1735,8 @@ def main():
                         help="Also compute and plot optional shell-integrated E(k)")
     parser.add_argument("--plot-cross-spectrum", action="store_true",
                         help="Also compute and plot off-diagonal cross-correlation spectra")
+    parser.add_argument("--plot-s2", action="store_true",
+                        help="Plot S2 comparison: local shift-based S2(r) and (2/3) * Ek * (1 - f(r))")
     parser.add_argument("--cross-kz-index", type=int, default=None,
                         help="kz-slice index for 2D cross-spectrum field (default: index nearest kz=0)")
     parser.add_argument("--no-plot", action="store_true",
@@ -1603,6 +1752,7 @@ def main():
             plot_ek=args.plot_ek,
             plot_cross_spectrum=args.plot_cross_spectrum,
             cross_kz_index=args.cross_kz_index,
+            plot_s2=args.plot_s2,
         )
         return
 
@@ -1648,6 +1798,9 @@ def main():
     R, hats = compute_tensor_correlations(vx, vy, vz)
     fg = extract_f_g(R, dx, dy, dz, args.max_r_points)
     ke_check = compute_ke_consistency_from_tensor(vx, vy, vz)
+    s2_model = compute_s2_from_f_model(fg, ke_check["ke_phys"])
+    s2_local = compute_s2_local_longitudinal(vx, vy, vz, dx, dy, dz, max_r_points=args.max_r_points)
+    s2_cmp = summarize_s2_mismatch(s2_model, s2_local)
     lam_f, lam_g, d2f0, d2g0 = compute_taylor_microscales_from_curves(
         fg["r"], fg["f"], fg["g"], prefactor=1.0
     )
@@ -1731,6 +1884,20 @@ def main():
             ["rel_diff", f"{100.0*ke_check['rel_diff']:.3e}%"],
         ],
     )
+    print("S2 comparison:")
+    print_table(
+        ["Metric", "Value"],
+        [
+            ["model", "S2_from_f(r) = (4/3) * Ek * (1 - f(r))"],
+            ["Ek", f"{s2_model['Ek']:.12e}"],
+            ["N_overlap", str(s2_cmp["n_overlap"])],
+            ["max_abs", f"{s2_cmp['max_abs']:.3e}"],
+            ["rms", f"{s2_cmp['rms']:.3e}"],
+            ["mean_abs", f"{s2_cmp['mean_abs']:.3e}"],
+            ["L2_abs", f"{s2_cmp['l2_abs']:.3e}"],
+            ["L2_rel", f"{100.0*s2_cmp['l2_rel']:.3e}%"],
+        ],
+    )
 
     if args.out_prefix is None:
         stem = os.path.splitext(args.data_file)[0]
@@ -1742,7 +1909,13 @@ def main():
     save_fg_csv(out_csv, fg, step_number, time_value)
     print(f"Saved correlations CSV: {out_csv}")
 
-    plot_fg(fg, step_number, time_value, show=(not args.no_plot))
+    if not args.no_plot:
+        if args.plot_s2:
+            plot_s2_comparison(s2_model, s2_local, step_number, time_value, show=True)
+        else:
+            plot_fg(fg, step_number, time_value, show=True)
+    else:
+        print("Plotting disabled (--no-plot).")
 
     if args.plot_ek:
         print("Step 3 (optional): Compute diagonal spectral-tensor spectrum")

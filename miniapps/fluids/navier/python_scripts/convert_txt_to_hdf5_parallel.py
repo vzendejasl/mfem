@@ -59,9 +59,17 @@ import os
 import io
 import re
 import numpy as np
+from mpi4py import rc
+
+rc.initialize = False
+rc.finalize = False
+
 from mpi4py import MPI
 import h5py
 import pandas as pd
+
+if not MPI.Is_initialized():
+    MPI.Init_thread()
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
