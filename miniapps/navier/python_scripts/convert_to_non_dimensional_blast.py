@@ -333,6 +333,10 @@ def process_turb_diag_visc(
         denom = np.maximum(DEkDt_visc**2, eps)
         merged["Re_L_int_visc"] = 2.0 * Omega * (Ek**2) / denom
 
+        # Integral Length scale
+        merged["kolm_lng_scl"] = ((merged["effective_nu_visc"] ** 3) 
+                / merged["avg_de_dt_visc_rk2"].abs())**0.25
+
     keep_base = [
         "time",
         "cycle",
@@ -355,6 +359,7 @@ def process_turb_diag_visc(
         "Re_lambda_ke_visc",
         "L_int",
         "Re_L_int_visc",
+        "kolm_lng_scl",
     ]:
         if c in merged.columns:
             keep_extra.append(c)
