@@ -171,13 +171,17 @@ def process_file(fname: str, U0: float, domain_length: float, round_time_decimal
     ens_safe = df['enstrophy'].where(df['enstrophy'].abs() > eps_n, np.nan)
 
     # ν_eff_half = -(dK/dt) / (2 Ω)
-    df['effective_nu'] = -df['dk_dt'] / (2.0 * ens_safe)
+    df['effective_nu_half'] = -df['dk_dt'] / (2.0 * ens_safe)
 
-    df[['effective_nu']] = \
-        df[['effective_nu']].bfill().ffill()
+    # ν_eff = -(dK/dt) / Ω  (often seen; included for comparison)
+    df['effective_nu'] = -df['dk_dt'] / (ens_safe)
+
+    df[['effective_nu_half', 'effective_nu']] = \
+        df[['effective_nu_half', 'effective_nu']].bfill().ffill()
 
     # 6) Reynolds numbers
     # Re_half = U0*L / ν_eff_half ; Re = U0*L / ν_eff
+    df['Re_half'] = (U0 * L) / df['effective_nu_half']
     df['Re'] = (U0 * L) / df['effective_nu']
 
     # 7) Example alternative “ReL” diagnostic (safe denominator)
@@ -192,11 +196,16 @@ def process_file(fname: str, U0: float, domain_length: float, round_time_decimal
     # (dK/dt)* = (dK/dt) / (U0^3 / L)
     df['dk_dt_star'] = df['dk_dt'] / (U0**3 / L)
 
+<<<<<<< HEAD
+    # ω* = 2.0*ω / (U0/L)^2
+    df['enstrophy_star'] = df['enstrophy'] * 2.0 / (U0/L)**2
+=======
     # enstrophy* = 2 Ω / (U0/L)^2
     df['enstrophy_star'] = df['enstrophy'] * 2.0 / (U0 / L)**2
 
     # K* = K / U0^2
     df['kinetic_energy_star'] = df['kinetic_energy'] / (U0**2)
+>>>>>>> 0eace20e2610258b8983c8ca39678f0b62c4ff56
 
     # 9) Write output (comma-separated, with nice spacing in header)
     out_dir = os.path.dirname(os.path.abspath(fname))
