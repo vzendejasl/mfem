@@ -47,6 +47,32 @@ public:
    VectorCoefficient *coeff;
 };
 
+/// Container for a component-wise Dirichlet boundary condition of the velocity field.
+class VelComponentDirichletBC_T
+{
+public:
+   VelComponentDirichletBC_T(Array<int> attr, int component, Coefficient *coeff,
+                             int vdim)
+      : attr(attr), component(component), coeff(coeff), vcoeff(vdim)
+   {
+      vcoeff.Set(component, coeff, false);
+   }
+
+   VelComponentDirichletBC_T(VelComponentDirichletBC_T &&obj)
+      : attr(obj.attr), component(obj.component), coeff(obj.coeff),
+        vcoeff(std::move(obj.vcoeff))
+   {
+      obj.coeff = nullptr;
+   }
+
+   ~VelComponentDirichletBC_T() { delete coeff; }
+
+   Array<int> attr;
+   int component;
+   Coefficient *coeff;
+   VectorArrayCoefficient vcoeff;
+};
+
 /// Container for a Dirichlet boundary condition of the pressure field.
 class PresDirichletBC_T
 {
@@ -198,6 +224,14 @@ public:
    void AddVelDirichletBC(VectorCoefficient *coeff, Array<int> &attr);
 
    void AddVelDirichletBC(VecFuncT *f, Array<int> &attr);
+
+   /// Add a component-wise Dirichlet boundary condition to the velocity field.
+   void AddVelDirichletBC(Coefficient *coeff, Array<int> &attr, int component);
+
+   void AddVelDirichletBC(ScalarFuncT *f, Array<int> &attr, int component);
+
+   /// Mark boundaries where the wall-normal velocity is prescribed.
+   void AddPrescribedNormalVelocityBC(Array<int> &attr);
 
    /// Add a Dirichlet boundary condition to the pressure field.
    void AddPresDirichletBC(Coefficient *coeff, Array<int> &attr);
@@ -411,16 +445,27 @@ protected:
 
    ParGridFunction pn_gf, resp_gf;
 
-   // All essential attributes.
+   // Full-vector essential velocity boundary attributes.
    Array<int> vel_ess_attr;
+
+   // Component-wise essential velocity boundary attributes.
+   std::vector<Array<int>> vel_component_ess_attr;
+
+   // Boundaries where the wall-normal velocity is prescribed.
+   Array<int> vel_prescribed_normal_attr;
+
+   // Essential pressure boundary attributes.
    Array<int> pres_ess_attr;
 
    // All essential true dofs.
    Array<int> vel_ess_tdof;
    Array<int> pres_ess_tdof;
 
-   // Bookkeeping for velocity Dirichlet BCs.
+   // Bookkeeping for full-vector velocity Dirichlet BCs.
    std::vector<VelDirichletBC_T> vel_dbcs;
+
+   // Bookkeeping for component-wise velocity Dirichlet BCs.
+   std::vector<VelComponentDirichletBC_T> vel_component_dbcs;
 
    // Bookkeeping for pressure Dirichlet BCs.
    std::vector<PresDirichletBC_T> pres_dbcs;

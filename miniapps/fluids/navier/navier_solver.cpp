@@ -39,6 +39,16 @@ NavierSolver::NavierSolver(ParMesh *mesh, int order, real_t kin_vis)
       vel_ess_attr.SetSize(pmesh->bdr_attributes.Max());
       vel_ess_attr = 0;
 
+      vel_component_ess_attr.resize(pmesh->Dimension());
+      for (int d = 0; d < pmesh->Dimension(); ++d)
+      {
+         vel_component_ess_attr[d].SetSize(pmesh->bdr_attributes.Max());
+         vel_component_ess_attr[d] = 0;
+      }
+
+      vel_prescribed_normal_attr.SetSize(pmesh->bdr_attributes.Max());
+      vel_prescribed_normal_attr = 0;
+
       pres_ess_attr.SetSize(pmesh->bdr_attributes.Max());
       pres_ess_attr = 0;
    }
@@ -112,7 +122,23 @@ void NavierSolver::Setup(real_t dt)
 
    sw_setup.Start();
 
-   vfes->GetEssentialTrueDofs(vel_ess_attr, vel_ess_tdof);
+   Array<int> vel_ess_tdof_marker(vfes->GetTrueVSize());
+   vel_ess_tdof_marker = 0;
+   Array<int> tdofs_tmp;
+   vfes->GetEssentialTrueDofs(vel_ess_attr, tdofs_tmp);
+   for (int i = 0; i < tdofs_tmp.Size(); ++i)
+   {
+      vel_ess_tdof_marker[tdofs_tmp[i]] = 1;
+   }
+   for (int d = 0; d < (int)vel_component_ess_attr.size(); ++d)
+   {
+      vfes->GetEssentialTrueDofs(vel_component_ess_attr[d], tdofs_tmp, d);
+      for (int i = 0; i < tdofs_tmp.Size(); ++i)
+      {
+         vel_ess_tdof_marker[tdofs_tmp[i]] = 1;
+      }
+   }
+   FiniteElementSpace::MarkerToList(vel_ess_tdof_marker, vel_ess_tdof);
    pfes->GetEssentialTrueDofs(pres_ess_attr, pres_ess_tdof);
 
    Array<int> empty;
@@ -219,7 +245,7 @@ void NavierSolver::Setup(real_t dt)
    {
       ftext_bnlfi->SetIntRule(&ir_ni);
    }
-   FText_bdr_form->AddBoundaryIntegrator(ftext_bnlfi, vel_ess_attr);
+   FText_bdr_form->AddBoundaryIntegrator(ftext_bnlfi, vel_prescribed_normal_attr);
 
    g_bdr_form = new ParLinearForm(pfes);
    for (auto &vel_dbc : vel_dbcs)
@@ -230,6 +256,23 @@ void NavierSolver::Setup(real_t dt)
          gbdr_bnlfi->SetIntRule(&ir_ni);
       }
       g_bdr_form->AddBoundaryIntegrator(gbdr_bnlfi, vel_dbc.attr);
+   }
+   for (auto &vel_dbc : vel_component_dbcs)
+   {
+      Array<int> normal_attr(vel_dbc.attr.Size());
+      normal_attr = 0;
+      for (int i = 0; i < normal_attr.Size(); ++i)
+      {
+         normal_attr[i] = vel_dbc.attr[i] && vel_prescribed_normal_attr[i];
+      }
+      if (normal_attr.Max() == 0) { continue; }
+
+      auto *gbdr_bnlfi = new BoundaryNormalLFIntegrator(vel_dbc.vcoeff);
+      if (numerical_integ)
+      {
+         gbdr_bnlfi->SetIntRule(&ir_ni);
+      }
+      g_bdr_form->AddBoundaryIntegrator(gbdr_bnlfi, normal_attr);
    }
 
    f_form = new ParLinearForm(vfes);
@@ -561,6 +604,14 @@ void NavierSolver::Step(real_t &time, real_t dt, int current_step,
    for (auto &vel_dbc : vel_dbcs)
    {
       un_next_gf.ProjectBdrCoefficient(*vel_dbc.coeff, vel_dbc.attr);
+   }
+   Array<Coefficient *> comp_coeff(vfes->GetVDim());
+   comp_coeff = nullptr;
+   for (auto &vel_dbc : vel_component_dbcs)
+   {
+      comp_coeff = nullptr;
+      comp_coeff[vel_dbc.component] = vel_dbc.coeff;
+      un_next_gf.ProjectBdrCoefficient(comp_coeff.GetData(), vel_dbc.attr);
    }
 
    vfes->GetRestrictionMatrix()->MultTranspose(resu, resu_gf);
@@ -1076,7 +1127,7 @@ void NavierSolver::AddVelDirichletBC(VectorCoefficient *coeff, Array<int> &attr)
       {
          if (attr[i] == 1)
          {
-            mfem::out << i << " ";
+            mfem::out << (i + 1) << " ";
          }
       }
       mfem::out << std::endl;
@@ -1089,6 +1140,7 @@ void NavierSolver::AddVelDirichletBC(VectorCoefficient *coeff, Array<int> &attr)
       if (attr[i] == 1)
       {
          vel_ess_attr[i] = 1;
+         vel_prescribed_normal_attr[i] = 1;
       }
    }
 }
@@ -1096,6 +1148,71 @@ void NavierSolver::AddVelDirichletBC(VectorCoefficient *coeff, Array<int> &attr)
 void NavierSolver::AddVelDirichletBC(VecFuncT *f, Array<int> &attr)
 {
    AddVelDirichletBC(new VectorFunctionCoefficient(pmesh->Dimension(), f), attr);
+}
+
+void NavierSolver::AddVelDirichletBC(Coefficient *coeff, Array<int> &attr,
+                                     int component)
+{
+   MFEM_VERIFY(component >= 0 && component < pmesh->Dimension(),
+               "Invalid velocity component index.");
+
+   vel_component_dbcs.emplace_back(attr, component, coeff, pmesh->Dimension());
+
+   if (verbose && pmesh->GetMyRank() == 0)
+   {
+      mfem::out << "Adding component Velocity Dirichlet BC for component "
+                << component << " to attributes ";
+      for (int i = 0; i < attr.Size(); ++i)
+      {
+         if (attr[i] == 1)
+         {
+            mfem::out << (i + 1) << " ";
+         }
+      }
+      mfem::out << std::endl;
+   }
+
+   for (int i = 0; i < attr.Size(); ++i)
+   {
+      MFEM_ASSERT((vel_ess_attr[i] && attr[i]) == 0,
+                  "Duplicate boundary definition deteceted.");
+      MFEM_ASSERT((vel_component_ess_attr[component][i] && attr[i]) == 0,
+                  "Duplicate component boundary definition deteceted.");
+      if (attr[i] == 1)
+      {
+         vel_component_ess_attr[component][i] = 1;
+      }
+   }
+}
+
+void NavierSolver::AddVelDirichletBC(ScalarFuncT *f, Array<int> &attr,
+                                     int component)
+{
+   AddVelDirichletBC(new FunctionCoefficient(f), attr, component);
+}
+
+void NavierSolver::AddPrescribedNormalVelocityBC(Array<int> &attr)
+{
+   if (verbose && pmesh->GetMyRank() == 0)
+   {
+      mfem::out << "Marking prescribed-normal-velocity BC on attributes ";
+      for (int i = 0; i < attr.Size(); ++i)
+      {
+         if (attr[i] == 1)
+         {
+            mfem::out << (i + 1) << " ";
+         }
+      }
+      mfem::out << std::endl;
+   }
+
+   for (int i = 0; i < attr.Size(); ++i)
+   {
+      if (attr[i] == 1)
+      {
+         vel_prescribed_normal_attr[i] = 1;
+      }
+   }
 }
 
 void NavierSolver::AddPresDirichletBC(Coefficient *coeff, Array<int> &attr)

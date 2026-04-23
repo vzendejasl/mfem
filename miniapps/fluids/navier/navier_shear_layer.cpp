@@ -5,7 +5,7 @@
 // Single-domain Navier shear-layer demo (2D/3D via -dim, default 2):
 // - Programmatic rectangular mesh (channel)
 // - Inflow: hyperbolic tangent shear profile
-// - Top/bottom: Dirichlet moving walls (u=3 at top, u=1 at bottom)
+// - Top/bottom: free-slip walls (v=0, tangential velocity unconstrained)
 // - Outflow: natural/Neumann (do not mark as essential)
 // - VisIt output (VisItDataCollection)
 //
@@ -28,10 +28,12 @@
 #include "navier_solver.hpp"
 #include "navier_utils.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cerrno>
 #include <iostream>
 #include <memory>
+#include <string>
 #include <sys/stat.h>
 #include <vector>
 
@@ -151,13 +153,21 @@ static inline real_t omega_from_convective()
           : 0.0;
 }
 
+static inline real_t wall_envelope(real_t y)
+{
+   const real_t Ly = g_ymax - g_ymin;
+   if (Ly <= 0.0) { return 0.0; }
+   const real_t eta = (y - g_ymin) / Ly;
+   return 4.0 * eta * (1.0 - eta);
+}
+
 static inline real_t perturb_uy_2d(real_t x, real_t y, real_t t)
 {
    const real_t y0 = 0.5*(g_ymin + g_ymax);
    const real_t phase = 2.0*M_PI*real_t(g_k) * (x - g_xmin) / (g_xmax - g_xmin);
    const real_t gauss = std::exp(-std::pow((y - y0)/g_sigma, 2));
    const real_t omega = omega_from_convective();
-   return g_eps * std::sin(phase - omega*t) * gauss;
+   return g_eps * std::sin(phase - omega*t) * gauss * wall_envelope(y);
 }
 
 static inline real_t spanwise_mode_sum(real_t z, real_t t)
@@ -180,7 +190,7 @@ static inline real_t perturb_uy_3d(real_t y, real_t z, real_t t)
 {
    const real_t y0 = 0.5*(g_ymin + g_ymax);
    const real_t gauss = std::exp(-std::pow((y - y0)/g_sigma, 2));
-   return g_eps * spanwise_mode_sum(z, t) * gauss;
+   return g_eps * spanwise_mode_sum(z, t) * gauss * wall_envelope(y);
 }
 
 void vel_inflow(const Vector &x, real_t t, Vector &u)
@@ -199,20 +209,9 @@ void vel_inflow(const Vector &x, real_t t, Vector &u)
 }
 
 
-// Dirichlet BC function for top wall: constant u=Utop
-void vel_top(const Vector &, real_t, Vector &u)
+real_t zero_scalar(const Vector &, real_t)
 {
-   u.SetSize(g_dim);
-   u = 0.0;
-   u(0) = g_Utop;
-}
-
-// Dirichlet BC function for bottom wall: constant u=Ubot
-void vel_bottom(const Vector &, real_t, Vector &u)
-{
-   u.SetSize(g_dim);
-   u = 0.0;
-   u(0) = g_Ubot;
+   return 0.0;
 }
 
 // Initial condition: start from the inflow shear profile everywhere (simple)
@@ -231,6 +230,96 @@ void vel_ic(const Vector &x, Vector &u)
    }
 }
 
+
+
+static void ComputeWallDiagnostics(ParGridFunction &u,
+                                   int attr,
+                                   real_t &max_abs_un,
+                                   real_t &l2_un,
+                                   real_t &max_ut)
+{
+   ParFiniteElementSpace *pfes = u.ParFESpace();
+   ParMesh *pmesh = pfes->GetParMesh();
+   const int dim = pmesh->Dimension();
+
+   real_t local_max_abs_un = 0.0;
+   real_t local_int_un2 = 0.0;
+   real_t local_int_ds = 0.0;
+   real_t local_max_ut = 0.0;
+
+   Vector uval(dim), nor(dim);
+   for (int be = 0; be < pfes->GetNBE(); ++be)
+   {
+      if (pmesh->GetBdrAttribute(be) != attr) { continue; }
+
+      const FiniteElement *fe = pfes->GetBE(be);
+      ElementTransformation *T = pfes->GetBdrElementTransformation(be);
+      const int intorder = std::max(2, 2 * fe->GetOrder() + 2);
+      const IntegrationRule &ir = IntRules.Get(fe->GetGeomType(), intorder);
+
+      for (int j = 0; j < ir.GetNPoints(); ++j)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(j);
+         T->SetIntPoint(&ip);
+         u.GetVectorValue(*T, ip, uval);
+
+         CalcOrtho(T->Jacobian(), nor);
+         const real_t nor_norm = nor.Norml2();
+         if (nor_norm <= 0.0) { continue; }
+         nor /= nor_norm;
+
+         const real_t un = uval * nor;
+         const real_t ut2 = std::max(real_t(0.0), uval * uval - un * un);
+         const real_t ut = std::sqrt(ut2);
+         const real_t ds = ip.weight * T->Weight();
+
+         local_max_abs_un = std::max(local_max_abs_un, std::abs(un));
+         local_int_un2 += ds * un * un;
+         local_int_ds += ds;
+         local_max_ut = std::max(local_max_ut, ut);
+      }
+   }
+
+   MPI_Allreduce(&local_max_abs_un, &max_abs_un, 1, MPITypeMap<real_t>::mpi_type,
+                 MPI_MAX, pmesh->GetComm());
+   MPI_Allreduce(&local_int_un2, &l2_un, 1, MPITypeMap<real_t>::mpi_type,
+                 MPI_SUM, pmesh->GetComm());
+   real_t global_int_ds = 0.0;
+   MPI_Allreduce(&local_int_ds, &global_int_ds, 1, MPITypeMap<real_t>::mpi_type,
+                 MPI_SUM, pmesh->GetComm());
+   MPI_Allreduce(&local_max_ut, &max_ut, 1, MPITypeMap<real_t>::mpi_type,
+                 MPI_MAX, pmesh->GetComm());
+
+   l2_un = (global_int_ds > 0.0) ? std::sqrt(l2_un / global_int_ds) : 0.0;
+}
+
+static void PrintSlipWallDiagnostics(ParGridFunction &u,
+                                     int top_attr,
+                                     int bottom_attr,
+                                     int step,
+                                     real_t t)
+{
+   real_t top_max_abs_un = 0.0, top_l2_un = 0.0, top_max_ut = 0.0;
+   real_t bot_max_abs_un = 0.0, bot_l2_un = 0.0, bot_max_ut = 0.0;
+
+   ComputeWallDiagnostics(u, top_attr, top_max_abs_un, top_l2_un, top_max_ut);
+   ComputeWallDiagnostics(u, bottom_attr, bot_max_abs_un, bot_l2_un, bot_max_ut);
+
+   const int myid = u.ParFESpace()->GetParMesh()->GetMyRank();
+   if (myid == 0)
+   {
+      std::cout << "[BC debug] step " << step
+                << "  t = " << t
+                << "  dim = " << g_dim
+                << "\n"
+                << "  top wall    : max|u.n| = " << top_max_abs_un
+                << "  L2(u.n) = " << top_l2_un
+                << "  max|u_t| = " << top_max_ut << "\n"
+                << "  bottom wall : max|u.n| = " << bot_max_abs_un
+                << "  L2(u.n) = " << bot_l2_un
+                << "  max|u_t| = " << bot_max_ut << "\n";
+   }
+}
 
 // Optional GLVis helper (same pattern as MFEM examples)
 static void VisualizeField(socketstream &sock,
@@ -331,8 +420,8 @@ int main(int argc, char *argv[])
    args.AddOption(&ctx.data_dump_cycle, "-dc", "--dump-cycle",
                   "Write VisIt output every N steps (0 => every step).");
 
-   args.AddOption(&g_Utop, "-Utop", "--Utop", "Top wall streamwise speed.");
-   args.AddOption(&g_Ubot, "-Ubot", "--Ubot", "Bottom wall streamwise speed.");
+   args.AddOption(&g_Utop, "-Utop", "--Utop", "Upper-stream asymptotic speed in the shear profile.");
+   args.AddOption(&g_Ubot, "-Ubot", "--Ubot", "Lower-stream asymptotic speed in the shear profile.");
    args.AddOption(&g_delta, "-delta", "--delta", "Shear thickness in y-units.");
    args.AddOption(&g_eps, "-eps", "--eps", "Perturbation amplitude for uy at inflow.");
    args.AddOption(&g_k, "-k", "--k", "Perturbation wavenumber in x (2D only).");
@@ -425,18 +514,21 @@ Array<int> bdr(pmesh.bdr_attributes.Max());
 int inflow_attr = (g_dim == 2) ? BDR_LEFT : BDR_XMIN;
 int top_attr    = (g_dim == 2) ? BDR_TOP : BDR_YMAX;
 int bottom_attr = (g_dim == 2) ? BDR_BOTTOM : BDR_YMIN;
+const int wall_normal_component = 1; // y-component in both 2D and 3D
 
-// Inflow (x-min)
+// Inflow (x-min): full velocity Dirichlet.
 bdr = 0; bdr[inflow_attr - 1] = 1;
 flowsolver.AddVelDirichletBC(vel_inflow, bdr);
 
-// Top (y-max)
+// Top (y-max): free-slip wall, enforce only zero normal velocity.
 bdr = 0; bdr[top_attr - 1] = 1;
-flowsolver.AddVelDirichletBC(vel_top, bdr);
+flowsolver.AddVelDirichletBC(zero_scalar, bdr, wall_normal_component);
+flowsolver.AddPrescribedNormalVelocityBC(bdr);
 
-// Bottom (y-min)
+// Bottom (y-min): free-slip wall, enforce only zero normal velocity.
 bdr = 0; bdr[bottom_attr - 1] = 1;
-flowsolver.AddVelDirichletBC(vel_bottom, bdr);
+flowsolver.AddVelDirichletBC(zero_scalar, bdr, wall_normal_component);
+flowsolver.AddPrescribedNormalVelocityBC(bdr);
 
 // ---- Initialize velocity BEFORE Setup ----
 ParGridFunction *u = flowsolver.GetCurrentVelocity();
@@ -449,6 +541,15 @@ flowsolver.Setup(ctx.dt);
 
 // (optional) re-grab pointer in case Setup swaps internal storage
 u = flowsolver.GetCurrentVelocity();
+
+if (myid == 0)
+{
+   std::cout << "[BC debug] Free-slip walls enabled on boundary attributes "
+             << bottom_attr << " and " << top_attr
+             << "; enforcing zero wall-normal component index "
+             << wall_normal_component << " (y-direction)." << std::endl;
+}
+PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
 
    // -------------------------
    // VisIt output
@@ -522,6 +623,11 @@ u = flowsolver.GetCurrentVelocity();
          char vishost[] = "localhost";
          VisualizeField(vis_sock, vishost, visport, *u, "Velocity",
                         /*x=*/10, /*y=*/10, /*w=*/500, /*h=*/350, /*vec=*/true);
+      }
+
+      if (step % 10 == 0)
+      {
+         PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, step, t);
       }
 
       if (myid == 0 && (step % 10 == 0))
