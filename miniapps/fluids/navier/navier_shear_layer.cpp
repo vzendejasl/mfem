@@ -450,6 +450,7 @@ int main(int argc, char *argv[])
    }
    g_dim = dim;
 
+
    ctx.kinvis = 1.0 / ctx.reynum;
 
    // Domain bounds for BC functions
@@ -472,6 +473,8 @@ int main(int argc, char *argv[])
                                    /*sx=*/lx, /*sy=*/ly, /*sz=*/lz,
                                    /*sfc_ordering=*/true);
    }
+
+
    mesh.SetCurvature(ctx.order, /*discont=*/false);
 
    for (int lev = 0; lev < ctx.ref_levels; lev++) { mesh.UniformRefinement(); }
@@ -532,6 +535,10 @@ flowsolver.AddPrescribedNormalVelocityBC(bdr);
 
 // ---- Initialize velocity BEFORE Setup ----
 ParGridFunction *u = flowsolver.GetCurrentVelocity();
+   ParGridFunction *w = flowsolver.GetCurrentVorticity();
+   *w = 0.0;
+
+
 VectorFunctionCoefficient u0(g_dim, vel_ic);
 u->ProjectCoefficient(u0);
 u->SetTrueVector(); // keep tdofs consistent
@@ -576,6 +583,8 @@ PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
       // visit_dc->SetBinary(ctx.binary);
 
       visit_dc->RegisterField("velocity", u);
+      visit_dc->RegisterField("vorticity", w);
+
       visit_dc->SetCycle(0);
       visit_dc->SetTime(0.0);
       visit_dc->Save();
