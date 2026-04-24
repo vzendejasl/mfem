@@ -33,6 +33,7 @@
 #include <cerrno>
 #include <iostream>
 #include <memory>
+#include <limits>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
@@ -81,6 +82,14 @@ static int    g_nper  = 4;    // oscillations per convective time (Lx/Uc)
 static int    g_nmodes = 1;   // spanwise Fourier modes (3D only)
 static real_t g_phi0  = 0.0;  // base phase (radians)
 static bool   g_per_z = true; // periodic in z (3D only)
+
+static bool   g_use_scalar    = true;
+static real_t g_scalar_kappa  = -1.0; // < 0 => use nu
+static real_t g_scalar_top    = 1.0;
+static real_t g_scalar_bottom = 0.0;
+static real_t g_scalar_delta  = -1.0; // < 0 => use velocity shear thickness
+static bool   g_scalar_supg   = true;
+static real_t g_scalar_supg_c = 1.0; // streamline-diffusion scale
 
 // Accessors expected by navier_utils.[hpp,cpp].
 bool   GetVisit(const s_NavierContext *c) { return c && c->visit; }
@@ -214,6 +223,26 @@ real_t zero_scalar(const Vector &, real_t)
    return 0.0;
 }
 
+static inline real_t scalar_profile(real_t y)
+{
+   const real_t y0 = 0.5 * (g_ymin + g_ymax);
+   const real_t delta = (g_scalar_delta > 0.0) ? g_scalar_delta : g_delta;
+   const real_t cmean = 0.5 * (g_scalar_top + g_scalar_bottom);
+   const real_t dc = (g_scalar_top - g_scalar_bottom);
+   const real_t arg = (y - y0) / delta;
+   return cmean + 0.5 * dc * std::tanh(arg);
+}
+
+real_t scalar_inflow(const Vector &x)
+{
+   return scalar_profile(x(1));
+}
+
+real_t scalar_ic(const Vector &x)
+{
+   return scalar_profile(x(1));
+}
+
 // Initial condition: start from the inflow shear profile everywhere (simple)
 void vel_ic(const Vector &x, Vector &u)
 {
@@ -320,6 +349,225 @@ static void PrintSlipWallDiagnostics(ParGridFunction &u,
                 << "  max|u_t| = " << bot_max_ut << "\n";
    }
 }
+
+
+class StreamlineDiffusionMatrixCoefficient : public MatrixCoefficient
+{
+private:
+   VectorGridFunctionCoefficient &vel_coeff;
+   real_t dt;
+   real_t c_supg;
+   real_t small;
+
+public:
+   StreamlineDiffusionMatrixCoefficient(int dim,
+                                        VectorGridFunctionCoefficient &vel_coeff_,
+                                        real_t dt_, real_t c_supg_)
+      : MatrixCoefficient(dim),
+        vel_coeff(vel_coeff_),
+        dt(dt_),
+        c_supg(c_supg_),
+        small(1.0e-14)
+   { }
+
+   void Eval(DenseMatrix &M, ElementTransformation &T,
+             const IntegrationPoint &ip) override
+   {
+      Vector u(GetVDim());
+      vel_coeff.Eval(u, T, ip);
+
+      const real_t umag = u.Norml2();
+      const real_t h = 2.0 * std::pow(std::abs(T.Weight()), 1.0 / GetVDim());
+
+      M.SetSize(GetVDim());
+      M = 0.0;
+
+      if (umag <= small || h <= small || c_supg <= 0.0)
+      {
+         return;
+      }
+
+      const real_t tau = c_supg * h / (2.0 * umag + small);
+      const real_t scale = dt * tau;
+      for (int i = 0; i < GetVDim(); ++i)
+      {
+         for (int j = 0; j < GetVDim(); ++j)
+         {
+            M(i, j) = scale * u(i) * u(j);
+         }
+      }
+   }
+};
+
+static real_t ComputeScalarMass(ParGridFunction &c)
+{
+   ParFiniteElementSpace *fes = c.ParFESpace();
+   ParMesh *pmesh = fes->GetParMesh();
+   GridFunctionCoefficient c_coeff(&c);
+
+   real_t local_mass = 0.0;
+   for (int e = 0; e < fes->GetNE(); ++e)
+   {
+      const FiniteElement *fe = fes->GetFE(e);
+      ElementTransformation *Tr = fes->GetElementTransformation(e);
+      const Geometry::Type geom = fe->GetGeomType();
+      const int ir_order = std::max(2 * fe->GetOrder() + 3, 4);
+      const IntegrationRule &ir = IntRules.Get(geom, ir_order);
+
+      for (int q = 0; q < ir.GetNPoints(); ++q)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         Tr->SetIntPoint(&ip);
+         local_mass += ip.weight * Tr->Weight() * c_coeff.Eval(*Tr, ip);
+      }
+   }
+
+   real_t global_mass = 0.0;
+   MPI_Allreduce(&local_mass, &global_mass, 1, MPITypeMap<real_t>::mpi_type,
+                 MPI_SUM, pmesh->GetComm());
+   return global_mass;
+}
+
+static void PrintScalarDiagnostics(ParGridFunction &c, int step, real_t t)
+{
+   c.HostRead();
+   real_t cmin = std::numeric_limits<real_t>::infinity();
+   real_t cmax = -std::numeric_limits<real_t>::infinity();
+   for (int i = 0; i < c.Size(); ++i)
+   {
+      cmin = std::min(cmin, c(i));
+      cmax = std::max(cmax, c(i));
+   }
+
+   real_t gcmin = 0.0, gcmax = 0.0;
+   MPI_Allreduce(&cmin, &gcmin, 1, MPITypeMap<real_t>::mpi_type, MPI_MIN,
+                 c.ParFESpace()->GetParMesh()->GetComm());
+   MPI_Allreduce(&cmax, &gcmax, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX,
+                 c.ParFESpace()->GetParMesh()->GetComm());
+
+   const real_t mass = ComputeScalarMass(c);
+   const int myid = c.ParFESpace()->GetParMesh()->GetMyRank();
+   if (myid == 0)
+   {
+      std::cout << "[Scalar] step " << step
+                << "  t = " << t
+                << "  min(dye) = " << gcmin
+                << "  max(dye) = " << gcmax
+                << "  mass(dye) = " << mass << std::endl;
+   }
+}
+
+
+class PassiveScalarSolver
+{
+private:
+   H1_FECollection scalar_fec;
+   ParFiniteElementSpace scalar_fes;
+   ParGridFunction scalar_gf;
+   VectorGridFunctionCoefficient vel_coeff;
+   Array<int> inflow_attr;
+   Array<int> ess_tdof_list;
+   real_t dt;
+   real_t kappa;
+   bool use_supg;
+   real_t supg_c;
+   ConstantCoefficient kappa_dt_coeff;
+   StreamlineDiffusionMatrixCoefficient supg_coeff;
+
+   ParBilinearForm mass_form;
+
+   CGSolver lin_solver;
+   HypreBoomerAMG amg;
+   OperatorHandle Ah;
+   Vector rhs_mass, rhs_adv, rhs, X, B;
+
+public:
+   PassiveScalarSolver(ParMesh *pmesh, int order, real_t dt_, real_t kappa_,
+                       const Array<int> &inflow_attr_, bool use_supg_,
+                       real_t supg_c_)
+      : scalar_fec(order, pmesh->Dimension()),
+        scalar_fes(pmesh, &scalar_fec),
+        scalar_gf(&scalar_fes),
+        vel_coeff(),
+        inflow_attr(inflow_attr_),
+        dt(dt_),
+        kappa(kappa_),
+        use_supg(use_supg_),
+        supg_c(supg_c_),
+        kappa_dt_coeff(dt_ * kappa_),
+        supg_coeff(pmesh->Dimension(), vel_coeff, dt_, supg_c_),
+        mass_form(&scalar_fes),
+        lin_solver(pmesh->GetComm())
+   {
+      scalar_fes.GetEssentialTrueDofs(inflow_attr, ess_tdof_list);
+
+      scalar_gf = 0.0;
+      rhs_mass.SetSize(scalar_fes.GetVSize());
+      rhs_adv.SetSize(scalar_fes.GetVSize());
+      rhs.SetSize(scalar_fes.GetVSize());
+
+      mass_form.AddDomainIntegrator(new MassIntegrator());
+      mass_form.Assemble();
+      mass_form.Finalize();
+
+      Ah.SetType(Operator::Hypre_ParCSR);
+      lin_solver.iterative_mode = false;
+      lin_solver.SetRelTol(1e-10);
+      lin_solver.SetAbsTol(0.0);
+      lin_solver.SetMaxIter(200);
+      lin_solver.SetPrintLevel(0);
+      amg.SetPrintLevel(0);
+   }
+
+   void SetVelocity(ParGridFunction *u)
+   {
+      vel_coeff.SetGridFunction(u);
+   }
+
+   void ProjectInitialCondition(Coefficient &ic_coeff, Coefficient &inflow_coeff)
+   {
+      scalar_gf.ProjectCoefficient(ic_coeff);
+      scalar_gf.ProjectBdrCoefficient(inflow_coeff, inflow_attr);
+      scalar_gf.SetTrueVector();
+   }
+
+   void Step(Coefficient &inflow_coeff)
+   {
+      scalar_gf.ProjectBdrCoefficient(inflow_coeff, inflow_attr);
+
+      mass_form.Mult(scalar_gf, rhs_mass);
+
+      ParBilinearForm adv_form(&scalar_fes);
+      adv_form.AddDomainIntegrator(new ConvectionIntegrator(vel_coeff, 1.0));
+      adv_form.Assemble();
+      adv_form.Finalize();
+      adv_form.Mult(scalar_gf, rhs_adv);
+
+      rhs = rhs_mass;
+      rhs.Add(-dt, rhs_adv);
+
+      ParBilinearForm lhs_form(&scalar_fes);
+      lhs_form.AddDomainIntegrator(new MassIntegrator());
+      lhs_form.AddDomainIntegrator(new DiffusionIntegrator(kappa_dt_coeff));
+      if (use_supg && supg_c > 0.0)
+      {
+         lhs_form.AddDomainIntegrator(new DiffusionIntegrator(supg_coeff));
+      }
+      lhs_form.Assemble();
+      lhs_form.Finalize();
+
+      lhs_form.FormLinearSystem(ess_tdof_list, scalar_gf, rhs, Ah, X, B);
+      HypreParMatrix &A = *Ah.As<HypreParMatrix>();
+      amg.SetOperator(A);
+      lin_solver.SetPreconditioner(amg);
+      lin_solver.SetOperator(A);
+      lin_solver.Mult(B, X);
+      lhs_form.RecoverFEMSolution(X, rhs, scalar_gf);
+      scalar_gf.SetTrueVector();
+   }
+
+   ParGridFunction *GetField() { return &scalar_gf; }
+};
 
 // Optional GLVis helper (same pattern as MFEM examples)
 static void VisualizeField(socketstream &sock,
@@ -433,7 +681,20 @@ int main(int argc, char *argv[])
                   "Oscillations per convective time (Lx/Uc).");
    args.AddOption(&g_per_z, "-per-z", "--per-z", "-no-per-z", "--no-per-z",
                   "Enable/disable periodicity in z (3D only).");
-
+   args.AddOption(&g_use_scalar, "-scalar", "--scalar", "-no-scalar", "--no-scalar",
+                  "Enable/disable passive dye advection-diffusion.");
+   args.AddOption(&g_scalar_kappa, "-sc-kappa", "--scalar-kappa",
+                  "Passive scalar diffusivity; negative values use nu.");
+   args.AddOption(&g_scalar_top, "-sc-top", "--scalar-top",
+                  "Top-stream passive scalar value.");
+   args.AddOption(&g_scalar_bottom, "-sc-bottom", "--scalar-bottom",
+                  "Bottom-stream passive scalar value.");
+   args.AddOption(&g_scalar_delta, "-sc-delta", "--scalar-delta",
+                  "Passive scalar interface thickness; negative values use the velocity shear thickness.");
+   args.AddOption(&g_scalar_supg, "-sc-supg", "--scalar-supg", "-no-sc-supg", "--no-scalar-supg",
+                  "Enable/disable streamline SUPG-like stabilization for the passive scalar.");
+   args.AddOption(&g_scalar_supg_c, "-sc-supg-c", "--scalar-supg-c",
+                  "Streamline SUPG stabilization coefficient.");
 
    args.Parse();
    if (!args.Good())
@@ -452,6 +713,7 @@ int main(int argc, char *argv[])
 
 
    ctx.kinvis = 1.0 / ctx.reynum;
+   if (g_scalar_kappa < 0.0) { g_scalar_kappa = ctx.kinvis; }
 
    // Domain bounds for BC functions
    g_xmin = 0.0; g_xmax = lx;
@@ -558,6 +820,34 @@ if (myid == 0)
 }
 PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
 
+   std::unique_ptr<PassiveScalarSolver> scalar_solver;
+   FunctionCoefficient scalar_inflow_coeff(scalar_inflow);
+   FunctionCoefficient scalar_ic_coeff(scalar_ic);
+   ParGridFunction *dye = nullptr;
+   if (g_use_scalar)
+   {
+      bdr = 0;
+      bdr[inflow_attr - 1] = 1;
+      scalar_solver = std::make_unique<PassiveScalarSolver>(&pmesh, ctx.order,
+                                                            ctx.dt, g_scalar_kappa,
+                                                            bdr, g_scalar_supg,
+                                                            g_scalar_supg_c);
+      scalar_solver->SetVelocity(u);
+      scalar_solver->ProjectInitialCondition(scalar_ic_coeff, scalar_inflow_coeff);
+      dye = scalar_solver->GetField();
+      if (myid == 0)
+      {
+         std::cout << "[Scalar] Passive dye enabled with kappa = " << g_scalar_kappa
+                   << ", top = " << g_scalar_top
+                   << ", bottom = " << g_scalar_bottom
+                   << ", delta = "
+                   << ((g_scalar_delta > 0.0) ? g_scalar_delta : g_delta)
+                   << ", SUPG = " << (g_scalar_supg ? "on" : "off")
+                   << ", SUPG_c = " << g_scalar_supg_c
+                   << std::endl;
+      }
+   }
+
    // -------------------------
    // VisIt output
    // -------------------------
@@ -584,6 +874,7 @@ PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
 
       visit_dc->RegisterField("velocity", u);
       visit_dc->RegisterField("vorticity", w);
+      if (g_use_scalar) { visit_dc->RegisterField("dye", dye); }
 
       visit_dc->SetCycle(0);
       visit_dc->SetTime(0.0);
@@ -614,6 +905,12 @@ PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
       flowsolver.Step(t, dt, step);
       const real_t cfl = flowsolver.ComputeCFL(*u, dt);
 
+      if (g_use_scalar)
+      {
+         scalar_solver->SetVelocity(u);
+         scalar_solver->Step(scalar_inflow_coeff);
+      }
+
       // VisIt output
       if (ctx.visit)
       {
@@ -637,6 +934,7 @@ PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
       if (step % 10 == 0)
       {
          PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, step, t);
+         if (g_use_scalar) { PrintScalarDiagnostics(*dye, step, t); }
       }
 
       if (myid == 0 && (step % 10 == 0))
