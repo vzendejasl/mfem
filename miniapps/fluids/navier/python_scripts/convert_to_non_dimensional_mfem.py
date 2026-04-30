@@ -198,6 +198,7 @@ def process_file(fname: str, U0: float, domain_length: float, round_time_decimal
     # K* = K / U0^2
     df['kinetic_energy_star'] = df['kinetic_energy'] / (U0**2)
 
+    denom = np.maximum(-df['dk_dt'], eps)
     df["L_int"] = (df['kinetic_energy']**1.5) / denom
 
     # 9) Write output (comma-separated, with nice spacing in header)
