@@ -155,6 +155,9 @@ def process_file(
     df["enstrophy_star"] = df["enstrophy"] * 2.0 / (U0 / L)**2
     df["kinetic_energy_star"] = df["kinetic_energy"] / (U0**2)
 
+    denom = np.maximum(-df['dk_dt'], eps)
+    df["L_int"] = (df['kinetic_energy']**1.5) / denom
+
     # 9) Write output
     out_dir = os.path.dirname(os.path.abspath(fname))
     base, _ = os.path.splitext(os.path.basename(fname))
