@@ -70,6 +70,10 @@ if (MFEM_USE_MPI)
     ${NAVIER_COMMON_FILES}
     LIBRARIES mfem)
 
+  add_mfem_miniapp(navier_hypervisc_laplacian_verification
+    MAIN navier_hypervisc_laplacian_verification.cpp
+    LIBRARIES mfem)
+
   add_mfem_miniapp(navier_shear
     MAIN navier_shear.cpp
     ${NAVIER_COMMON_FILES}

@@ -38,7 +38,8 @@ COMMON_LIB += $(if $(MFEM_SHARED:YES=),,\
    $(MFEM_XLINKER)-rpath,$(abspath $(MFEM_BUILD_DIR)/miniapps/common))
 
 PAR_MINIAPPS = navier_mms navier_kovasznay navier_kovasznay_vs navier_tgv\
- navier_shear navier_3dfoc navier_turbchan navier_bifurcation
+ navier_shear navier_3dfoc navier_turbchan navier_bifurcation\
+ navier_hypervisc_laplacian_verification
 ifeq ($(MFEM_USE_GSLIB),YES)
    PAR_MINIAPPS += navier_cht
 endif
@@ -58,6 +59,9 @@ endif
 %.o: %.cpp
 
 %: %.o $(NAVIER_COMMON_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) $^ -o $@ $(MFEM_LIBS) $(COMMON_LIB)
+
+navier_hypervisc_laplacian_verification: navier_hypervisc_laplacian_verification.o
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) $^ -o $@ $(MFEM_LIBS) $(COMMON_LIB)
 
 %.o: $(SRC)%.cpp $(MFEM_LIB_FILE) $(CONFIG_MK) | lib-common
