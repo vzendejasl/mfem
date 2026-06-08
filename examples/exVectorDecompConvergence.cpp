@@ -6,6 +6,17 @@
 
 using namespace mfem;
 
+namespace
+{
+void PrintProgress(const std::string &msg)
+{
+   if (Mpi::Root())
+   {
+      std::cout << msg << std::endl;
+   }
+}
+}
+
 // Exact solution, E, and r.h.s., f. See below for implementation.
 void A_exact(const Vector &x, Vector &A);
 void curl_A_exact(const Vector &x, Vector &Acurl);
@@ -233,20 +244,28 @@ void solve_scalar_potential( const ProjectorOps& ops,
                              const int &order,
                              const ParGridFunction &u_h1,
                              ParGridFunction &grad_phi_h1,
-                             ParMesh *pmesh, bool pa);
+                             ParMesh *pmesh, bool pa,
+                             ParGridFunction *grad_phi_nd_out = nullptr);
 
 void solve_vector_potential( const ProjectorOps& ops,
                              const int &order,
                              const ParGridFunction &u_h1,
                              ParGridFunction &curl_Ah_h1,
-                             ParMesh *pmesh, bool pa);
-
-
-
+                             ParMesh *pmesh, bool pa,
+                             ParGridFunction *curl_Ah_rt_out = nullptr);
+struct ConvergenceMetrics
+{
+   double curl_A_rt_native_l1 = 0.0;
+   double curl_A_h1_current = 0.0;
+   double curl_A_rt_native = 0.0;
+   double grad_phi_h1_current = 0.0;
+   double grad_phi_nd_native = 0.0;
+   double recon_l2 = 0.0;
+};
 
 void ComputeError(int num_pts,int  order,
-    int element_subdivisions_parallel, int &dofs, 
-    double &h_min, double &error,bool &pa);
+    int element_subdivisions_parallel, int &dofs,
+    double &h_min, ConvergenceMetrics &metrics, bool &pa);
 
 // Check to make sure mesh is periodic
 template<typename T>
@@ -307,61 +326,116 @@ int main(int argc, char *argv[])
       args.PrintOptions(mfem::out);
    }
 
-   if (Mpi::Root()) {
-     std::cout << "# Vector potential convergence_rate study\n";
-       args.PrintOptions(std::cout);
-       std::cout << std::setw(8)  << "ref"
-            << std::setw(14) << "DOF"
-            << std::setw(14) << "h_min"
-            << std::setw(18) << "L2 Error"
-            << std::setw(12) << "Rate"
-            << std::endl << std::string(80, '-') << std::endl;
+   if (Mpi::Root())
+   {
+      std::cout << "# Helmholtz decomposition convergence study\n";
+      args.PrintOptions(std::cout);
    }
 
-   std::vector<double> ref_list, dofs_list, h_list, error_list, rate_list;
-   double prev_error = 0.0, prev_h = 0.0;
+   std::vector<double> ref_list, dofs_list, h_list;
+   std::vector<double> curl_A_rt_native_l1_list;
+   std::vector<double> curl_A_h1_current_list, curl_A_rt_native_list;
+   std::vector<double> grad_phi_h1_current_list, grad_phi_nd_native_list;
+   std::vector<double> recon_l2_list;
 
    for (int ref = 1; ref <= max_ref; ++ref)
    {
-       double  h_min= 0.0, error;
+       PrintProgress("\n[ref " + std::to_string(ref) + "/" +
+                     std::to_string(max_ref) + "] starting");
+       double  h_min = 0.0;
        int dofs;
-       ComputeError(num_pts, order, ref, dofs, h_min, error, pa);
-
-       double rate = 0.0;
-       if (ref > 1 && error > 1e-16 && prev_error > 1e-16 && h_min < prev_h && prev_h > 0.0)
-           rate = log(error/prev_error) / log(h_min/prev_h);
-
-       if (Mpi::Root()) {
-         std::cout << std::setw(8)  << ref
-                << std::setw(14) << (long long)dofs
-                << std::setw(14) << h_min
-                << std::setw(18) << error
-                << std::setw(12) << rate << std::endl;
-       }
+       ConvergenceMetrics metrics;
+       ComputeError(num_pts, order, ref, dofs, h_min, metrics, pa);
+       PrintProgress("[ref " + std::to_string(ref) + "/" +
+                     std::to_string(max_ref) + "] completed"
+                     "  dofs=" + std::to_string(dofs) +
+                     "  h_min=" + std::to_string(h_min));
 
       ref_list.push_back(ref);
       dofs_list.push_back(dofs);
       h_list.push_back(h_min);
-      error_list.push_back(error);
-      rate_list.push_back(rate);
-
-       prev_error = error;
-       prev_h = h_min;
+      curl_A_rt_native_l1_list.push_back(metrics.curl_A_rt_native_l1);
+      curl_A_h1_current_list.push_back(metrics.curl_A_h1_current);
+      curl_A_rt_native_list.push_back(metrics.curl_A_rt_native);
+      grad_phi_h1_current_list.push_back(metrics.grad_phi_h1_current);
+      grad_phi_nd_native_list.push_back(metrics.grad_phi_nd_native);
+      recon_l2_list.push_back(metrics.recon_l2);
    }
 
    if (Mpi::Root())
    {
-       std::ofstream ofs("vector_potential_convergence_rate.txt");
-       ofs << "# ref DOFs h_min L2Error Rate" << std::endl;
-       for (size_t i = 0; i < ref_list.size(); ++i)
-       {
-           ofs << ref_list[i] << " "
-               << dofs_list[i] << " "
-               << h_list[i] << " "
-               << error_list[i] << " "
-               << rate_list[i] << std::endl;
-       }
-       ofs.close();
+      auto rate_from = [](double error, double prev_error,
+                          double h, double prev_h) -> double
+      {
+         if (error > 1e-16 && prev_error > 1e-16 && h < prev_h && prev_h > 0.0)
+         {
+            return log(error/prev_error) / log(h/prev_h);
+         }
+         return 0.0;
+      };
+
+      auto print_table = [&](const std::string &title,
+                             const std::vector<double> &errors,
+                             const std::string &filename,
+                             const std::string &error_label)
+      {
+         std::cout << "\n# " << title << "\n";
+         std::cout << std::setw(8)  << "ref"
+                   << std::setw(14) << "DOF"
+                   << std::setw(14) << "h_min"
+                   << std::setw(18) << error_label
+                   << std::setw(12) << "Rate"
+                   << std::endl
+                   << std::string(80, '-') << std::endl;
+
+         std::ofstream ofs(filename);
+         ofs << "# ref DOFs h_min " << error_label << " Rate" << std::endl;
+
+         for (size_t i = 0; i < ref_list.size(); ++i)
+         {
+            double rate = 0.0;
+            if (i > 0)
+            {
+               rate = rate_from(errors[i], errors[i - 1], h_list[i], h_list[i - 1]);
+            }
+            std::cout << std::setw(8)  << ref_list[i]
+                      << std::setw(14) << (long long)dofs_list[i]
+                      << std::setw(14) << h_list[i]
+                      << std::setw(18) << errors[i]
+                      << std::setw(12) << rate << std::endl;
+
+            ofs << ref_list[i] << " "
+                << dofs_list[i] << " "
+                << h_list[i] << " "
+                << errors[i] << " "
+                << rate << std::endl;
+         }
+      };
+
+      print_table("curl(A) native RT vs analytical curl(A) [L1]",
+                  curl_A_rt_native_l1_list,
+                  "curl_A_rt_native_L1_convergence.txt",
+                  "L1 Error");
+      print_table("curl(A) current H1 vs analytical curl(A)",
+                  curl_A_h1_current_list,
+                  "curl_A_h1_current_convergence.txt",
+                  "L2 Error");
+      print_table("curl(A) native RT vs analytical curl(A)",
+                  curl_A_rt_native_list,
+                  "curl_A_rt_native_convergence.txt",
+                  "L2 Error");
+      print_table("grad(phi) current H1 vs analytical grad(phi)",
+                  grad_phi_h1_current_list,
+                  "grad_phi_h1_current_convergence.txt",
+                  "L2 Error");
+      print_table("grad(phi) native ND vs analytical grad(phi)",
+                  grad_phi_nd_native_list,
+                  "grad_phi_nd_native_convergence.txt",
+                  "L2 Error");
+      print_table("reconstruction error",
+                  recon_l2_list,
+                  "reconstruction_convergence.txt",
+                  "L2 Error");
    }
 
    Mpi::Finalize();
@@ -371,8 +445,8 @@ int main(int argc, char *argv[])
 
 
 void ComputeError(int num_pts, int order,
-   int element_subdivisions_parallel, int &dofs, 
-   double &h_min, double &error, bool &pa)
+   int element_subdivisions_parallel, int &dofs,
+   double &h_min, ConvergenceMetrics &metrics, bool &pa)
 {
    int myid = Mpi::WorldRank();
    ParMesh *pmesh = nullptr;
@@ -423,6 +497,9 @@ void ComputeError(int num_pts, int order,
 
    delete init_mesh;
 
+   PrintProgress("  [ComputeError] mesh prepared for refinement level " +
+                 std::to_string(element_subdivisions_parallel));
+
    nd_fec = new ND_FECollection(order, dim);
    rt_fec = new RT_FECollection(order-1, dim); // H(div)
    l2_fec = new L2_FECollection(order-1, dim);
@@ -459,7 +536,10 @@ void ComputeError(int num_pts, int order,
    curl_Ah_exact_h1.ProjectCoefficient(curl_Ah_exact_coeff);
 
    ParGridFunction curl_Ah_h1(h1_fespace_vector);
-   solve_vector_potential(ops, order, u_gf, curl_Ah_h1, pmesh, pa);
+   ParGridFunction curl_Ah_rt(rt_fespace);
+   PrintProgress("  [ComputeError] starting vector-potential solve");
+   solve_vector_potential(ops, order, u_gf, curl_Ah_h1, pmesh, pa, &curl_Ah_rt);
+   PrintProgress("  [ComputeError] finished vector-potential solve");
 
    ParGridFunction curl_Ah_l2(l2_fespace_vector);
    ops.projectorH1ToL2.Apply(curl_Ah_l2, curl_Ah_h1);
@@ -468,7 +548,10 @@ void ComputeError(int num_pts, int order,
 
    // 4. Solve Poisson problem \nabla^2 \phi = div(u)
    ParGridFunction grad_phi_h1(h1_fespace_vector);
-   solve_scalar_potential(ops, order, u_gf, grad_phi_h1, pmesh, pa);
+   ParGridFunction grad_phi_nd(nd_fespace);
+   PrintProgress("  [ComputeError] starting scalar-potential solve");
+   solve_scalar_potential(ops, order, u_gf, grad_phi_h1, pmesh, pa, &grad_phi_nd);
+   PrintProgress("  [ComputeError] finished scalar-potential solve");
 
    ParGridFunction grad_phi_l2(l2_fespace_vector);
    ops.projectorH1ToL2.Apply(grad_phi_l2, grad_phi_h1);
@@ -502,8 +585,12 @@ void ComputeError(int num_pts, int order,
    // double curl_grad_phi_computed_error_project = curl_grad_phi_hdiv.ComputeL2Error(zero_vec);
    // double div_curl_A_error_l2 = div_curl_Ah_l2.ComputeL2Error(zero);
    double grad_phi_error_h1 = grad_phi_h1.ComputeL2Error(grad_phi_coeff);
+   double grad_phi_error_nd = grad_phi_nd.ComputeL2Error(grad_phi_coeff);
+   double curl_Ah_rt_error_l1 = curl_Ah_rt.ComputeL1Error(curl_Ah_exact_coeff);
    double curl_Ah_h1_error = curl_Ah_h1.ComputeL2Error(curl_Ah_exact_coeff);
+   double curl_Ah_rt_error = curl_Ah_rt.ComputeL2Error(curl_Ah_exact_coeff);
    double total_vel_error = vel_error.ComputeL2Error(zero);
+   PrintProgress("  [ComputeError] computed error metrics");
    
 
    // if (myid == 0)
@@ -515,9 +602,12 @@ void ComputeError(int num_pts, int order,
    //    std::cout << "grad_phi H1 L2 norm: " << grad_phi_error_h1 << std::endl;
    //    std::cout << "vel error from reconstruction: " << total_vel_error << std::endl;
    // }
-
-
-   error = total_vel_error;
+   metrics.curl_A_rt_native_l1 = curl_Ah_rt_error_l1;
+   metrics.curl_A_h1_current = curl_Ah_h1_error;
+   metrics.curl_A_rt_native = curl_Ah_rt_error;
+   metrics.grad_phi_h1_current = grad_phi_error_h1;
+   metrics.grad_phi_nd_native = grad_phi_error_nd;
+   metrics.recon_l2 = total_vel_error;
    dofs  = h1_fespace_vector->GlobalTrueVSize();
 
    double h_max, kappa_min, kappa_max;
@@ -545,7 +635,7 @@ void VerifyPeriodicMesh(mfem::Mesh *mesh, const int num_pts)
     const mfem::Table &e2e = mesh->ElementToElementTable();
     int n2 = n * n;
 
-    if (!mesh->GetNV() == pow(n - 1, 3) + 3 * pow(n - 1, 2) + 3 * (n - 1) + 1) {
+    if (mesh->GetNV() != pow(n - 1, 3) + 3 * pow(n - 1, 2) + 3 * (n - 1) + 1) {
       MFEM_ABORT("Mesh does not have the correct number of vertices for a periodic mesh.");
     }
 
@@ -600,21 +690,23 @@ void u_exact(const Vector &x, Vector &A)
    real_t yi = 2*M_PI*x(1);
    real_t zi = 2*M_PI*x(2);
  
-   A(0) = sin(xi) * cos(yi) * cos(zi);
-   A(1) = -cos(xi) * sin(yi) * cos(zi);
-   A(2) = 0.0;
-   // if (dim == 3)
-   // {
-   //    A(0) = sin(2*M_PI*x(0)) + sin(4*M_PI*x(1)) + sin(6*M_PI*x(2));
-   //    A(1) = sin(6*M_PI*x(0)) + sin(2*M_PI*x(1)) + sin(4*M_PI*x(2));
-   //    A(2) = sin(4*M_PI*x(0)) + sin(6*M_PI*x(1)) + sin(2*M_PI*x(2));
-   // }
-   //  else
-   //  {
-   //      A(0) = sin(kappa * x(1));
-   //      A(1) = sin(kappa * x(0));
-   //      if (x.Size() == 3) { A(2) = 0.0; }
-   //  }    
+   // Taylor-Green-style initial condition kept here for later reference:
+   // A(0) = sin(xi) * cos(yi) * cos(zi);
+   // A(1) = -cos(xi) * sin(yi) * cos(zi);
+   // A(2) = 0.0;
+
+   if (dim == 3)
+   {
+      A(0) = sin(2*M_PI*x(0)) + sin(4*M_PI*x(1)) + sin(6*M_PI*x(2));
+      A(1) = sin(6*M_PI*x(0)) + sin(2*M_PI*x(1)) + sin(4*M_PI*x(2));
+      A(2) = sin(4*M_PI*x(0)) + sin(6*M_PI*x(1)) + sin(2*M_PI*x(2));
+   }
+   else
+   {
+      A(0) = sin(kappa * x(1));
+      A(1) = sin(kappa * x(0));
+      if (x.Size() == 3) { A(2) = 0.0; }
+   }
 }
 
 
@@ -733,9 +825,11 @@ void solve_vector_potential( const ProjectorOps& ops,
                              const int &order,
                              const ParGridFunction &u_h1,
                              ParGridFunction &curl_Ah_h1,
-                             ParMesh *pmesh, bool pa)
+                             ParMesh *pmesh, bool pa,
+                             ParGridFunction *curl_Ah_rt_out)
 {
    int myid = Mpi::WorldRank();
+   PrintProgress("    [vector] projecting u into H(curl)/H(div) spaces");
 
    // 2. Peform the needed projections
    // Project u in H1 to Hcurl
@@ -813,6 +907,7 @@ void solve_vector_potential( const ProjectorOps& ops,
    OperatorPtr A;
    Vector B, X;
    a->FormLinearSystem(ess_tdof_list, x, *b, A, X, B);
+   PrintProgress("    [vector] starting linear solve for A");
 
    // 13. Solve the system AX=B using PCG with an AMS preconditioner.
    if (pa)
@@ -848,6 +943,7 @@ void solve_vector_potential( const ProjectorOps& ops,
       pcg.SetPreconditioner(ams);
       pcg.Mult(B, X);
    }
+   PrintProgress("    [vector] finished linear solve for A");
 
    // 14. Recover the parallel grid function corresponding to X. This is the
    //     local finite element solution on each processor.
@@ -863,6 +959,7 @@ void solve_vector_potential( const ProjectorOps& ops,
    // Compute curl of Ah in H(div)
    ParGridFunction curl_Ah(rt_fespace);
    ops.projectorCurlHcurlToHdiv.Apply(curl_Ah, Ah);
+   if (curl_Ah_rt_out) { *curl_Ah_rt_out = curl_Ah; }
 
    // 4. Verification part to make sure field is divergence free
 
@@ -927,9 +1024,11 @@ void solve_scalar_potential( const ProjectorOps& ops,
                              const int &order,
                              const ParGridFunction &u_h1,
                              ParGridFunction &grad_phi_h1,
-                             ParMesh *pmesh, bool pa)
+                             ParMesh *pmesh, bool pa,
+                             ParGridFunction *grad_phi_nd_out)
 {
    int myid = Mpi::WorldRank();
+   PrintProgress("    [scalar] projecting div(u) into scalar space");
 
    // 1. Project u from H1 to Hdiv
    ParGridFunction u_hdiv(rt_fespace);
@@ -966,6 +1065,7 @@ void solve_scalar_potential( const ProjectorOps& ops,
    
    // Use OrthoSolver to handle null space (constant functions)
    Array<int> empty_ess_tdof;  // No essential BC for periodic problem
+   PrintProgress("    [scalar] starting Poisson solve");
    
    if (pa)
    {
@@ -1014,6 +1114,7 @@ void solve_scalar_potential( const ProjectorOps& ops,
       
       ortho_solver.Mult(RHS, PHI);
    }
+   PrintProgress("    [scalar] finished Poisson solve");
    
    // Set the solution
    ParGridFunction phi_scalar(h1_fespace_scalar);
@@ -1025,6 +1126,7 @@ void solve_scalar_potential( const ProjectorOps& ops,
    // 5. Compute compressive part of velocify field
    ParGridFunction grad_phi(nd_fespace);
    ops.projectorComputeGradientH1ScalarToHcurl.Apply(grad_phi, phi_scalar);
+   if (grad_phi_nd_out) { *grad_phi_nd_out = grad_phi; }
    
    // 6. Compute curl of grad_phi for verification for later
    ParGridFunction curl_grad_phi(rt_fespace);

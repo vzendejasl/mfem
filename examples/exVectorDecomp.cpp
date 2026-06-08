@@ -235,7 +235,8 @@ struct ProjectorOps {
 void solve_scalar_potential( const ProjectorOps& ops,
                              const ParGridFunction &u_h1,
                              ParGridFunction &grad_phi_h1,
-                             ParMesh *pmesh, bool pa);
+                             ParMesh *pmesh, bool pa,
+                             ParGridFunction *grad_phi_nd_out = nullptr);
 
 void solve_vector_potential( const ProjectorOps& ops,
                              const ParGridFunction &u_h1,
@@ -398,8 +399,10 @@ int main(int argc, char *argv[])
    // \nabla \times Ah in H(div)
    VectorFunctionCoefficient curl_Ah_exact_coeff(sdim, curl_A_exact);
    ParGridFunction curl_Ah_exact_h1(h1_fespace_vector);
+   ParGridFunction curl_A_exact_rt(rt_fespace);
 
    curl_Ah_exact_h1.ProjectCoefficient(curl_Ah_exact_coeff);
+   curl_A_exact_rt.ProjectCoefficient(curl_Ah_exact_coeff);
 
    VectorFunctionCoefficient u_coeff(sdim, u_exact);
 
@@ -412,17 +415,38 @@ int main(int argc, char *argv[])
    ParGridFunction Ah(nd_fespace);
    solve_vector_potential(ops, u_h1, curl_Ah_h1, Ah, pmesh, pa);
 
-   ParGridFunction curl_Ah_l2(l2_fespace_vector);
-   ops.projectorH1ToL2.Apply(curl_Ah_l2, curl_Ah_h1);
+   ParGridFunction curl_Ah_rt(rt_fespace);
+   ops.projectorCurlHcurlToHdiv.Apply(curl_Ah_rt, Ah);
+
+   ParGridFunction curl_Ah_l2_current(l2_fespace_vector);
+   ops.projectorH1ToL2.Apply(curl_Ah_l2_current, curl_Ah_h1);
 
    // Solve for scalar potential
 
    // 4. Solve Poisson problem \nabla^2 \phi = div(u)
    ParGridFunction grad_phi_h1(h1_fespace_vector);
-   solve_scalar_potential(ops, u_h1, grad_phi_h1, pmesh, pa);
+   ParGridFunction grad_phi_nd(nd_fespace);
+   solve_scalar_potential(ops, u_h1, grad_phi_h1, pmesh, pa, &grad_phi_nd);
 
-   ParGridFunction grad_phi_l2(l2_fespace_vector);
-   ops.projectorH1ToL2.Apply(grad_phi_l2, grad_phi_h1);
+   ParGridFunction grad_phi_l2_current(l2_fespace_vector);
+   ops.projectorH1ToL2.Apply(grad_phi_l2_current, grad_phi_h1);
+
+   // Reduced-projection comparison: map native de Rham fields directly to H1.
+   ParGridFunction curl_Ah_h1_direct(h1_fespace_vector);
+   ParGridFunction grad_phi_h1_direct(h1_fespace_vector);
+   ops.projectorL2ToH1.Apply(curl_Ah_h1_direct, curl_Ah_rt);
+   ops.projectorL2ToH1.Apply(grad_phi_h1_direct, grad_phi_nd);
+
+   // Native-space comparison: only move to L2 for reconstruction/plotting.
+   ParGridFunction curl_Ah_l2_native(l2_fespace_vector);
+   ParGridFunction grad_phi_l2_native(l2_fespace_vector);
+   ops.projectorHdivToL2.Apply(curl_Ah_l2_native, curl_Ah_rt);
+   ops.projectorH1ToL2.Apply(grad_phi_l2_native, grad_phi_nd);
+
+   ParGridFunction curl_Ah_l2_direct(l2_fespace_vector);
+   ParGridFunction grad_phi_l2_direct(l2_fespace_vector);
+   ops.projectorH1ToL2.Apply(curl_Ah_l2_direct, curl_Ah_h1_direct);
+   ops.projectorH1ToL2.Apply(grad_phi_l2_direct, grad_phi_h1_direct);
 
    // Use ProjectDiscCoefficient for averaging-based projection from L2 to H1
    // Note that this approach destroys the curl free free property of the 
@@ -434,27 +458,90 @@ int main(int argc, char *argv[])
    ParGridFunction u_l2(l2_fespace_vector);
    ops.projectorH1ToL2.Apply(u_l2, u_h1);
 
-   ParGridFunction vel_error(l2_fespace_vector);
-   vel_error = grad_phi_l2;
-   vel_error += curl_Ah_l2;
-   vel_error -= u_l2;
+   ParGridFunction recon_error_current(l2_fespace_vector);
+   recon_error_current = grad_phi_l2_current;
+   recon_error_current += curl_Ah_l2_current;
+   recon_error_current -= u_l2;
 
-   // Subtract grad phi from u -- do we get a better curl Ah field?
-   curl_Ah_l2 = u_l2;
-   curl_Ah_l2 -= grad_phi_l2;
+   ParGridFunction recon_error_direct(l2_fespace_vector);
+   recon_error_direct = grad_phi_l2_direct;
+   recon_error_direct += curl_Ah_l2_direct;
+   recon_error_direct -= u_l2;
 
-   // ParGridFunction curl_Ah_h1_from_grad_phi(h1_fespace_vector);
-   // ops.projectorL2ToH1.Apply(curl_Ah_h1_from_grad_phi, curl_Ah_l2);
-   ParGridFunction curl_Ah_h1_from_grad_phi(h1_fespace_vector);
+   ParGridFunction recon_error_native(l2_fespace_vector);
+   recon_error_native = grad_phi_l2_native;
+   recon_error_native += curl_Ah_l2_native;
+   recon_error_native -= u_l2;
 
-   curl_Ah_h1_from_grad_phi = u_h1;
-   curl_Ah_h1_from_grad_phi -= grad_phi_h1;
+   ParGridFunction solenoidal_current_l2(l2_fespace_vector);
+   solenoidal_current_l2 = u_l2;
+   solenoidal_current_l2 -= grad_phi_l2_current;
 
+   ParGridFunction solenoidal_direct_l2(l2_fespace_vector);
+   solenoidal_direct_l2 = u_l2;
+   solenoidal_direct_l2 -= grad_phi_l2_direct;
 
-   verify_vector_potential(ops, curl_Ah_h1_from_grad_phi,
-                             pmesh, pa);
-   // verify_vector_potential(ops, curl_Ah_h1,
-   //                           pmesh, pa);
+   ParGridFunction solenoidal_native_l2(l2_fespace_vector);
+   solenoidal_native_l2 = u_l2;
+   solenoidal_native_l2 -= grad_phi_l2_native;
+
+   ParGridFunction solenoidal_current_rt(rt_fespace);
+   ParGridFunction solenoidal_direct_rt(rt_fespace);
+   ParGridFunction solenoidal_native_rt(rt_fespace);
+   ops.projectorH1ToHdiv.Apply(solenoidal_current_rt, solenoidal_current_l2);
+   ops.projectorH1ToHdiv.Apply(solenoidal_direct_rt, solenoidal_direct_l2);
+   ops.projectorH1ToHdiv.Apply(solenoidal_native_rt, solenoidal_native_l2);
+
+   ParGridFunction div_solenoidal_current(l2_fespace_scalar);
+   ParGridFunction div_solenoidal_direct(l2_fespace_scalar);
+   ParGridFunction div_solenoidal_native(l2_fespace_scalar);
+   ops.projectorDivHdivToL2.Apply(div_solenoidal_current, solenoidal_current_rt);
+   ops.projectorDivHdivToL2.Apply(div_solenoidal_direct, solenoidal_direct_rt);
+   ops.projectorDivHdivToL2.Apply(div_solenoidal_native, solenoidal_native_rt);
+
+   ParGridFunction solenoidal_match_current(l2_fespace_vector);
+   ParGridFunction solenoidal_match_direct(l2_fespace_vector);
+   ParGridFunction solenoidal_match_native(l2_fespace_vector);
+   solenoidal_match_current = solenoidal_current_l2;
+   solenoidal_match_direct = solenoidal_direct_l2;
+   solenoidal_match_native = solenoidal_native_l2;
+   solenoidal_match_current -= curl_Ah_l2_native;
+   solenoidal_match_direct -= curl_Ah_l2_native;
+   solenoidal_match_native -= curl_Ah_l2_native;
+
+   ParGridFunction solenoidal_current_h1(h1_fespace_vector);
+   ParGridFunction solenoidal_direct_h1(h1_fespace_vector);
+   solenoidal_current_h1 = u_h1;
+   solenoidal_current_h1 -= grad_phi_h1;
+   solenoidal_direct_h1 = u_h1;
+   solenoidal_direct_h1 -= grad_phi_h1_direct;
+
+   ParGridFunction curl_solenoidal_current_nd(nd_fespace);
+   ParGridFunction curl_solenoidal_direct_nd(nd_fespace);
+   ParGridFunction curl_solenoidal_native_nd(nd_fespace);
+   ops.projectorH1ToHcurl.Apply(curl_solenoidal_current_nd, solenoidal_current_h1);
+   ops.projectorH1ToHcurl.Apply(curl_solenoidal_direct_nd, solenoidal_direct_h1);
+   ops.projectorH1ToHcurl.Apply(curl_solenoidal_native_nd, curl_Ah_h1_direct);
+
+   ParGridFunction curl_solenoidal_current_rt(rt_fespace);
+   ParGridFunction curl_solenoidal_direct_rt(rt_fespace);
+   ParGridFunction curl_solenoidal_native_rt(rt_fespace);
+   ops.projectorCurlHcurlToHdiv.Apply(curl_solenoidal_current_rt,
+                                      curl_solenoidal_current_nd);
+   ops.projectorCurlHcurlToHdiv.Apply(curl_solenoidal_direct_rt,
+                                      curl_solenoidal_direct_nd);
+   ops.projectorCurlHcurlToHdiv.Apply(curl_solenoidal_native_rt,
+                                      curl_solenoidal_native_nd);
+
+   ParGridFunction div_curl_solenoidal_current(l2_fespace_scalar);
+   ParGridFunction div_curl_solenoidal_direct(l2_fespace_scalar);
+   ParGridFunction div_curl_solenoidal_native(l2_fespace_scalar);
+   ops.projectorDivHdivToL2.Apply(div_curl_solenoidal_current,
+                                  curl_solenoidal_current_rt);
+   ops.projectorDivHdivToL2.Apply(div_curl_solenoidal_direct,
+                                  curl_solenoidal_direct_rt);
+   ops.projectorDivHdivToL2.Apply(div_curl_solenoidal_native,
+                                  curl_solenoidal_native_rt);
 
    // Define ceofficients for comparison for later
    VectorFunctionCoefficient grad_phi_coeff(sdim, grad_phi_exact); // nabla \phi
@@ -470,23 +557,78 @@ int main(int argc, char *argv[])
       zero_v = 0.0;
       VectorConstantCoefficient zero_vec(zero_v);
 
-      // double curl_grad_phi_computed_error_project = curl_grad_phi_hdiv.ComputeL2Error(zero_vec);
-      // double div_curl_A_error_l2 = div_curl_Ah_l2.ComputeL2Error(zero);
-      double grad_phi_error_h1 = grad_phi_h1.ComputeL2Error(grad_phi_coeff);
-      double curl_Ah_h1_error = curl_Ah_h1.ComputeL2Error(curl_Ah_exact_coeff);
-      double curl_Ah_h1_error_from_grad_phi = curl_Ah_h1_from_grad_phi.ComputeL2Error(curl_Ah_exact_coeff);
-      double total_vel_error = vel_error.ComputeL2Error(zero);
+      double curl_Ah_error_rt = curl_Ah_rt.ComputeL2Error(curl_Ah_exact_coeff);
+      double curl_Ah_error_h1_current = curl_Ah_h1.ComputeL2Error(curl_Ah_exact_coeff);
+      double curl_Ah_error_h1_direct = curl_Ah_h1_direct.ComputeL2Error(curl_Ah_exact_coeff);
+      double curl_Ah_error_l2_current = curl_Ah_l2_current.ComputeL2Error(curl_Ah_exact_coeff);
+      double curl_Ah_error_l2_direct = curl_Ah_l2_direct.ComputeL2Error(curl_Ah_exact_coeff);
+      double curl_Ah_error_l2_native = curl_Ah_l2_native.ComputeL2Error(curl_Ah_exact_coeff);
+
+      double grad_phi_error_nd = grad_phi_nd.ComputeL2Error(grad_phi_coeff);
+      double grad_phi_error_h1_current = grad_phi_h1.ComputeL2Error(grad_phi_coeff);
+      double grad_phi_error_h1_direct = grad_phi_h1_direct.ComputeL2Error(grad_phi_coeff);
+      double grad_phi_error_l2_current = grad_phi_l2_current.ComputeL2Error(grad_phi_coeff);
+      double grad_phi_error_l2_direct = grad_phi_l2_direct.ComputeL2Error(grad_phi_coeff);
+      double grad_phi_error_l2_native = grad_phi_l2_native.ComputeL2Error(grad_phi_coeff);
+
+      double recon_error_l2_current = recon_error_current.ComputeL2Error(zero);
+      double recon_error_l2_direct = recon_error_direct.ComputeL2Error(zero);
+      double recon_error_l2_native = recon_error_native.ComputeL2Error(zero);
+
+      double div_solenoidal_error_current = div_solenoidal_current.ComputeL2Error(zero);
+      double div_solenoidal_error_direct = div_solenoidal_direct.ComputeL2Error(zero);
+      double div_solenoidal_error_native = div_solenoidal_native.ComputeL2Error(zero);
+
+      double div_curl_solenoidal_error_current =
+         div_curl_solenoidal_current.ComputeL2Error(zero);
+      double div_curl_solenoidal_error_direct =
+         div_curl_solenoidal_direct.ComputeL2Error(zero);
+      double div_curl_solenoidal_error_native =
+         div_curl_solenoidal_native.ComputeL2Error(zero);
+
+      double solenoidal_match_error_current = solenoidal_match_current.ComputeL2Error(zero_vec);
+      double solenoidal_match_error_direct = solenoidal_match_direct.ComputeL2Error(zero_vec);
+      double solenoidal_match_error_native = solenoidal_match_native.ComputeL2Error(zero_vec);
    
 
       if (myid == 0)
       {
-         // cout << "div(curl A) H1 L2 norm (should be ~0): " << div_curl_A_error_l2 << endl;
-         cout << "curl Ah H1 L2 norm: " << curl_Ah_h1_error << endl;
-         cout << "curl Ah H1 L2 from grad phi norm: " << curl_Ah_h1_error_from_grad_phi << endl;
+         cout << "\nProjection experiment\n";
+         cout << "  curl(A) native RT   L2 error: " << curl_Ah_error_rt << endl;
+         cout << "  curl(A) current H1  L2 error: " << curl_Ah_error_h1_current << endl;
+         cout << "  curl(A) direct H1   L2 error: " << curl_Ah_error_h1_direct << endl;
+         cout << "  curl(A) current L2  L2 error: " << curl_Ah_error_l2_current << endl;
+         cout << "  curl(A) direct L2   L2 error: " << curl_Ah_error_l2_direct << endl;
+         cout << "  curl(A) native L2   L2 error: " << curl_Ah_error_l2_native << endl;
 
-         // cout << "curl(grad phi) project L2 error (should be ~0): " << curl_grad_phi_computed_error_project << endl;
-         cout << "grad_phi H1 L2 norm: " << grad_phi_error_h1 << endl;
-         cout << "vel error from reconstruction: " << total_vel_error << endl;
+         cout << "  grad(phi) native ND L2 error: " << grad_phi_error_nd << endl;
+         cout << "  grad(phi) current H1 L2 error: " << grad_phi_error_h1_current << endl;
+         cout << "  grad(phi) direct H1  L2 error: " << grad_phi_error_h1_direct << endl;
+         cout << "  grad(phi) current L2 L2 error: " << grad_phi_error_l2_current << endl;
+         cout << "  grad(phi) direct L2  L2 error: " << grad_phi_error_l2_direct << endl;
+         cout << "  grad(phi) native L2  L2 error: " << grad_phi_error_l2_native << endl;
+
+         cout << "  recon current L2 error: " << recon_error_l2_current << endl;
+         cout << "  recon direct  L2 error: " << recon_error_l2_direct << endl;
+         cout << "  recon native  L2 error: " << recon_error_l2_native << endl;
+
+         cout << "  div(u-grad_phi) current L2 error: " << div_solenoidal_error_current << endl;
+         cout << "  div(u-grad_phi) direct  L2 error: " << div_solenoidal_error_direct << endl;
+         cout << "  div(u-grad_phi) native  L2 error: " << div_solenoidal_error_native << endl;
+
+         cout << "  div(curl(u-grad_phi)) current L2 error: "
+              << div_curl_solenoidal_error_current << endl;
+         cout << "  div(curl(u-grad_phi)) direct  L2 error: "
+              << div_curl_solenoidal_error_direct << endl;
+         cout << "  div(curl(u-grad_phi)) native  L2 error: "
+              << div_curl_solenoidal_error_native << endl;
+
+         cout << "  ||(u-grad_phi)-curl(A)|| current L2 error: "
+              << solenoidal_match_error_current << endl;
+         cout << "  ||(u-grad_phi)-curl(A)|| direct  L2 error: "
+              << solenoidal_match_error_direct << endl;
+         cout << "  ||(u-grad_phi)-curl(A)|| native  L2 error: "
+              << solenoidal_match_error_native << endl;
       }
    }
 
@@ -534,14 +676,17 @@ int main(int argc, char *argv[])
     dc.SetTime(0.0);
     dc.SetPrecision(16);
     
-    dc.RegisterField("velocity_total_h1", &u_h1);
-    dc.RegisterField("curl_Ah_h1", &curl_Ah_h1);
-    dc.RegisterField("curl_Ah_h1_from_grad_phi", &curl_Ah_h1_from_grad_phi);
-    dc.RegisterField("curl_Ah_exact_h1", &curl_Ah_exact_h1);
-    dc.RegisterField("Ah", &Ah);
+    dc.RegisterField("u_total_h1", &u_h1);
+    dc.RegisterField("curl_Ah_rt_native", &curl_Ah_rt);
+    dc.RegisterField("curl_A_exact_rt", &curl_A_exact_rt);
+    dc.RegisterField("curl_Ah_h1_via_rt_l2_h1", &curl_Ah_h1);
+    dc.RegisterField("curl_Ah_h1_direct_from_rt", &curl_Ah_h1_direct);
+    dc.RegisterField("curl_A_exact_h1", &curl_Ah_exact_h1);
+    dc.RegisterField("A_h_nd", &Ah);
 
-    dc.RegisterField("grad_phi_h1",   &grad_phi_h1);
-    dc.RegisterField("grad_phi_exact",   &grad_phi_exact_h1);
+    dc.RegisterField("grad_phi_h1_via_nd_rt_l2_h1",   &grad_phi_h1);
+    dc.RegisterField("grad_phi_h1_direct_from_nd",   &grad_phi_h1_direct);
+    dc.RegisterField("grad_phi_exact_h1",   &grad_phi_exact_h1);
 
     dc.Save();
 
@@ -828,7 +973,8 @@ void solve_vector_potential( const ProjectorOps& ops,
 void solve_scalar_potential( const ProjectorOps& ops,
                              const ParGridFunction &u_h1,
                              ParGridFunction &grad_phi_h1,
-                             ParMesh *pmesh, bool pa)
+                             ParMesh *pmesh, bool pa,
+                             ParGridFunction *grad_phi_nd_out)
 {
    int myid = Mpi::WorldRank();
 
@@ -938,6 +1084,7 @@ void solve_scalar_potential( const ProjectorOps& ops,
    // 5. Compute compressive part of velocify field
    ParGridFunction grad_phi(nd_fespace);
    ops.projectorComputeGradientH1ScalarToHcurl.Apply(grad_phi, phi_scalar);
+   if (grad_phi_nd_out) { *grad_phi_nd_out = grad_phi; }
    
    // 6. Compute curl of grad_phi for verification for later
    ParGridFunction curl_grad_phi(rt_fespace);
