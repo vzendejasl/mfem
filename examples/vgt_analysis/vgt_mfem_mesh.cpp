@@ -15,8 +15,10 @@
  * Build:
  *   make MFEM_CXX=/usr/local/bin/mpicxx vgt_mfem_mesh
  *
- * Run:
- *   mpirun -n 1 ./vgt_mfem_mesh
+ * Run (serial, one MPI rank):
+ *   ./vgt_mfem_mesh
+ *
+ * Run (parallel):
  *   mpirun -n 2 ./vgt_mfem_mesh
  *   mpirun -n 4 ./vgt_mfem_mesh
  *

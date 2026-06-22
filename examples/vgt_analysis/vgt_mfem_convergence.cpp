@@ -23,8 +23,10 @@
  * Build:
  *   make MFEM_CXX=/usr/local/bin/mpicxx vgt_mfem_convergence
  *
- * Run:
- *   mpirun -n 1 ./vgt_mfem_convergence
+ * Run (serial, one MPI rank):
+ *   ./vgt_mfem_convergence
+ *
+ * Run (parallel):
  *   mpirun -n 4 ./vgt_mfem_convergence
  *
  * Exit: 0 always (inspect tables for rate).
