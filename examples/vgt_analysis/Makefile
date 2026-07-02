@@ -4,10 +4,12 @@
 # Usage (from this directory):
 #   make
 #   make test_vgt_mfem_units
-#   make VGT_DIR=/path/to/vgt_all_bundle test_vgt_mfem_units
+#   make VGT_DEPS_DIR=/absolute/path/to/third_party/vgt_deps test_vgt_mfem_units
 #   make clean
 
 THIS_DIR := $(realpath $(dir $(lastword $(MAKEFILE_LIST))))
+VGT_DEPS_DIR ?= $(abspath $(THIS_DIR)/../../../third_party/vgt_deps)
+VGT_DEPS_MK := $(VGT_DEPS_DIR)/vgt_deps.mk
 
 # ── MFEM paths (mirrors examples/makefile exactly) ────────────────────────────
 MFEM_DIR       ?= ../..
@@ -18,52 +20,53 @@ CONFIG_MK = $(or $(wildcard $(MFEM_BUILD_DIR)/config/config.mk),\
 
 MFEM_LIB_FILE = mfem_is_not_built
 -include $(CONFIG_MK)
+include $(VGT_DEPS_MK)
 
 # MFEM_FLAGS and MFEM_LIBS are now set by config.mk.
 # If MFEM does not provide a default MPI compiler in PATH, fall back to a
 # common Homebrew/MPICH install location.
-MFEM_CXX ?= $(or $(shell command -v mpicxx 2>/dev/null),/usr/local/bin/mpicxx)
+MFEM_CXX := $(or $(shell command -v $(MFEM_CXX) 2>/dev/null),\
+                $(shell command -v mpicxx 2>/dev/null),\
+                /usr/local/bin/mpicxx)
 
-# ── VGT bundle discovery ──────────────────────────────────────────────────────
-VGT_DIR ?= $(firstword \
-  $(wildcard $(THIS_DIR)/../../../../vgt_analysis/vgt_all_bundle) \
-  $(wildcard $(HOME)/Documents/vgt_analysis/vgt_all_bundle))
-
-ifeq ($(strip $(VGT_DIR)),)
-$(error Could not locate vgt_all_bundle. Set VGT_DIR=/absolute/path/to/vgt_all_bundle)
+# ── Shared repo-owned VGT dependencies ────────────────────────────────────────
+ifeq ($(wildcard $(VGT_SHARED_INCLUDE_DIR)/vgt_lapack.hpp),)
+$(error Missing VGT headers under $(VGT_SHARED_INCLUDE_DIR). Populate third_party/vgt_deps first.)
+endif
+ifeq ($(wildcard $(VGT_SHARED_EIGEN_DIR)/Eigen/Core),)
+$(error Missing Eigen headers under $(VGT_SHARED_EIGEN_DIR). Populate third_party/vgt_deps first.)
+endif
+ifeq ($(wildcard $(VGT_SHARED_LAPACK_LIB_DIR)/liblapacke.a),)
+$(error Missing LAPACK/LAPACKE libraries under $(VGT_SHARED_LAPACK_LIB_DIR). Populate third_party/vgt_deps first.)
 endif
 
-VGT_DIR := $(abspath $(VGT_DIR))
-VGT_CPP_BUILD_DIR ?= $(VGT_DIR)/cpp/build
-VGT_DATA_DIR      ?= $(VGT_DIR)/data
-VGT_LAPACKE_ROOT  ?= $(VGT_CPP_BUILD_DIR)/_deps/lapack_ref-build
-VGT_LAPACKE_SRC_INC ?= $(VGT_CPP_BUILD_DIR)/_deps/lapack_ref-src/LAPACKE/include
-VGT_EIGEN_DIR ?= $(firstword $(foreach d,/usr/local/include/eigen3 /opt/homebrew/include/eigen3 /usr/include/eigen3,$(if $(wildcard $(d)/Eigen/Core),$(d))))
+# The current MFEM config.mk was generated while this branch still pointed at an
+# external VGT bundle for LAPACK/LAPACKE. Strip those inherited external paths
+# and replace them with the repo-owned shared prefix above.
+VGT_EXTERNAL_LAPACK_INC_PATTERNS := \
+  %/vgt_analysis/vgt_all_bundle/cpp/build/_deps/lapack_ref-build/include \
+  %/vgt_analysis/vgt_all_bundle/cpp/build/_deps/lapack_ref-src/LAPACKE/include
 
-VGT_INCLUDE = -I$(VGT_DIR)/cpp/include
-ifneq ($(strip $(VGT_EIGEN_DIR)),)
-VGT_INCLUDE += -I$(VGT_EIGEN_DIR)
-endif
-ifneq ($(wildcard $(VGT_LAPACKE_ROOT)/include/lapacke.h),)
-VGT_INCLUDE += -I$(VGT_LAPACKE_ROOT)/include
-endif
-ifneq ($(wildcard $(VGT_LAPACKE_SRC_INC)/lapacke.h),)
-VGT_INCLUDE += -I$(VGT_LAPACKE_SRC_INC)
-endif
+VGT_EXTERNAL_LAPACK_LIB_PATTERNS := \
+  %/vgt_analysis/vgt_all_bundle/cpp/build/_deps/lapack_ref-build/lib/liblapacke.a \
+  %/vgt_analysis/vgt_all_bundle/cpp/build/_deps/lapack_ref-build/lib/liblapack.a \
+  %/vgt_analysis/vgt_all_bundle/cpp/build/_deps/lapack_ref-build/lib/libblas.a
 
-VGT_DEFINES = -DVGT_DATA_DIR=\"$(VGT_DATA_DIR)\"
+MFEM_TPLFLAGS := $(filter-out $(VGT_EXTERNAL_LAPACK_INC_PATTERNS),$(MFEM_TPLFLAGS))
+MFEM_INCFLAGS := -I$(MFEM_INC_DIR) $(MFEM_TPLFLAGS)
+MFEM_FLAGS := $(MFEM_CPPFLAGS) $(MFEM_CXXFLAGS) $(MFEM_INCFLAGS)
 
-VGT_EXTRA_LIBS =
-ifeq ($(findstring lapacke,$(MFEM_LIBS)),)
-ifneq ($(wildcard $(VGT_LAPACKE_ROOT)/lib/liblapacke.a),)
-VGT_EXTRA_LIBS += $(VGT_LAPACKE_ROOT)/lib/liblapacke.a \
-                  $(VGT_LAPACKE_ROOT)/lib/liblapack.a \
-                  $(VGT_LAPACKE_ROOT)/lib/libblas.a
-endif
-endif
+MFEM_EXT_LIBS := $(filter-out $(VGT_EXTERNAL_LAPACK_LIB_PATTERNS),$(MFEM_EXT_LIBS)) \
+                 $(VGT_SHARED_LAPACK_LIBS)
+MFEM_LIBS := -L$(MFEM_LIB_DIR) -lmfem $(MFEM_EXT_LIBS)
+
+VGT_INCLUDE = -I$(VGT_SHARED_INCLUDE_DIR) \
+              -I$(VGT_SHARED_EIGEN_DIR) \
+              -I$(VGT_SHARED_LAPACK_INCLUDE_DIR)
+VGT_DEFINES = -DVGT_DATA_DIR=\"$(VGT_SHARED_DATA_DIR)\"
 
 # ── Targets ───────────────────────────────────────────────────────────────────
-TARGETS = test_vgt_mfem_units vgt_mfem_mesh vgt_mfem_convergence vgt_mfem_example vgt_mfem_benchmark vgt_mfem_periodic vgt_mfem_periodic_convergence
+TARGETS = test_vgt_mfem_units vgt_mfem_mesh vgt_mfem_convergence vgt_mfem_example vgt_mfem_benchmark vgt_mfem_periodic vgt_mfem_periodic_eigen vgt_mfem_periodic_convergence
 
 .SUFFIXES:
 .SUFFIXES: .o .cpp
@@ -72,9 +75,9 @@ TARGETS = test_vgt_mfem_units vgt_mfem_mesh vgt_mfem_convergence vgt_mfem_exampl
 # Remove built-in implicit rule for %.cpp → %
 %: %.cpp
 
-# Build rule — same as examples/makefile; VGT_INCLUDE is the only addition
+# Build rule — same as examples/makefile, but with repo-owned VGT deps.
 %: %.cpp $(MFEM_LIB_FILE) $(CONFIG_MK)
-	$(MFEM_CXX) $(MFEM_FLAGS) $(VGT_INCLUDE) $(VGT_DEFINES) $< -o $@ $(MFEM_LIBS) $(VGT_EXTRA_LIBS)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(VGT_INCLUDE) $(VGT_DEFINES) $< -o $@ $(MFEM_LIBS)
 
 all: $(TARGETS)
 

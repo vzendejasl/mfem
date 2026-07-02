@@ -1,8 +1,8 @@
 /*
  * vgt_mfem_benchmark.cpp
  *
- * Benchmarks Eigen vs LAPACK VGT batch decomposition on representative
- * datasets used by the MFEM examples in this directory.
+ * Benchmarks backend impact directly: Eigen vs LAPACK VGT batch decomposition
+ * on representative datasets used by the MFEM examples in this directory.
  *
  * Cases:
  *   - csv          : 8-point reference dataset from vgt_input.csv
@@ -11,8 +11,10 @@
  *   - manufactured : VGTs extracted from the manufactured MFEM example
  *
  * For each case, the benchmark measures:
- *   - EIG decomposition time
- *   - Schur decomposition time
+ *   - EIG method time on the Eigen backend
+ *   - EIG method time on the LAPACK backend
+ *   - Schur method time on the Eigen backend
+ *   - Schur method time on the LAPACK backend
  *
  * Timings compare the Eigen-backed implementation against the LAPACK-backed
  * implementation on the same local tensor batches. Reported times are the
@@ -20,7 +22,7 @@
  * each repetition.
  *
  * Build:
- *   make MFEM_CXX=/usr/local/bin/mpicxx VGT_DIR=/path/to/vgt_all_bundle vgt_mfem_benchmark
+ *   make MFEM_CXX=/usr/local/bin/mpicxx vgt_mfem_benchmark
  *
  * Run (serial, one MPI rank):
  *   ./vgt_mfem_benchmark
@@ -43,7 +45,7 @@
 #include <vector>
 
 #ifndef VGT_DATA_DIR
-#  error "VGT_DATA_DIR must point to vgt_all_bundle/data (set by Makefile or compiler flags)"
+#  error "VGT_DATA_DIR must point to the shared VGT data directory (set by Makefile or compiler flags)"
 #endif
 
 using namespace mfem;
@@ -423,8 +425,10 @@ int main(int argc, char* argv[])
 
     if (rank == 0) {
         std::cout << "=== VGT MFEM Benchmark [MPI x" << size << "] ===\n";
+        std::cout << "# Distinction: method=eig|schur, backend=Eigen|LAPACK.\n";
         std::cout << "# Timings are median wall times in milliseconds.\n";
         std::cout << "# Each sample measures decomposition only; mesh construction and gradient extraction are excluded.\n";
+        std::cout << "# Output fields: eigen_ms = Eigen backend, lapack_ms = LAPACK backend.\n";
     }
 
     std::vector<CaseData> cases;

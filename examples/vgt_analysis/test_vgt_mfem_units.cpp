@@ -7,7 +7,7 @@
  *
  * Build:
  *   make test_vgt_mfem_units
- *   make MFEM_CXX=/path/to/mpicxx VGT_DIR=/path/to/vgt_all_bundle test_vgt_mfem_units
+ *   make MFEM_CXX=/path/to/mpicxx test_vgt_mfem_units
  *
  * Run (serial, one MPI rank):
  *   ./test_vgt_mfem_units
@@ -33,7 +33,7 @@
 #include <vector>
 
 #ifndef VGT_DATA_DIR
-#  error "VGT_DATA_DIR must point to vgt_all_bundle/data (set by Makefile or compiler flags)"
+#  error "VGT_DATA_DIR must point to the shared VGT data directory (set by Makefile or compiler flags)"
 #endif
 
 namespace {

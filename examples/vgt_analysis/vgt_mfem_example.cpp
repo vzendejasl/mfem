@@ -15,9 +15,10 @@
  *   Tier 3 -- component errors vs exact:  A2_ax, A2_sh, A2_rr, A2_sr
  *             (regular points only, |Delta_norm| > 1e-10)
  *
- * Both EIG (Rortex/Liutex) and Schur decomposition pathways are run and
- * reported side-by-side. A VisIt data collection is also written
- * automatically on every run.
+ * Both EIG (Rortex/Liutex) and Schur decomposition methods are run and
+ * reported side-by-side, using the LAPACK backend from vgt_lapack.hpp for
+ * both methods. A VisIt data collection is also written automatically on
+ * every run.
  *
  * Build:
  *   make MFEM_CXX=/usr/local/bin/mpicxx vgt_mfem_example
@@ -51,15 +52,13 @@
 #include <string>
 #include <vector>
 
-using namespace mfem;
-using namespace vgt_lapack;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 static constexpr double PI  = M_PI;
 static constexpr double EPS = 0.05;
 
 // ── Modified manufactured velocity u_e = Bx + eps*u0 ─────────────────────────
-static void u_eps_func(const Vector& x, Vector& v)
+static void u_eps_func(const mfem::Vector& x, mfem::Vector& v)
 {
     v[0] =  x[0] - 10.0*x[1]
            + EPS*(std::sin(2*PI*x[0]) + std::sin(4*PI*x[1]) + std::sin(6*PI*x[2]));
@@ -70,9 +69,9 @@ static void u_eps_func(const Vector& x, Vector& v)
 }
 
 // ── Analytical VGT A_e = B + eps*A0, column-major d[i+3j] = du_i/dx_j ───────
-static Mat3L A_exact_at(const Vector& x)
+static vgt_lapack::Mat3L A_exact_at(const mfem::Vector& x)
 {
-    Mat3L M;
+    vgt_lapack::Mat3L M;
     M(0,0) =  1.0 + EPS * 2*PI * std::cos(2*PI*x[0]);
     M(0,1) = -10.0 + EPS * 4*PI * std::cos(4*PI*x[1]);
     M(0,2) =  0.0  + EPS * 6*PI * std::cos(6*PI*x[2]);
@@ -86,7 +85,7 @@ static Mat3L A_exact_at(const Vector& x)
 }
 
 // ── Cubic discriminant (normalized by ||A||_F^6) ─────────────────────────────
-static double disc_norm(const Mat3L& A)
+static double disc_norm(const vgt_lapack::Mat3L& A)
 {
     const double I1 = A(0,0)+A(1,1)+A(2,2);
     double trA2 = 0.0;
@@ -104,15 +103,15 @@ static double disc_norm(const Mat3L& A)
 }
 
 // ── Coefficients for VisIt output ────────────────────────────────────────────
-class VGTHCoeff : public VectorCoefficient
+class VGTHCoeff : public mfem::VectorCoefficient
 {
-    ParGridFunction& vel;
+    mfem::ParGridFunction& vel;
 public:
-    explicit VGTHCoeff(ParGridFunction& v) : VectorCoefficient(9), vel(v) {}
-    void Eval(Vector& V, ElementTransformation& T,
-              const IntegrationPoint& ip) override
+    explicit VGTHCoeff(mfem::ParGridFunction& v) : mfem::VectorCoefficient(9), vel(v) {}
+    void Eval(mfem::Vector& V, mfem::ElementTransformation& T,
+              const mfem::IntegrationPoint& ip) override
     {
-        DenseMatrix grad(3, 3);
+        mfem::DenseMatrix grad(3, 3);
         vel.GetVectorGradient(T, grad);
         V.SetSize(9);
         for (int i = 0; i < 3; i++)
@@ -121,16 +120,16 @@ public:
     }
 };
 
-class VGTExactCoeff : public VectorCoefficient
+class VGTExactCoeff : public mfem::VectorCoefficient
 {
 public:
-    VGTExactCoeff() : VectorCoefficient(9) {}
-    void Eval(Vector& V, ElementTransformation& T,
-              const IntegrationPoint& ip) override
+    VGTExactCoeff() : mfem::VectorCoefficient(9) {}
+    void Eval(mfem::Vector& V, mfem::ElementTransformation& T,
+              const mfem::IntegrationPoint& ip) override
     {
-        Vector xp(3);
+        mfem::Vector xp(3);
         T.Transform(ip, xp);
-        const Mat3L Ae = A_exact_at(xp);
+        const vgt_lapack::Mat3L Ae = A_exact_at(xp);
         V.SetSize(9);
         for (int i = 0; i < 3; i++)
             for (int j = 0; j < 3; j++)
@@ -138,19 +137,19 @@ public:
     }
 };
 
-class GradErrorCoeff : public Coefficient
+class GradErrorCoeff : public mfem::Coefficient
 {
-    ParGridFunction& vel;
+    mfem::ParGridFunction& vel;
 public:
-    explicit GradErrorCoeff(ParGridFunction& v) : vel(v) {}
-    double Eval(ElementTransformation& T,
-                const IntegrationPoint& ip) override
+    explicit GradErrorCoeff(mfem::ParGridFunction& v) : vel(v) {}
+    double Eval(mfem::ElementTransformation& T,
+                const mfem::IntegrationPoint& ip) override
     {
-        DenseMatrix gv(3, 3);
+        mfem::DenseMatrix gv(3, 3);
         vel.GetVectorGradient(T, gv);
-        Vector xp(3);
+        mfem::Vector xp(3);
         T.Transform(ip, xp);
-        const Mat3L Ae = A_exact_at(xp);
+        const vgt_lapack::Mat3L Ae = A_exact_at(xp);
         double err2 = 0.0;
         for (int i = 0; i < 3; i++)
             for (int j = 0; j < 3; j++) {
@@ -161,34 +160,34 @@ public:
     }
 };
 
-class DeltaNormCoeff : public Coefficient
+class DeltaNormCoeff : public mfem::Coefficient
 {
 public:
-    double Eval(ElementTransformation& T,
-                const IntegrationPoint& ip) override
+    double Eval(mfem::ElementTransformation& T,
+                const mfem::IntegrationPoint& ip) override
     {
-        Vector xp(3);
+        mfem::Vector xp(3);
         T.Transform(ip, xp);
         return std::abs(disc_norm(A_exact_at(xp)));
     }
 };
 
-class PartCoeff : public Coefficient
+class PartCoeff : public mfem::Coefficient
 {
-    ParGridFunction& vel;
+    mfem::ParGridFunction& vel;
     int comp;
 public:
-    PartCoeff(ParGridFunction& v, int c) : vel(v), comp(c) {}
-    double Eval(ElementTransformation& T,
-                const IntegrationPoint& ip) override
+    PartCoeff(mfem::ParGridFunction& v, int c) : vel(v), comp(c) {}
+    double Eval(mfem::ElementTransformation& T,
+                const mfem::IntegrationPoint& ip) override
     {
-        DenseMatrix gv(3, 3);
+        mfem::DenseMatrix gv(3, 3);
         vel.GetVectorGradient(T, gv);
-        Mat3L Ah;
+        vgt_lapack::Mat3L Ah;
         for (int i = 0; i < 3; i++)
             for (int j = 0; j < 3; j++)
                 Ah.d[i + 3*j] = gv(i, j);
-        const auto res = part_vgt_batch_schur({Ah});
+        const auto res = vgt_lapack::part_vgt_batch_schur({Ah});
         switch (comp) {
             case 0: return res.A2_ax[0];
             case 1: return res.A2_sh[0];
@@ -198,18 +197,18 @@ public:
     }
 };
 
-class PartExactCoeff : public Coefficient
+class PartExactCoeff : public mfem::Coefficient
 {
     int comp;
 public:
     explicit PartExactCoeff(int c) : comp(c) {}
-    double Eval(ElementTransformation& T,
-                const IntegrationPoint& ip) override
+    double Eval(mfem::ElementTransformation& T,
+                const mfem::IntegrationPoint& ip) override
     {
-        Vector xp(3);
+        mfem::Vector xp(3);
         T.Transform(ip, xp);
-        const Mat3L Ae = A_exact_at(xp);
-        const auto res = part_vgt_batch_schur({Ae});
+        const vgt_lapack::Mat3L Ae = A_exact_at(xp);
+        const auto res = vgt_lapack::part_vgt_batch_schur({Ae});
         switch (comp) {
             case 0: return res.A2_ax[0];
             case 1: return res.A2_sh[0];
@@ -234,7 +233,7 @@ int main(int argc, char* argv[])
     int order = 2;
     int N     = 16;
 
-    OptionsParser args(argc, argv);
+    mfem::OptionsParser args(argc, argv);
     args.AddOption(&order, "-o", "--order",  "Polynomial order (1, 2, 4, ...).");
     args.AddOption(&N,     "-n", "--mesh-n", "Elements per side (N x N x N mesh).");
     args.Parse();
@@ -243,21 +242,21 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // ── Mesh + FE space ───────────────────────────────────────────────────────
-    Mesh serial = Mesh::MakeCartesian3D(N, N, N, Element::HEXAHEDRON);
-    ParMesh pmesh(MPI_COMM_WORLD, serial);
+    // ── mfem::Mesh + FE space ───────────────────────────────────────────────────────
+    mfem::Mesh serial = mfem::Mesh::MakeCartesian3D(N, N, N, mfem::Element::HEXAHEDRON);
+    mfem::ParMesh pmesh(MPI_COMM_WORLD, serial);
     serial.Clear();
 
-    H1_FECollection fec(order, 3);
-    ParFiniteElementSpace fes(&pmesh, &fec, 3);
+    mfem::H1_FECollection fec(order, 3);
+    mfem::ParFiniteElementSpace fes(&pmesh, &fec, 3);
 
     const HYPRE_BigInt ndofs = fes.GlobalTrueVSize();
 
-    ParGridFunction vel(&fes);
-    VectorFunctionCoefficient vcoeff(3, u_eps_func);
+    mfem::ParGridFunction vel(&fes);
+    mfem::VectorFunctionCoefficient vcoeff(3, u_eps_func);
     vel.ProjectCoefficient(vcoeff);
 
-    const IntegrationRule& ir = IntRules.Get(Geometry::CUBE, 2*order+1);
+    const mfem::IntegrationRule& ir = mfem::IntRules.Get(mfem::Geometry::CUBE, 2*order+1);
     const int nqp = ir.GetNPoints();
 
     int N_elem_local = pmesh.GetNE();
@@ -278,6 +277,8 @@ int main(int argc, char* argv[])
         std::cout << "  DOFs    : " << ndofs << "  (global, all components)\n";
         std::cout << "  Qpts    : " << nqp << " per element  ("
                   << N_qpts_global << " total)\n";
+        std::cout << "  Backend : LAPACK (vgt_lapack.hpp)\n";
+        std::cout << "  Methods : EIG (Rortex/Liutex), Schur\n";
         hline();
     }
 
@@ -291,29 +292,29 @@ int main(int argc, char* argv[])
     double min_dn=1e300, max_dn=-1e300;
     long long skipped=0, regular=0;
 
-    std::vector<Mat3L> Ah_vec(nqp), Ae_vec(nqp);
+    std::vector<vgt_lapack::Mat3L> Ah_vec(nqp), Ae_vec(nqp);
     std::vector<double> wts(nqp);
     std::vector<bool>   reg(nqp);
 
     for (int e = 0; e < pmesh.GetNE(); e++)
     {
-        ElementTransformation* T = pmesh.GetElementTransformation(e);
+        mfem::ElementTransformation* T = pmesh.GetElementTransformation(e);
 
         // Collect VGTs for this element
         for (int q = 0; q < nqp; q++)
         {
-            const IntegrationPoint& ip = ir.IntPoint(q);
+            const mfem::IntegrationPoint& ip = ir.IntPoint(q);
             T->SetIntPoint(&ip);
             const double wt = ip.weight * T->Weight();
             wts[q]     = wt;
             total_vol += wt;
 
-            Vector xp(3);
+            mfem::Vector xp(3);
             T->Transform(ip, xp);
 
-            DenseMatrix gv(3, 3);
+            mfem::DenseMatrix gv(3, 3);
             vel.GetVectorGradient(*T, gv);
-            Mat3L Ah;
+            vgt_lapack::Mat3L Ah;
             for (int i = 0; i < 3; i++)
                 for (int j = 0; j < 3; j++)
                     Ah.d[i + 3*j] = gv(i, j);
@@ -337,10 +338,10 @@ int main(int argc, char* argv[])
         }
 
         // Batch decompose (nqp VGTs per LAPACK call)
-        const auto eig_h  = part_vgt_batch_eig  (Ah_vec);
-        const auto sch_h  = part_vgt_batch_schur (Ah_vec);
-        const auto eig_ex = part_vgt_batch_eig  (Ae_vec);
-        const auto sch_ex = part_vgt_batch_schur (Ae_vec);
+        const auto eig_h  = vgt_lapack::part_vgt_batch_eig  (Ah_vec);
+        const auto sch_h  = vgt_lapack::part_vgt_batch_schur (Ah_vec);
+        const auto eig_ex = vgt_lapack::part_vgt_batch_eig  (Ae_vec);
+        const auto sch_ex = vgt_lapack::part_vgt_batch_schur (Ae_vec);
 
         for (int q = 0; q < nqp; q++)
         {
@@ -406,22 +407,22 @@ int main(int argc, char* argv[])
     // The raw tensors are exported as 9-component L2 fields (vgt_h, vgt_exact),
     // one component per entry A(i,j) in by-VDIM order. The derived A2_* and
     // grad_error outputs are scalar fields for direct plotting in VisIt.
-    L2_FECollection l2_fec(order, 3);
-    ParFiniteElementSpace l2s_fes(&pmesh, &l2_fec);
-    ParFiniteElementSpace l2t_fes(&pmesh, &l2_fec, 9, Ordering::byVDIM);
+    mfem::L2_FECollection l2_fec(order, 3);
+    mfem::ParFiniteElementSpace l2s_fes(&pmesh, &l2_fec);
+    mfem::ParFiniteElementSpace l2t_fes(&pmesh, &l2_fec, 9, mfem::Ordering::byVDIM);
 
-    ParGridFunction vgt_h_gf(&l2t_fes);
-    ParGridFunction vgt_exact_gf(&l2t_fes);
-    ParGridFunction grad_err_gf(&l2s_fes);
-    ParGridFunction A2_ax_gf(&l2s_fes);
-    ParGridFunction A2_sh_gf(&l2s_fes);
-    ParGridFunction A2_rr_gf(&l2s_fes);
-    ParGridFunction A2_sr_gf(&l2s_fes);
-    ParGridFunction A2_ax_ex_gf(&l2s_fes);
-    ParGridFunction A2_sh_ex_gf(&l2s_fes);
-    ParGridFunction A2_rr_ex_gf(&l2s_fes);
-    ParGridFunction A2_sr_ex_gf(&l2s_fes);
-    ParGridFunction delta_norm_gf(&l2s_fes);
+    mfem::ParGridFunction vgt_h_gf(&l2t_fes);
+    mfem::ParGridFunction vgt_exact_gf(&l2t_fes);
+    mfem::ParGridFunction grad_err_gf(&l2s_fes);
+    mfem::ParGridFunction A2_ax_gf(&l2s_fes);
+    mfem::ParGridFunction A2_sh_gf(&l2s_fes);
+    mfem::ParGridFunction A2_rr_gf(&l2s_fes);
+    mfem::ParGridFunction A2_sr_gf(&l2s_fes);
+    mfem::ParGridFunction A2_ax_ex_gf(&l2s_fes);
+    mfem::ParGridFunction A2_sh_ex_gf(&l2s_fes);
+    mfem::ParGridFunction A2_rr_ex_gf(&l2s_fes);
+    mfem::ParGridFunction A2_sr_ex_gf(&l2s_fes);
+    mfem::ParGridFunction delta_norm_gf(&l2s_fes);
 
     VGTHCoeff vgt_h_coeff(vel);
     VGTExactCoeff vgt_ex_coeff;
@@ -443,7 +444,7 @@ int main(int argc, char* argv[])
     A2_sr_ex_gf.ProjectCoefficient(sr_ex_coeff);
     delta_norm_gf.ProjectCoefficient(delta_coeff);
 
-    VisItDataCollection dc("vgt_mfem_example_vis", &pmesh);
+    mfem::VisItDataCollection dc("vgt_mfem_example_vis", &pmesh);
     dc.SetPrefixPath("visit_output/vgt_mfem_example");
     dc.RegisterField("vel", &vel);
     dc.RegisterField("vgt_h", &vgt_h_gf);
@@ -482,9 +483,9 @@ int main(int argc, char* argv[])
         hline('-');
         std::cout << "  TIER 2  Partition identity max residual  (all points)\n";
         hline('-');
-        std::cout << "  EIG   max |||A_h||^2 - sum A^2_k|  =  " << g_ep
+        std::cout << "  EIG   [LAPACK] max |||A_h||^2 - sum A^2_k|  =  " << g_ep
                   << "  " << (eig_ok ? "PASS" : "FAIL") << "\n";
-        std::cout << "  Schur max |||A_h||^2 - sum A^2_k|  =  " << g_sp
+        std::cout << "  Schur [LAPACK] max |||A_h||^2 - sum A^2_k|  =  " << g_sp
                   << "  " << (sch_ok ? "PASS" : "FAIL") << "\n\n";
 
         // Degeneracy
@@ -509,10 +510,10 @@ int main(int argc, char* argv[])
         std::cout << "\n  "
                   << std::left  << std::setw(w0) << "Component"
                   << std::right << std::setw(w1)  << "Mean A2_exact"
-                  << std::setw(w2) << "E_rms (EIG)"
-                  << std::setw(w2) << "rel err (EIG)"
-                  << std::setw(w2) << "E_rms (Schur)"
-                  << std::setw(w2) << "rel err (Schur)"
+                  << std::setw(w2) << "E_rms (EIG/L)"
+                  << std::setw(w2) << "rel err"
+                  << std::setw(w2) << "E_rms (Schur/L)"
+                  << std::setw(w2) << "rel err"
                   << "\n  " << std::string(w0+w1+4*w2, '-') << "\n";
 
         std::cout << std::right << std::scientific << std::setprecision(4);
@@ -540,7 +541,9 @@ int main(int argc, char* argv[])
         row("A2_sr", g_xsr, g_ew2, g_sw2);
 
         std::cout << "\n  E_rms   = sqrt( sum_q w_q (A2_k,h - A2_k,exact)^2 / vol )\n";
-        std::cout << "  rel err = E_rms / mean(A2_k,exact)\n\n";
+        std::cout << "  rel err = E_rms / mean(A2_k,exact)\n";
+        std::cout << "  note    = this file uses only the LAPACK backend; compare library\n";
+        std::cout << "            impact with vgt_mfem_benchmark or test_vgt_mfem_units\n\n";
         std::cout << "  VisIt output saved:\n";
         std::cout << "    File > Open > "
                   << "visit_output/vgt_mfem_example/"

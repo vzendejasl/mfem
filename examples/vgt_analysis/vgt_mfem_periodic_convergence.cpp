@@ -22,8 +22,8 @@
  * fraction of points is excluded from Tier 3.  Skip counts are reported.
  *
  * Output: two tables per polynomial order
- *   Table A -- EIG (Rortex/Liutex) pathway
- *   Table B -- Schur pathway
+ *   Table A -- EIG (Rortex/Liutex) method, LAPACK backend
+ *   Table B -- Schur method, LAPACK backend
  *
  * Build:
  *   make MFEM_CXX=/usr/local/bin/mpicxx vgt_mfem_periodic_convergence
@@ -45,8 +45,6 @@
 #include <sstream>
 #include <vector>
 
-using namespace mfem;
-using namespace vgt_lapack;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 static constexpr double PI = M_PI;
@@ -55,7 +53,7 @@ static const     double ABC_B = std::sqrt(2.0);
 static const     double ABC_C = std::sqrt(3.0);
 
 // ── Periodic ABC velocity field ──────────────────────────────────────────────
-static void u_abc_func(const Vector& x, Vector& v)
+static void u_abc_func(const mfem::Vector& x, mfem::Vector& v)
 {
     const double cx = std::cos(2*PI*x[0]);
     const double sx = std::sin(2*PI*x[0]);
@@ -70,7 +68,7 @@ static void u_abc_func(const Vector& x, Vector& v)
 }
 
 // ── Analytical VGT, column-major d[i+3j] = du_i/dx_j ─────────────────────────
-static Mat3L A_exact_at(const Vector& x)
+static vgt_lapack::Mat3L A_exact_at(const mfem::Vector& x)
 {
     const double cx = std::cos(2*PI*x[0]);
     const double sx = std::sin(2*PI*x[0]);
@@ -80,7 +78,7 @@ static Mat3L A_exact_at(const Vector& x)
     const double sz = std::sin(2*PI*x[2]);
     const double k = 2*PI;
 
-    Mat3L M;
+    vgt_lapack::Mat3L M;
     M(0,0) = 0.0;             M(0,1) = -ABC_C * k * sy; M(0,2) =  ABC_A * k * cz;
     M(1,0) =  ABC_B * k * cx; M(1,1) = 0.0;             M(1,2) = -ABC_A * k * sz;
     M(2,0) = -ABC_B * k * sx; M(2,1) =  ABC_C * k * cy; M(2,2) = 0.0;
@@ -88,7 +86,7 @@ static Mat3L A_exact_at(const Vector& x)
 }
 
 // ── Cubic discriminant (normalized) ──────────────────────────────────────────
-static double disc_norm(const Mat3L& A)
+static double disc_norm(const vgt_lapack::Mat3L& A)
 {
     const double I1 = A(0,0)+A(1,1)+A(2,2);
     double trA2 = 0.0;
@@ -106,15 +104,15 @@ static double disc_norm(const Mat3L& A)
 }
 
 // ── Build a fully periodic N x N x N hex mesh on [0,1]^3 ─────────────────────
-static Mesh MakePeriodicCartesian3D(int N)
+static mfem::Mesh MakePeriodicCartesian3D(int N)
 {
-    Mesh base = Mesh::MakeCartesian3D(N, N, N, Element::HEXAHEDRON,
+    mfem::Mesh base = mfem::Mesh::MakeCartesian3D(N, N, N, mfem::Element::HEXAHEDRON,
                                       1.0, 1.0, 1.0, false);
-    Vector tx({1.0, 0.0, 0.0});
-    Vector ty({0.0, 1.0, 0.0});
-    Vector tz({0.0, 0.0, 1.0});
-    std::vector<Vector> translations = {tx, ty, tz};
-    return Mesh::MakePeriodic(base, base.CreatePeriodicVertexMapping(translations));
+    mfem::Vector tx({1.0, 0.0, 0.0});
+    mfem::Vector ty({0.0, 1.0, 0.0});
+    mfem::Vector tz({0.0, 0.0, 1.0});
+    std::vector<mfem::Vector> translations = {tx, ty, tz};
+    return mfem::Mesh::MakePeriodic(base, base.CreatePeriodicVertexMapping(translations));
 }
 
 // ── Per-(order,N) result ──────────────────────────────────────────────────────
@@ -130,18 +128,18 @@ struct RunResult {
 
 static RunResult run_case(int order, int N, MPI_Comm comm)
 {
-    Mesh serial = MakePeriodicCartesian3D(N);
-    ParMesh pmesh(comm, serial);
+    mfem::Mesh serial = MakePeriodicCartesian3D(N);
+    mfem::ParMesh pmesh(comm, serial);
     serial.Clear();
 
-    H1_FECollection fec(order, 3);
-    ParFiniteElementSpace fes(&pmesh, &fec, 3);
+    mfem::H1_FECollection fec(order, 3);
+    mfem::ParFiniteElementSpace fes(&pmesh, &fec, 3);
 
-    ParGridFunction vel(&fes);
-    VectorFunctionCoefficient vcoeff(3, u_abc_func);
+    mfem::ParGridFunction vel(&fes);
+    mfem::VectorFunctionCoefficient vcoeff(3, u_abc_func);
     vel.ProjectCoefficient(vcoeff);
 
-    const IntegrationRule& ir = IntRules.Get(Geometry::CUBE, 2*order+1);
+    const mfem::IntegrationRule& ir = mfem::IntRules.Get(mfem::Geometry::CUBE, 2*order+1);
     const int nqp = ir.GetNPoints();
 
     double grad_err2   = 0.0;
@@ -151,28 +149,28 @@ static RunResult run_case(int order, int N, MPI_Comm comm)
     double reg_vol=0,  min_dn=1e300;
     long long skipped=0, regular=0;
 
-    std::vector<Mat3L> Ah_vec(nqp), Ae_vec(nqp);
+    std::vector<vgt_lapack::Mat3L> Ah_vec(nqp), Ae_vec(nqp);
     std::vector<double> wts(nqp);
     std::vector<bool>   reg(nqp);
 
     for (int e = 0; e < pmesh.GetNE(); e++)
     {
-        ElementTransformation* T = pmesh.GetElementTransformation(e);
+        mfem::ElementTransformation* T = pmesh.GetElementTransformation(e);
 
         for (int q = 0; q < nqp; q++)
         {
-            const IntegrationPoint& ip = ir.IntPoint(q);
+            const mfem::IntegrationPoint& ip = ir.IntPoint(q);
             T->SetIntPoint(&ip);
 
             const double wt = ip.weight * T->Weight();
             wts[q] = wt;
 
-            Vector xp(3);
+            mfem::Vector xp(3);
             T->Transform(ip, xp);
 
-            DenseMatrix gv(3, 3);
+            mfem::DenseMatrix gv(3, 3);
             vel.GetVectorGradient(*T, gv);
-            Mat3L Ah;
+            vgt_lapack::Mat3L Ah;
             for (int i = 0; i < 3; i++)
                 for (int j = 0; j < 3; j++)
                     Ah.d[i + 3*j] = gv(i, j);
@@ -192,10 +190,10 @@ static RunResult run_case(int order, int N, MPI_Comm comm)
             if (reg[q]) { ++regular; } else { ++skipped; }
         }
 
-        const auto eig_h  = part_vgt_batch_eig  (Ah_vec);
-        const auto sch_h  = part_vgt_batch_schur (Ah_vec);
-        const auto eig_ex = part_vgt_batch_eig  (Ae_vec);
-        const auto sch_ex = part_vgt_batch_schur (Ae_vec);
+        const auto eig_h  = vgt_lapack::part_vgt_batch_eig  (Ah_vec);
+        const auto sch_h  = vgt_lapack::part_vgt_batch_schur (Ah_vec);
+        const auto eig_ex = vgt_lapack::part_vgt_batch_eig  (Ae_vec);
+        const auto sch_ex = vgt_lapack::part_vgt_batch_schur (Ae_vec);
 
         for (int q = 0; q < nqp; q++)
         {
@@ -269,7 +267,7 @@ static void print_table(const char* tag, int order,
                         const std::vector<RunResult>& R, bool schur)
 {
     std::cout << "\n" << std::string(129, '-') << "\n";
-    std::cout << "  P" << order << "  |  " << tag << " pathway\n";
+    std::cout << "  P" << order << "  |  method=" << tag << ", backend=LAPACK\n";
     std::cout << std::string(129, '-') << "\n";
     std::cout << std::setw(5)  << "N"
               << std::setw(10) << "h"
@@ -318,6 +316,8 @@ int main(int argc, char* argv[])
         std::cout << "  VGT MFEM Periodic ABC Convergence Study  [MPI x" << size << "]\n";
         std::cout << "  Field: ABC,  a=1, b=sqrt(2), c=sqrt(3), k=2pi\n";
         std::cout << "  Domain: [0,1]^3 with full periodicity (x,y,z)\n";
+        std::cout << "  Backend: LAPACK (vgt_lapack.hpp)\n";
+        std::cout << "  Methods: EIG (Rortex/Liutex), Schur\n";
         std::cout << "==================================================================\n";
     }
 

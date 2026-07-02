@@ -17,8 +17,8 @@
  *   Tier 3  — component RMS error:        regular points only (|Δ_norm| > 1e-10)
  *
  * Output: two separate tables per polynomial order
- *   Table A — EIG (Rortex/Liutex) pathway
- *   Table B — Schur pathway
+ *   Table A — EIG (Rortex/Liutex) method, LAPACK backend
+ *   Table B — Schur method, LAPACK backend
  *
  * Build:
  *   make MFEM_CXX=/usr/local/bin/mpicxx vgt_mfem_convergence
@@ -42,15 +42,13 @@
 #include <sstream>
 #include <vector>
 
-using namespace mfem;
-using namespace vgt_lapack;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 static constexpr double PI  = M_PI;
 static constexpr double EPS = 0.05;
 
 // ── Modified manufactured velocity u_ε = Bx + ε u₀ ──────────────────────────
-static void u_eps_func(const Vector& x, Vector& v)
+static void u_eps_func(const mfem::Vector& x, mfem::Vector& v)
 {
     v[0] =  x[0] - 10.0*x[1]
            + EPS*(std::sin(2*PI*x[0]) + std::sin(4*PI*x[1]) + std::sin(6*PI*x[2]));
@@ -61,9 +59,9 @@ static void u_eps_func(const Vector& x, Vector& v)
 }
 
 // ── Analytical VGT: A_ε = B + ε A₀, column-major d[i+3j] = ∂uᵢ/∂xⱼ ─────────
-static Mat3L A_exact_at(const Vector& x)
+static vgt_lapack::Mat3L A_exact_at(const mfem::Vector& x)
 {
-    Mat3L M;
+    vgt_lapack::Mat3L M;
     M(0,0) =  1.0 + EPS * 2*PI * std::cos(2*PI*x[0]);
     M(0,1) = -10.0 + EPS * 4*PI * std::cos(4*PI*x[1]);
     M(0,2) =  0.0  + EPS * 6*PI * std::cos(6*PI*x[2]);
@@ -77,7 +75,7 @@ static Mat3L A_exact_at(const Vector& x)
 }
 
 // ── Cubic discriminant (normalized) ──────────────────────────────────────────
-static double disc_norm(const Mat3L& A)
+static double disc_norm(const vgt_lapack::Mat3L& A)
 {
     const double I1 = A(0,0)+A(1,1)+A(2,2);
     double trA2 = 0.0;
@@ -112,18 +110,18 @@ struct RunResult {
 // ── Run one (order, N) case ───────────────────────────────────────────────────
 static RunResult run_case(int order, int N, MPI_Comm comm)
 {
-    Mesh serial = Mesh::MakeCartesian3D(N, N, N, Element::HEXAHEDRON);
-    ParMesh pmesh(comm, serial);
+    mfem::Mesh serial = mfem::Mesh::MakeCartesian3D(N, N, N, mfem::Element::HEXAHEDRON);
+    mfem::ParMesh pmesh(comm, serial);
     serial.Clear();
 
-    H1_FECollection fec(order, 3);
-    ParFiniteElementSpace fes(&pmesh, &fec, 3);
+    mfem::H1_FECollection fec(order, 3);
+    mfem::ParFiniteElementSpace fes(&pmesh, &fec, 3);
 
-    ParGridFunction vel(&fes);
-    VectorFunctionCoefficient vcoeff(3, u_eps_func);
+    mfem::ParGridFunction vel(&fes);
+    mfem::VectorFunctionCoefficient vcoeff(3, u_eps_func);
     vel.ProjectCoefficient(vcoeff);
 
-    const IntegrationRule& ir = IntRules.Get(Geometry::CUBE, 2*order+1);
+    const mfem::IntegrationRule& ir = mfem::IntRules.Get(mfem::Geometry::CUBE, 2*order+1);
     const int nqp = ir.GetNPoints();
 
     // Local accumulators
@@ -135,31 +133,31 @@ static RunResult run_case(int order, int N, MPI_Comm comm)
     long long skipped=0, regular=0;
 
     // Per-element workspace
-    std::vector<Mat3L> Ah_vec(nqp), Ae_vec(nqp);
+    std::vector<vgt_lapack::Mat3L> Ah_vec(nqp), Ae_vec(nqp);
     std::vector<double> wts(nqp);
     std::vector<bool>   reg(nqp);
 
     for (int e = 0; e < pmesh.GetNE(); e++)
     {
-        ElementTransformation* T = pmesh.GetElementTransformation(e);
+        mfem::ElementTransformation* T = pmesh.GetElementTransformation(e);
 
         // ── Collect VGTs for this element ─────────────────────────────────────
         for (int q = 0; q < nqp; q++)
         {
-            const IntegrationPoint& ip = ir.IntPoint(q);
+            const mfem::IntegrationPoint& ip = ir.IntPoint(q);
             T->SetIntPoint(&ip);
 
             const double wt = ip.weight * T->Weight();
             wts[q] = wt;
 
             // Physical coordinates at this quadrature point
-            Vector xp(3);
+            mfem::Vector xp(3);
             T->Transform(ip, xp);
 
             // Approximate VGT from FE projection
-            DenseMatrix gv(3, 3);
+            mfem::DenseMatrix gv(3, 3);
             vel.GetVectorGradient(*T, gv);
-            Mat3L Ah;
+            vgt_lapack::Mat3L Ah;
             for (int i = 0; i < 3; i++)
                 for (int j = 0; j < 3; j++)
                     Ah.d[i + 3*j] = gv(i, j);
@@ -184,10 +182,10 @@ static RunResult run_case(int order, int N, MPI_Comm comm)
         }
 
         // ── Batch decompose (nqp VGTs per call) ──────────────────────────────
-        const auto eig_h  = part_vgt_batch_eig  (Ah_vec);
-        const auto sch_h  = part_vgt_batch_schur (Ah_vec);
-        const auto eig_ex = part_vgt_batch_eig  (Ae_vec);
-        const auto sch_ex = part_vgt_batch_schur (Ae_vec);
+        const auto eig_h  = vgt_lapack::part_vgt_batch_eig  (Ah_vec);
+        const auto sch_h  = vgt_lapack::part_vgt_batch_schur (Ah_vec);
+        const auto eig_ex = vgt_lapack::part_vgt_batch_eig  (Ae_vec);
+        const auto sch_ex = vgt_lapack::part_vgt_batch_schur (Ae_vec);
 
         // ── Accumulate Tier 2 and Tier 3 ─────────────────────────────────────
         for (int q = 0; q < nqp; q++)
@@ -266,7 +264,7 @@ static void print_eig_table(int order, const std::vector<RunResult>& R)
 {
     std::cout << "\n─────────────────────────────────────────────────────────────────"
                  "──────────────────────────────────────────────────────────────────\n";
-    std::cout << "  P" << order << "  |  EIG (Rortex/Liutex) pathway\n";
+    std::cout << "  P" << order << "  |  method=EIG (Rortex/Liutex), backend=LAPACK\n";
     std::cout << "─────────────────────────────────────────────────────────────────"
                  "──────────────────────────────────────────────────────────────────\n";
     std::cout << std::setw(5)  << "N"
@@ -304,7 +302,7 @@ static void print_sch_table(int order, const std::vector<RunResult>& R)
 {
     std::cout << "\n─────────────────────────────────────────────────────────────────"
                  "──────────────────────────────────────────────────────────────────\n";
-    std::cout << "  P" << order << "  |  Schur pathway\n";
+    std::cout << "  P" << order << "  |  method=Schur, backend=LAPACK\n";
     std::cout << "─────────────────────────────────────────────────────────────────"
                  "──────────────────────────────────────────────────────────────────\n";
     std::cout << std::setw(5)  << "N"
@@ -349,6 +347,7 @@ int main(int argc, char* argv[])
         std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
         std::cout << "║  VGT MFEM Convergence Study  [MPI ×" << std::setw(2) << size << "]                      ║\n";
         std::cout << "║  Field: u_ε = Bx + ε u₀,  ε = 0.05,  B eigs: 1±10i, -2    ║\n";
+        std::cout << "║  Backend: LAPACK   Methods: EIG, Schur                    ║\n";
         std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
     }
 

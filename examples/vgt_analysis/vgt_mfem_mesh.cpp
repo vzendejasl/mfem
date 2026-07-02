@@ -12,6 +12,9 @@
  *   3. Schur partition identity holds at every quadrature point.
  *   4. Global batch norm equals sqrt(N * ||A||²).
  *
+ * Backend:
+ *   This file uses the LAPACK backend from vgt_lapack.hpp for both methods.
+ *
  * Build:
  *   make MFEM_CXX=/usr/local/bin/mpicxx vgt_mfem_mesh
  *
@@ -35,8 +38,6 @@
 #include <iostream>
 #include <vector>
 
-using namespace mfem;
-using namespace vgt_lapack;
 
 // First VGT from vgt_input.csv, column-major layout: d[i + j*3] = A[i][j]
 // Convention: A[i][j] = du_i / dx_j
@@ -47,7 +48,7 @@ static const double A_REF[9] = {
 };
 
 // Manufactured velocity: v[i] = sum_j A[i][j] * x[j]
-static void vel_func(const Vector& x, Vector& v)
+static void vel_func(const mfem::Vector& x, mfem::Vector& v)
 {
     for (int i = 0; i < 3; i++) {
         v[i] = 0.0;
@@ -63,40 +64,40 @@ int main(int argc, char* argv[])
     const int size = mpi.WorldSize();
 
     if (rank == 0)
-        std::cout << "=== VGT Mesh Test [MFEM, MPI x" << size << "] ===\n\n";
+        std::cout << "=== VGT mfem::Mesh Test [MFEM, MPI x" << size << "] ===\n\n";
 
     // 8×8×8 hex mesh on [0,1]^3
-    Mesh serial_mesh = Mesh::MakeCartesian3D(8, 8, 8, Element::HEXAHEDRON);
-    ParMesh pmesh(MPI_COMM_WORLD, serial_mesh);
+    mfem::Mesh serial_mesh = mfem::Mesh::MakeCartesian3D(8, 8, 8, mfem::Element::HEXAHEDRON);
+    mfem::ParMesh pmesh(MPI_COMM_WORLD, serial_mesh);
     serial_mesh.Clear();
 
     // H1 order 4, vdim=3
     const int order = 4;
-    H1_FECollection fec(order, 3);
-    ParFiniteElementSpace fes(&pmesh, &fec, 3);
+    mfem::H1_FECollection fec(order, 3);
+    mfem::ParFiniteElementSpace fes(&pmesh, &fec, 3);
 
     // Project manufactured velocity
-    ParGridFunction vel(&fes);
-    VectorFunctionCoefficient vcoeff(3, vel_func);
+    mfem::ParGridFunction vel(&fes);
+    mfem::VectorFunctionCoefficient vcoeff(3, vel_func);
     vel.ProjectCoefficient(vcoeff);
 
     // Gauss rule: (order+1)^3 = 27 points per hex
-    const IntegrationRule& ir = IntRules.Get(Geometry::CUBE, 2*order+1);
+    const mfem::IntegrationRule& ir = mfem::IntRules.Get(mfem::Geometry::CUBE, 2*order+1);
     const int nqp = ir.GetNPoints();
 
     // Extract VGTs at every quadrature point on local elements
-    std::vector<Mat3L> local_vgts;
+    std::vector<vgt_lapack::Mat3L> local_vgts;
     local_vgts.reserve(pmesh.GetNE() * nqp);
 
     for (int e = 0; e < pmesh.GetNE(); e++) {
-        ElementTransformation* T = pmesh.GetElementTransformation(e);
+        mfem::ElementTransformation* T = pmesh.GetElementTransformation(e);
         for (int q = 0; q < nqp; q++) {
-            const IntegrationPoint& ip = ir.IntPoint(q);
+            const mfem::IntegrationPoint& ip = ir.IntPoint(q);
             T->SetIntPoint(&ip);
-            DenseMatrix grad_v(3, 3);
+            mfem::DenseMatrix grad_v(3, 3);
             vel.GetVectorGradient(*T, grad_v);
-            // grad_v(i,j) = dv_i/dx_j = A[i][j]; pack column-major into Mat3L
-            Mat3L M;
+            // grad_v(i,j) = dv_i/dx_j = A[i][j]; pack column-major into vgt_lapack::Mat3L
+            vgt_lapack::Mat3L M;
             for (int i = 0; i < 3; i++)
                 for (int j = 0; j < 3; j++)
                     M.d[i + j*3] = grad_v(i, j);
@@ -109,8 +110,8 @@ int main(int argc, char* argv[])
     MPI_Allreduce(&N_local, &N_global, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 
     // Decompose
-    auto res_eig   = part_vgt_batch_eig(local_vgts);
-    auto res_schur = part_vgt_batch_schur(local_vgts);
+    auto res_eig   = vgt_lapack::part_vgt_batch_eig(local_vgts);
+    auto res_schur = vgt_lapack::part_vgt_batch_schur(local_vgts);
 
     // ── Check 1: extracted VGT matches A_REF entry-wise ───────────────────
     double local_max_entry = 0.0;
