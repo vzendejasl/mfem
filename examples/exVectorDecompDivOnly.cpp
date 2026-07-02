@@ -54,6 +54,7 @@
 #include <fstream>
 #include <iostream>
 #include <iomanip>
+#include <memory>
 #include <vector>
 
 using namespace std;
@@ -167,7 +168,7 @@ Mesh MakePeriodicCube(int num_pts)
 // Solve one refinement level and fill in the metrics.  If do_visit is true,
 // the computed and exact fields are written to a VisIt data collection.
 void RunLevel(int num_pts, int order, int par_ref, LevelMetrics &m,
-              bool do_visit = false)
+              bool pa = false, bool do_visit = false)
 {
    // 1. Periodic mesh, refined par_ref times in parallel.
    Mesh serial_mesh = MakePeriodicCube(num_pts);
@@ -206,10 +207,12 @@ void RunLevel(int num_pts, int order, int par_ref, LevelMetrics &m,
    u_gf.ProjectCoefficient(u_h1_coeff);   // nodal H1 -> ND projection
 
    // 4. Assemble the Poisson operator  a(phi,psi) = (grad phi, grad psi).
+   //    With -pa the operator is matrix-free (tensor-product kernels, the
+   //    device-friendly path); otherwise a sparse matrix is assembled.
    ParBilinearForm a(&h1_scalar);
+   if (pa) { a.SetAssemblyLevel(AssemblyLevel::PARTIAL); }
    a.AddDomainIntegrator(new DiffusionIntegrator());
    a.Assemble();
-   a.Finalize();
 
    // 5. Assemble the weak-divergence right-hand side  b(psi) = (u, grad psi).
    //    DomainLFGradIntegrator(Q) assembles exactly (Q, grad psi), with Q the
@@ -219,28 +222,42 @@ void RunLevel(int num_pts, int order, int par_ref, LevelMetrics &m,
    b.AddDomainIntegrator(new DomainLFGradIntegrator(u_gf_coeff));
    b.Assemble();
 
-   HypreParMatrix *A = a.ParallelAssemble();
+   Array<int> empty_tdofs;   // periodic: no essential BCs
+   OperatorPtr A;
+   a.FormSystemMatrix(empty_tdofs, A);
+
    Vector B(h1_scalar.GetTrueVSize()), PHI(h1_scalar.GetTrueVSize());
    b.ParallelAssemble(B);
    PHI = 0.0;
 
    // 6. Solve the singular (periodic => constant null space) system.  The
-   //    OrthoSolver wraps the AMG *preconditioner* (as in MFEM's navier
-   //    solver), so every CG iterate is projected off the constant null
-   //    space; running Hypre PCG directly on the singular system can stall
-   //    or break down with a NaN residual.
-   HypreBoomerAMG amg(*A);
-   amg.SetPrintLevel(0);
+   //    OrthoSolver wraps the *preconditioner* (as in MFEM's navier solver),
+   //    so every CG iterate is projected off the constant null space; running
+   //    Hypre PCG directly on the singular system can stall or break down
+   //    with a NaN residual.  BoomerAMG needs an assembled matrix, so the
+   //    matrix-free (-pa) path uses a Jacobi smoother built from the PA
+   //    diagonal instead; CG then needs more iterations (no multigrid).
+   std::unique_ptr<Solver> prec;
+   if (pa)
+   {
+      prec = std::make_unique<OperatorJacobiSmoother>(a, empty_tdofs);
+   }
+   else
+   {
+      auto amg = std::make_unique<HypreBoomerAMG>(*A.As<HypreParMatrix>());
+      amg->SetPrintLevel(0);
+      prec = std::move(amg);
+   }
 
-   OrthoSolver ortho_amg(MPI_COMM_WORLD);
-   ortho_amg.SetSolver(amg);
+   OrthoSolver ortho_prec(MPI_COMM_WORLD);
+   ortho_prec.SetSolver(*prec);
 
    CGSolver cg(MPI_COMM_WORLD);
    cg.SetRelTol(1e-12);
    cg.SetAbsTol(0.0);
-   cg.SetMaxIter(1000);
+   cg.SetMaxIter(pa ? 10000 : 1000);
    cg.SetPrintLevel(0);
-   cg.SetPreconditioner(ortho_amg);
+   cg.SetPreconditioner(ortho_prec);
    cg.SetOperator(*A);
    cg.Mult(B, PHI);
 
@@ -416,8 +433,6 @@ void RunLevel(int num_pts, int order, int par_ref, LevelMetrics &m,
    double h_max, kmin, kmax;
    pmesh.GetCharacteristics(m.h_min, h_max, kmin, kmax);
    m.dofs = nd_space.GlobalTrueVSize();
-
-   delete A;
 }
 
 int main(int argc, char *argv[])
@@ -429,11 +444,19 @@ int main(int argc, char *argv[])
    int num_pts  = 4;
    int max_ref  = 4;
    bool visit   = false;
+   bool pa      = false;
+   const char *device_config = "cpu";
 
    OptionsParser args(argc, argv);
    args.AddOption(&order,   "-o",   "--order",       "Finite element order.");
    args.AddOption(&num_pts, "-n",   "--num-pts",     "Base cells per direction.");
    args.AddOption(&max_ref, "-ref", "--max-ref",     "Number of refinement levels.");
+   args.AddOption(&pa, "-pa", "--partial-assembly", "-no-pa",
+                  "--no-partial-assembly",
+                  "Matrix-free Poisson operator with Jacobi-preconditioned CG "
+                  "(the device-friendly path) instead of assembled matrix + AMG.");
+   args.AddOption(&device_config, "-d", "--device",
+                  "Device configuration string, see Device::Configure().");
    args.AddOption(&vortical_field, "-f", "--field",
                   "Vortical field: 0 = interpolation-exactly div-free, "
                   "1 = generic (interpolant has O(h^k) element-wise divergence), "
@@ -449,12 +472,15 @@ int main(int argc, char *argv[])
    }
    if (Mpi::Root()) { args.PrintOptions(mfem::out); }
 
+   Device device(device_config);
+   if (Mpi::Root()) { device.Print(); }
+
    std::vector<LevelMetrics> results;
    for (int ref = 0; ref < max_ref; ++ref)
    {
       LevelMetrics m;
       bool dump = visit && (ref == max_ref - 1);   // dump on the finest level
-      RunLevel(num_pts, order, ref, m, dump);
+      RunLevel(num_pts, order, ref, m, pa, dump);
       results.push_back(m);
       if (Mpi::Root())
       {
