@@ -44,6 +44,7 @@
 
 #include "mfem.hpp"
 #include "vgt_lapack.hpp"
+#include "vgt_mfem_vis_space.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -232,13 +233,24 @@ int main(int argc, char* argv[])
     // ── Command-line options ──────────────────────────────────────────────────
     int order = 2;
     int N     = 16;
+    std::string vis_space_name = "l2";
+    VisualizationSpace vis_space = VisualizationSpace::l2;
 
     mfem::OptionsParser args(argc, argv);
     args.AddOption(&order, "-o", "--order",  "Polynomial order (1, 2, 4, ...).");
     args.AddOption(&N,     "-n", "--mesh-n", "Elements per side (N x N x N mesh).");
+    args.AddOption(&vis_space_name, "-vs", "--vis-space",
+                   "Visualization field space: 'l2' or 'h1'.");
     args.Parse();
     if (!args.Good()) {
         if (rank == 0) args.PrintUsage(std::cout);
+        return 1;
+    }
+    if (!parse_visualization_space(vis_space_name, vis_space)) {
+        if (rank == 0) {
+            std::cerr << "Unknown visualization space '" << vis_space_name
+                      << "'. Expected 'l2' or 'h1'\n";
+        }
         return 1;
     }
 
@@ -274,6 +286,7 @@ int main(int argc, char* argv[])
         std::cout << "  Mesh    : " << N << "^3 hex on [0,1]^3"
                   << "  (h = " << std::fixed << std::setprecision(6) << 1.0/N << ")\n";
         std::cout << "  Order   : P" << order << "\n";
+        std::cout << "  Vis     : " << visualization_space_label(vis_space) << " fields\n";
         std::cout << "  DOFs    : " << ndofs << "  (global, all components)\n";
         std::cout << "  Qpts    : " << nqp << " per element  ("
                   << N_qpts_global << " total)\n";
@@ -407,22 +420,22 @@ int main(int argc, char* argv[])
     // The raw tensors are exported as 9-component L2 fields (vgt_h, vgt_exact),
     // one component per entry A(i,j) in by-VDIM order. The derived A2_* and
     // grad_error outputs are scalar fields for direct plotting in VisIt.
-    mfem::L2_FECollection l2_fec(order, 3);
-    mfem::ParFiniteElementSpace l2s_fes(&pmesh, &l2_fec);
-    mfem::ParFiniteElementSpace l2t_fes(&pmesh, &l2_fec, 9, mfem::Ordering::byVDIM);
+    auto vis_fec = make_visualization_fec(vis_space, order, 3);
+    mfem::ParFiniteElementSpace viss_fes(&pmesh, vis_fec.get());
+    mfem::ParFiniteElementSpace vist_fes(&pmesh, vis_fec.get(), 9, mfem::Ordering::byVDIM);
 
-    mfem::ParGridFunction vgt_h_gf(&l2t_fes);
-    mfem::ParGridFunction vgt_exact_gf(&l2t_fes);
-    mfem::ParGridFunction grad_err_gf(&l2s_fes);
-    mfem::ParGridFunction A2_ax_gf(&l2s_fes);
-    mfem::ParGridFunction A2_sh_gf(&l2s_fes);
-    mfem::ParGridFunction A2_rr_gf(&l2s_fes);
-    mfem::ParGridFunction A2_sr_gf(&l2s_fes);
-    mfem::ParGridFunction A2_ax_ex_gf(&l2s_fes);
-    mfem::ParGridFunction A2_sh_ex_gf(&l2s_fes);
-    mfem::ParGridFunction A2_rr_ex_gf(&l2s_fes);
-    mfem::ParGridFunction A2_sr_ex_gf(&l2s_fes);
-    mfem::ParGridFunction delta_norm_gf(&l2s_fes);
+    mfem::ParGridFunction vgt_h_gf(&vist_fes);
+    mfem::ParGridFunction vgt_exact_gf(&vist_fes);
+    mfem::ParGridFunction grad_err_gf(&viss_fes);
+    mfem::ParGridFunction A2_ax_gf(&viss_fes);
+    mfem::ParGridFunction A2_sh_gf(&viss_fes);
+    mfem::ParGridFunction A2_rr_gf(&viss_fes);
+    mfem::ParGridFunction A2_sr_gf(&viss_fes);
+    mfem::ParGridFunction A2_ax_ex_gf(&viss_fes);
+    mfem::ParGridFunction A2_sh_ex_gf(&viss_fes);
+    mfem::ParGridFunction A2_rr_ex_gf(&viss_fes);
+    mfem::ParGridFunction A2_sr_ex_gf(&viss_fes);
+    mfem::ParGridFunction delta_norm_gf(&viss_fes);
 
     VGTHCoeff vgt_h_coeff(vel);
     VGTExactCoeff vgt_ex_coeff;
@@ -431,18 +444,18 @@ int main(int argc, char* argv[])
     PartCoeff ax_coeff(vel, 0), sh_coeff(vel, 1), rr_coeff(vel, 2), sr_coeff(vel, 3);
     PartExactCoeff ax_ex_coeff(0), sh_ex_coeff(1), rr_ex_coeff(2), sr_ex_coeff(3);
 
-    vgt_h_gf.ProjectCoefficient(vgt_h_coeff);
-    vgt_exact_gf.ProjectCoefficient(vgt_ex_coeff);
-    grad_err_gf.ProjectCoefficient(grad_err_coeff);
-    A2_ax_gf.ProjectCoefficient(ax_coeff);
-    A2_sh_gf.ProjectCoefficient(sh_coeff);
-    A2_rr_gf.ProjectCoefficient(rr_coeff);
-    A2_sr_gf.ProjectCoefficient(sr_coeff);
-    A2_ax_ex_gf.ProjectCoefficient(ax_ex_coeff);
-    A2_sh_ex_gf.ProjectCoefficient(sh_ex_coeff);
-    A2_rr_ex_gf.ProjectCoefficient(rr_ex_coeff);
-    A2_sr_ex_gf.ProjectCoefficient(sr_ex_coeff);
-    delta_norm_gf.ProjectCoefficient(delta_coeff);
+    project_to_visualization_space(vgt_h_gf, vgt_h_coeff, vis_space);
+    project_to_visualization_space(vgt_exact_gf, vgt_ex_coeff, vis_space);
+    project_to_visualization_space(grad_err_gf, grad_err_coeff, vis_space);
+    project_to_visualization_space(A2_ax_gf, ax_coeff, vis_space);
+    project_to_visualization_space(A2_sh_gf, sh_coeff, vis_space);
+    project_to_visualization_space(A2_rr_gf, rr_coeff, vis_space);
+    project_to_visualization_space(A2_sr_gf, sr_coeff, vis_space);
+    project_to_visualization_space(A2_ax_ex_gf, ax_ex_coeff, vis_space);
+    project_to_visualization_space(A2_sh_ex_gf, sh_ex_coeff, vis_space);
+    project_to_visualization_space(A2_rr_ex_gf, rr_ex_coeff, vis_space);
+    project_to_visualization_space(A2_sr_ex_gf, sr_ex_coeff, vis_space);
+    project_to_visualization_space(delta_norm_gf, delta_coeff, vis_space);
 
     mfem::VisItDataCollection dc("vgt_mfem_example_vis", &pmesh);
     dc.SetPrefixPath("visit_output/vgt_mfem_example");

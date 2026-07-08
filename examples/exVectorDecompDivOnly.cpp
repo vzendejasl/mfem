@@ -77,13 +77,60 @@ static const int dim = 3;
 //   2 = Taylor-Green vortex.  Exactly divergence free, so the exact split is
 //       u_c = 0, u_v = u: the compressible "error" measures the spurious
 //       dilatational field the discrete decomposition invents.
+//   3 = "shocklet": the compressible part is a periodic tanh compression
+//       sheet u_c = (tanh(sin(2 pi x)/delta), 0, 0) of width ~delta, plus a
+//       smooth vortical part with ZERO x-component.  Since the vortical
+//       x-component vanishes and rho = rho(x), div(rho u_v) = 0 as well, so
+//       the rho-weighted and unweighted Helmholtz splits have the SAME exact
+//       answer and the error tables stay meaningful with -rs.  Combined with
+//       the density diagnostics (10c) this reproduces, without any time
+//       integration, the "KE drift once the shock forms" seen when kinetic
+//       energy is defined through an L2-projected density (Laghos
+//       ComputeDensity) instead of the quadrature-point density.
 static int vortical_field = 0;
 
+// Field 3 parameters: tanh layer width and relative density jump.  The layer
+// center is shifted to a generic point: centered on a mesh vertex (or element
+// midpoint) of the uniform grid, the odd projection error times the even
+// |u|^2 profile integrates to zero by symmetry and the KE-definition gap
+// cancels exactly -- an accident real shocks do not enjoy.
+static double layer_delta = 0.05;
+static double layer_drho  = 0.5;
+static const double layer_x0 = 0.1327;
+
+// Density-weighted Poisson solve: (rho grad phi, grad psi) = (rho u, grad psi).
+static bool rho_weighted_solve = false;
+
+// Periodic tanh layer: smooth for delta > 0, approaching a square wave with
+// interfaces at x = 0 and x = 1/2 as delta -> 0.  f(s + 1/2) = -f(s), so it
+// is exactly mean zero and its antiderivative (the potential phi) is periodic.
+double tanh_layer(double s) { return tanh(sin(2*M_PI*s)/layer_delta); }
+
+// Density for the shocklet study: jumps collocated with the velocity layers,
+// as across a real shock.  tanh_layer is ANTIPERIODIC with period 1/2 (two
+// opposite-sign fronts per period) while |u|^2 has period 1/2, so with a
+// plain tanh density every rho-antisymmetric error (projection residual,
+// quadrature error) cancels EXACTLY between the two fronts.  The cosine
+// modulation gives the two fronts different jump strengths and breaks that
+// hidden cancellation.
+double rho_exact(const Vector &x)
+{
+   return 1.0 + layer_drho*tanh_layer(x(0) - layer_x0)
+              *(0.75 + 0.25*cos(2*M_PI*x(0)));
+}
+
 // Compressible part: u_c = grad(phi) with phi = -1/(2pi) * sum cos(2 pi x_i).
-// The Taylor-Green field (2) is purely solenoidal: grad(phi) = 0.
+// The Taylor-Green field (2) is purely solenoidal: grad(phi) = 0.  The
+// shocklet field (3) has the tanh compression sheet as its potential part.
 void grad_phi_exact(const Vector &x, Vector &u)
 {
    if (vortical_field == 2) { u = 0.0; return; }
+   if (vortical_field == 3)
+   {
+      u = 0.0;
+      u(0) = tanh_layer(x(0) - layer_x0);
+      return;
+   }
    u(0) = sin(2*M_PI*x(0));
    u(1) = sin(2*M_PI*x(1));
    u(2) = sin(2*M_PI*x(2));
@@ -109,6 +156,21 @@ void curl_A_exact(const Vector &x, Vector &w)
       w(0) = s1*(c2 - c3);
       w(1) = s2*(c3 - c1);
       w(2) = s3*(c1 - c2);
+   }
+   else if (vortical_field == 3)
+   {
+      // Vortical companion for the shocklet: a SHEAR layer collocated with
+      // the compression sheet (a tangential velocity jump, as across an
+      // oblique shock) plus a smooth 3D part.  div = 0 term by term (each
+      // component independent of its own coordinate) and w_x = 0, so
+      // div(rho(x) w) = 0 too -- the weighted split shares the exact answer.
+      // The shear layer matters for the density diagnostics: the ND space
+      // truncates the x-degree of u_x to k-1, making u_x^2 orthogonal to the
+      // density projection residual; u_y keeps x-degree k, so the shear
+      // carries the |u|^2 layer content that correlates with the rho error.
+      w(0) = 0.0;
+      w(1) = tanh_layer(x(0) - layer_x0) + sin(2*M_PI*(x(0) + x(2)));
+      w(2) = sin(2*M_PI*(x(0) + x(1)));
    }
    else
    {
@@ -152,6 +214,15 @@ struct LevelMetrics
    double ke_c       = 0.0;   // 1/2 (u_c, u_c)
    double ke_v       = 0.0;   // 1/2 (u_v, u_v)
    double inner_cv   = 0.0;   // (u_c, u_v)   -> ~0 if orthogonal
+   // Field-3 density diagnostics (see step 10c).
+   double ke_rho_q   = 0.0;   // 1/2 (rho u, u), analytic rho, hi-order quad
+   double ke_rho_p   = 0.0;   // same, rho = its element-wise L2 projection
+   double ke_rho_qd  = 0.0;   // analytic rho with default quadrature rule
+   double cross_rho  = 0.0;   // (rho u_c, u_v), analytic rho
+   double id_gap_nd  = 0.0;   // KE(u_h1) - [KE_c + KE_v + 2(rho u_c,u_v)]:
+                              // energy-split identity when the TOTAL is taken
+                              // on the H1 velocity but the split comes from
+                              // the ND-projected chain (production pattern)
 };
 
 // Build a periodic unit-cube hex mesh with num_pts cells per direction.
@@ -193,33 +264,57 @@ void RunLevel(int num_pts, int order, int par_ref, LevelMetrics &m,
    ParFiniteElementSpace l2_vector(&pmesh, &l2_fec, dim);   // vortical part lives here
    ParFiniteElementSpace l2_scalar(&pmesh, &l2_fec);        // for ||div(u_v)|| checks
 
-   // 3. The velocity is born in the vector H1 space (as in the Navier solver),
-   //    then projected into ND (H(curl)).  We use a nodal (interpolation)
-   //    projection: sample u_h1's values at the ND degrees of freedom.  This
-   //    is cheap and standalone (no mass solve); an L2/Galerkin projection is
-   //    the accuracy-preserving alternative used by exVectorDecompConvergence.
+   // 3. The velocity is born in the vector H1 space (as in the Navier solver)
+   //    and is used DIRECTLY everywhere downstream: in the Poisson RHS and as
+   //    the field that gets split.  An ND copy is kept only for visualization.
+   //    (Routing the pipeline through ND -- as earlier versions did -- is
+   //    lossy: the ND x-component only carries degree k-1 in x, an O(1)
+   //    pointwise loss at under-resolved fronts.  Then u_c + u_v reconstructs
+   //    the ND image of u rather than u itself, and the energy identity
+   //    KE = KE_c + KE_v + 2(rho u_c, u_v) fails against a KE computed on the
+   //    H1 velocity, growing as fronts sharpen.)
    ParGridFunction u_h1(&h1_vector);
    VectorFunctionCoefficient u_coeff(dim, u_exact);
    u_h1.ProjectCoefficient(u_coeff);
+   VectorGridFunctionCoefficient u_h1_coeff(&u_h1);
 
    ParGridFunction u_gf(&nd_space);
-   VectorGridFunctionCoefficient u_h1_coeff(&u_h1);
-   u_gf.ProjectCoefficient(u_h1_coeff);   // nodal H1 -> ND projection
+   u_gf.ProjectCoefficient(u_h1_coeff);   // reference/visualization only
 
-   // 4. Assemble the Poisson operator  a(phi,psi) = (grad phi, grad psi).
+   // 4. Assemble the Poisson operator  a(phi,psi) = (grad phi, grad psi),
+   //    or its density-weighted variant (rho grad phi, grad psi) with -rs.
    //    With -pa the operator is matrix-free (tensor-product kernels, the
    //    device-friendly path); otherwise a sparse matrix is assembled.
+   //    rho is not polynomial, so every rho-weighted form below uses ONE
+   //    explicit high-order rule: mixing default rules would make each form
+   //    a slightly different discrete inner product and silently break the
+   //    algebraic identities (weak divergence, energy split).
+   FunctionCoefficient rho_coeff(rho_exact);
+   const IntegrationRule &ir_hi = IntRules.Get(Geometry::CUBE, 3*order + 6);
+
    ParBilinearForm a(&h1_scalar);
    if (pa) { a.SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-   a.AddDomainIntegrator(new DiffusionIntegrator());
+   if (rho_weighted_solve)
+   {
+      auto *di = new DiffusionIntegrator(rho_coeff);
+      di->SetIntRule(&ir_hi);
+      a.AddDomainIntegrator(di);
+   }
+   else { a.AddDomainIntegrator(new DiffusionIntegrator()); }
    a.Assemble();
 
    // 5. Assemble the weak-divergence right-hand side  b(psi) = (u, grad psi).
    //    DomainLFGradIntegrator(Q) assembles exactly (Q, grad psi), with Q the
    //    velocity coefficient, so we never take a derivative of u.
-   VectorGridFunctionCoefficient u_gf_coeff(&u_gf);
+   ScalarVectorProductCoefficient rho_u_coeff(rho_coeff, u_h1_coeff);
    ParLinearForm b(&h1_scalar);
-   b.AddDomainIntegrator(new DomainLFGradIntegrator(u_gf_coeff));
+   if (rho_weighted_solve)
+   {
+      auto *lfi = new DomainLFGradIntegrator(rho_u_coeff);
+      lfi->SetIntRule(&ir_hi);
+      b.AddDomainIntegrator(lfi);
+   }
+   else { b.AddDomainIntegrator(new DomainLFGradIntegrator(u_h1_coeff)); }
    b.Assemble();
 
    Array<int> empty_tdofs;   // periodic: no essential BCs
@@ -282,11 +377,12 @@ void RunLevel(int num_pts, int order, int par_ref, LevelMetrics &m,
    //    NODAL interpolation and subtract there: u_v = Proj_L2(u) - Proj_L2(u_c).
    //    (By linearity this equals Proj_L2(u - u_c).)  u_l2 and uc_l2 are kept
    //    for the L2 energy / orthogonality checks below.
+   //    Both images are EXACT on hexes: continuous Q_k and ND_k are subspaces
+   //    of the broken (Q_k)^d space, so u_c + u_v == u_h1 at the dof level.
    ParGridFunction u_l2(&l2_vector), uc_l2(&l2_vector);
-   VectorGridFunctionCoefficient u_gf_as_coeff(&u_gf);
    VectorGridFunctionCoefficient u_c_as_coeff(&u_c);
-   u_l2.ProjectCoefficient(u_gf_as_coeff);    // nodal ND -> L2
-   uc_l2.ProjectCoefficient(u_c_as_coeff);    // nodal ND -> L2
+   u_l2.ProjectCoefficient(u_h1_coeff);       // exact H1 -> L2 image
+   uc_l2.ProjectCoefficient(u_c_as_coeff);    // exact ND -> L2 image
 
    ParGridFunction u_v(&l2_vector);
    u_v = u_l2;
@@ -318,10 +414,19 @@ void RunLevel(int num_pts, int order, int par_ref, LevelMetrics &m,
    //     assemble the same linear form used for the Poisson RHS, but with u_v
    //     as the coefficient, and report the l2 norm of the resulting dual
    //     vector relative to that of the RHS b(psi) = (u, grad psi).
+   //     With -rs the same check is done in the rho-weighted inner product,
+   //     (rho u_v, grad psi), which is what that solve enforces.
    {
       VectorGridFunctionCoefficient u_v_coeff(&u_v);
+      ScalarVectorProductCoefficient rho_uv_coeff(rho_coeff, u_v_coeff);
       ParLinearForm bv(&h1_scalar);
-      bv.AddDomainIntegrator(new DomainLFGradIntegrator(u_v_coeff));
+      if (rho_weighted_solve)
+      {
+         auto *lfi = new DomainLFGradIntegrator(rho_uv_coeff);
+         lfi->SetIntRule(&ir_hi);
+         bv.AddDomainIntegrator(lfi);
+      }
+      else { bv.AddDomainIntegrator(new DomainLFGradIntegrator(u_v_coeff)); }
       bv.Assemble();
       Vector BV(h1_scalar.GetTrueVSize());
       bv.ParallelAssemble(BV);
@@ -390,6 +495,97 @@ void RunLevel(int num_pts, int order, int par_ref, LevelMetrics &m,
    m.inner_cv = mass_inner(UC, UV);
 
    delete Ml2;
+
+   // 10c. Density diagnostics for the shocklet field: the kinetic energy
+   //      1/2 (rho u, u) computed with three versions of the SAME density.
+   //        rho_q : analytic rho evaluated at the points of a high-order
+   //                quadrature rule (the Laghos qdata analogue -- "truth"),
+   //        rho_p : its element-wise L2 projection into the order-k L2 space
+   //                (the Laghos ComputeDensity analogue), same rule,
+   //        rho_q with the mass integrator's default rule (rho is not a
+   //                polynomial, so the rule choice changes the answer).
+   //      While the layer is resolved all three agree; once delta < h the
+   //      projected density is O(1) wrong inside the layer elements and the
+   //      KE definitions split apart -- no time integration involved.
+   if (vortical_field == 3)
+   {
+      // Element-wise L2 projection of rho (block-diagonal mass solve).
+      ParGridFunction rho_l2(&l2_scalar);
+      {
+         ParBilinearForm mrho(&l2_scalar);
+         auto *mi = new MassIntegrator();
+         mi->SetIntRule(&ir_hi);
+         mrho.AddDomainIntegrator(mi);
+         mrho.Assemble();
+         mrho.Finalize();
+         HypreParMatrix *Mr = mrho.ParallelAssemble();
+         ParLinearForm rl(&l2_scalar);
+         auto *dlf = new DomainLFIntegrator(rho_coeff);
+         dlf->SetIntRule(&ir_hi);
+         rl.AddDomainIntegrator(dlf);
+         rl.Assemble();
+         Vector R(l2_scalar.GetTrueVSize()), RHO(l2_scalar.GetTrueVSize());
+         rl.ParallelAssemble(R);
+         RHO = 0.0;
+         CGSolver mcg(MPI_COMM_WORLD);
+         mcg.SetOperator(*Mr);
+         mcg.SetRelTol(1e-14);
+         mcg.SetMaxIter(200);
+         mcg.SetPrintLevel(0);
+         mcg.Mult(R, RHO);
+         rho_l2.SetFromTrueDofs(RHO);
+         delete Mr;
+      }
+      GridFunctionCoefficient rho_l2_coeff(&rho_l2);
+
+      auto weighted_mass = [&](Coefficient &rc,
+                               const IntegrationRule *ir) -> HypreParMatrix*
+      {
+         ParBilinearForm mw(&l2_vector);
+         auto *vmi = new VectorMassIntegrator(rc);
+         if (ir) { vmi->SetIntRule(ir); }
+         mw.AddDomainIntegrator(vmi);
+         mw.Assemble();
+         mw.Finalize();
+         return mw.ParallelAssemble();
+      };
+      HypreParMatrix *M_q  = weighted_mass(rho_coeff,    &ir_hi);
+      HypreParMatrix *M_p  = weighted_mass(rho_l2_coeff, &ir_hi);
+      HypreParMatrix *M_qd = weighted_mass(rho_coeff,    nullptr);
+
+      auto minner = [&](HypreParMatrix *M, const Vector &va, const Vector &vb)
+      {
+         Vector Mb(vb.Size());
+         M->Mult(vb, Mb);
+         return InnerProduct(MPI_COMM_WORLD, va, Mb);
+      };
+      m.ke_rho_q  = 0.5*minner(M_q,  U, U);
+      m.ke_rho_p  = 0.5*minner(M_p,  U, U);
+      m.ke_rho_qd = 0.5*minner(M_qd, U, U);
+      m.cross_rho = minner(M_q, UC, UV);
+
+      // Energy-split identity, production-style: total KE on the ORIGINAL H1
+      // velocity, split terms from the ND-projected chain.  The H1 -> L2
+      // nodal projection is exact (Q_k continuous is a subset of Q_k broken),
+      // so UH represents u_h1 itself; the gap below is therefore exactly the
+      // energy the H1 -> ND hop loses at under-resolved fronts.  Defining
+      // u_v := u_h1 - u_c in the common L2 space (and driving the Poisson
+      // RHS with u_h1 directly) closes this identity to round-off.
+      {
+         ParGridFunction uh1_l2(&l2_vector);
+         VectorGridFunctionCoefficient u_h1_c(&u_h1);
+         uh1_l2.ProjectCoefficient(u_h1_c);
+         Vector UH;
+         uh1_l2.GetTrueDofs(UH);
+         const double ke_h1 = 0.5*minner(M_q, UH, UH);
+         m.id_gap_nd = ke_h1 - (0.5*minner(M_q, UC, UC)
+                                + 0.5*minner(M_q, UV, UV) + m.cross_rho);
+      }
+
+      delete M_q;
+      delete M_p;
+      delete M_qd;
+   }
 
    // 11. Optional VisIt dump: computed fields alongside the exact fields.
    //     u_c is in ND (compared to grad_phi_exact in ND); u_v is in L2
@@ -460,7 +656,17 @@ int main(int argc, char *argv[])
    args.AddOption(&vortical_field, "-f", "--field",
                   "Vortical field: 0 = interpolation-exactly div-free, "
                   "1 = generic (interpolant has O(h^k) element-wise divergence), "
-                  "2 = Taylor-Green vortex (purely solenoidal, exact u_c = 0).");
+                  "2 = Taylor-Green vortex (purely solenoidal, exact u_c = 0), "
+                  "3 = tanh shocklet + density diagnostics.");
+   args.AddOption(&layer_delta, "-delta", "--layer-width",
+                  "Width of the tanh layer for field 3.");
+   args.AddOption(&layer_drho, "-drho", "--density-jump",
+                  "Relative density jump across the field-3 layer.");
+   args.AddOption(&rho_weighted_solve, "-rs", "--rho-solve", "-no-rs",
+                  "--no-rho-solve",
+                  "Density-weighted Poisson solve: (rho grad phi, grad psi) = "
+                  "(rho u, grad psi), with the weak-divergence check done in "
+                  "the same weighted inner product.");
    args.AddOption(&visit, "-vis", "--visit", "-no-vis", "--no-visit",
                   "Dump fields (computed + exact) to VisIt on the finest level.");
    args.Parse();
@@ -556,6 +762,32 @@ int main(int argc, char *argv[])
                    << setw(14) << results[i].ke_v
                    << setw(14) << (results[i].ke_c + results[i].ke_v)
                    << setw(16) << results[i].inner_cv << "\n";
+      }
+
+      // Density diagnostics for the shocklet field: one kinetic energy, three
+      // density representations (see step 10c in RunLevel).
+      if (vortical_field == 3)
+      {
+         mfem::out << "\n# density-weighted KE:  rho_q = analytic rho at hi-order quadrature (qdata analogue),\n"
+                      "#                        rho_p = element-wise L2-projected rho (ComputeDensity analogue)\n"
+                   << setw(6)  << "level"
+                   << setw(12) << "h_min"
+                   << setw(15) << "KE(rho_q)"
+                   << setw(15) << "dKE(project)"
+                   << setw(15) << "dKE(quadrule)"
+                   << setw(16) << "(rho u_c,u_v)"
+                   << setw(15) << "id-gap(ND)" << "\n"
+                   << string(94, '-') << "\n";
+         for (size_t i = 0; i < results.size(); ++i)
+         {
+            mfem::out << setw(6)  << (int)i+1
+                      << setw(12) << results[i].h_min
+                      << setw(15) << results[i].ke_rho_q
+                      << setw(15) << (results[i].ke_rho_p  - results[i].ke_rho_q)
+                      << setw(15) << (results[i].ke_rho_qd - results[i].ke_rho_q)
+                      << setw(16) << results[i].cross_rho
+                      << setw(15) << results[i].id_gap_nd << "\n";
+         }
       }
    }
 
