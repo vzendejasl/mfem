@@ -1,4 +1,4 @@
-// Copyright (c) 2010-2025, Lawrence Livermore National Security, LLC. Produced
+// Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC. Produced
 // at the Lawrence Livermore National Laboratory. All Rights reserved. See files
 // LICENSE and NOTICE for details. LLNL-CODE-806117.
 //
@@ -220,7 +220,7 @@ public:
        @a u.
        The main purpose of this function is its use in FindInterpolant.
        Use GetBotella instead for each shape function separately, perhaps in
-       conjuction with GetSpan and GetRefPoint.*/
+       conjunction with GetSpan and GetRefPoint.*/
    MFEM_DEPRECATED void FindMaxima(Array<int> &ks, Vector &xi, Vector &u) const;
 
    /** @brief Global curve interpolation through the points @a x (overwritten).
@@ -360,7 +360,10 @@ protected:
    inline       real_t &slice(int i, int j);
    inline const real_t &slice(int i, int j) const;
 
-   /// Copy constructor
+   /** @brief Construct a new patch, copying the KnotVectors of @a parent
+       except in direction @a dir, which gets a new KnotVector of order
+       @a Order with @a NCP control points (knots initialized to -1). The
+       control point data is allocated but not initialized. */
    NURBSPatch(NURBSPatch *parent, int dir, int Order, int NCP);
 
    /// Deletes own data, takes data from @a np, and deletes np.
@@ -1398,8 +1401,7 @@ inline const real_t &NURBSPatch::operator()(int i, int j, int k, int l) const
 
 inline int NURBSExtension::KnotInd(int edge) const
 {
-   const int kv = edge_to_ukv[edge];
-   return kv >= 0 ? kv : -1 - kv;
+   return UnsignIndex(edge_to_ukv[edge]);
 }
 
 inline int NURBSExtension::KnotSign(int edge) const
@@ -1429,7 +1431,7 @@ const
    else
    {
       *okv = -oedge;
-      return knotVectors[-1-kv];
+      return knotVectors[FlipIndexSign(kv)];
    }
 }
 
