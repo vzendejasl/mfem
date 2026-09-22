@@ -38,7 +38,7 @@ COMMON_LIB += $(if $(MFEM_SHARED:YES=),,\
    $(MFEM_XLINKER)-rpath,$(abspath $(MFEM_BUILD_DIR)/miniapps/common))
 
 PAR_MINIAPPS = navier_mms navier_kovasznay navier_kovasznay_vs navier_tgv\
- navier_shear navier_3dfoc navier_turbchan navier_bifurcation
+ navier_shear navier_shear_layer navier_3dfoc navier_turbchan navier_bifurcation
 ifeq ($(MFEM_USE_GSLIB),YES)
    PAR_MINIAPPS += navier_cht
 endif
@@ -58,6 +58,11 @@ endif
 %.o: %.cpp
 
 %: %.o $(NAVIER_COMMON_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) $^ -o $@ $(MFEM_LIBS) $(COMMON_LIB)
+
+# navier_tgv uses only NavierSolver. Linking navier_utils.cpp here introduces
+# unrelated context-helper symbols that this standalone driver does not define.
+navier_tgv: navier_tgv.o navier_solver.o
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) $^ -o $@ $(MFEM_LIBS) $(COMMON_LIB)
 
 %.o: $(SRC)%.cpp $(MFEM_LIB_FILE) $(CONFIG_MK) | lib-common
@@ -83,6 +88,39 @@ navier_kovasznay-test-par: navier_kovasznay
 
 navier_tgv-test-par: navier_tgv
 	@$(call mfem-test,$<, $(RUN_MPI), Navier,-cr)
+
+navier_tgv-amr-test-par: navier_tgv
+	@$(call mfem-test,$<, $(RUN_MPI), Navier AMR,-es 1 -o 2 -tf 0.007 -dt 0.001 -amr -amr-t 0.004 -amr-th 0.8 -amr-check)
+
+navier_shear_layer-amr-test-par: navier_shear_layer
+	@$(call mfem-test,$<, $(RUN_MPI), Shear-layer AMR,-dim 2 -nx 16 -ny 8 -o 2 -Re 100 -dt 0.001 -tf 0.02 -amr -amr-t 0.005 -amr-th 0.5 -amr-check -amr-rebalance -no-visit)
+
+navier_shear_layer-dye-amr-test-par: navier_shear_layer
+	@$(call mfem-test,$<, $(RUN_MPI), Shear-layer dye AMR,-dim 2 -nx 16 -ny 8 -o 2 -Re 100 -dt 0.001 -tf 0.02 -amr -amr-t 0.005 -amr-dye-mixing -amr-dye-min 0.3 -amr-dye-max 0.7 -amr-check -amr-rebalance -no-visit)
+
+navier_shear_layer-dye-amr-cap-test-par: navier_shear_layer
+	@$(call mfem-test,$<, $(RUN_MPI), Shear-layer capped dye AMR,-dim 2 -nx 16 -ny 8 -o 2 -Re 500 -dt 0.001 -tf 0.02 -pa -amr -amr-t 0.005 -amr-i 5 -amr-max-events 0 -amr-max-marked 4 -amr-dye-mixing -amr-dye-min 0.1 -amr-dye-max 0.8 -amr-check -amr-rebalance -no-visit)
+
+navier_shear_layer-dye-amr-coarsen-test-par: navier_shear_layer
+	@$(call mfem-test,$<, $(RUN_MPI), Shear-layer moving dye AMR,-dim 2 -nx 16 -ny 8 -o 2 -Re 500 -dt 0.001 -tf 0.02 -pa -amr -amr-t 0.005 -amr-i 5 -amr-max-events 0 -amr-max-marked 4 -amr-dye-mixing -amr-dye-min 0.1 -amr-dye-max 0.8 -amr-coarsen -amr-check -amr-rebalance -no-visit)
+
+navier_shear_layer-dye-dynamic-test-par: navier_shear_layer
+	@$(call mfem-test,$<, $(RUN_MPI), Shear-layer simple moving dye AMR,-dim 2 -nx 16 -ny 8 -o 2 -Re 500 -dt 0.001 -tf 0.04 -pa -amr-dye-dynamic -amr-t 0.005 -amr-i 5 -amr-max-level 1 -amr-check -amr-rebalance -no-visit)
+
+navier_shear_layer-dye-enstrophy-amr-test-par: navier_shear_layer
+	@$(call mfem-test,$<, $(RUN_MPI), Shear-layer dye or enstrophy AMR,-dim 2 -nx 16 -ny 8 -o 2 -Re 500 -dt 0.001 -tf 0.04 -pa -amr-dye-dynamic -amr-dye-enstrophy -amr-th 0.5 -amr-t 0.005 -amr-i 5 -amr-max-level 1 -amr-check -amr-rebalance -no-visit)
+
+navier_shear_layer-dye-gradient-amr-test-par: navier_shear_layer
+	@$(call mfem-test,$<, $(RUN_MPI), Shear-layer moving gradient AMR,-dim 2 -nx 16 -ny 8 -o 2 -Re 500 -dt 0.001 -tf 0.04 -pa -amr -amr-t 0.005 -amr-i 5 -amr-max-events 0 -amr-max-marked 4 -amr-dye-gradient -amr-dye-grad-th 0.15 -amr-dye-grad-coarsen-th 0.05 -amr-dye-grad-inlet-buffer 0.75 -amr-coarsen -amr-check -amr-rebalance -no-visit)
+
+navier_shear_layer-3d-dye-amr-test-par: navier_shear_layer
+	@$(call mfem-test,$<, $(RUN_MPI), Shear-layer 3D dye AMR,-dim 3 -nx 8 -ny 4 -nz 4 -lx 4 -ly 1 -lz 0.5 -no-per-z -o 2 -Re 100 -dt 0.0005 -tf 0.005 -amr -amr-t 0.002 -amr-dye-mixing -amr-dye-min 0.05 -amr-dye-max 0.95 -amr-check -amr-rebalance -no-visit)
+
+navier_shear_layer-3d-dye-amr-pa-test-par: navier_shear_layer
+	@$(call mfem-test,$<, $(RUN_MPI), Shear-layer 3D dye AMR PA,-dim 3 -nx 8 -ny 4 -nz 4 -lx 4 -ly 1 -lz 0.5 -no-per-z -o 2 -Re 100 -dt 0.0005 -tf 0.005 -pa -amr -amr-t 0.002 -amr-dye-mixing -amr-dye-min 0.05 -amr-dye-max 0.95 -amr-check -amr-rebalance -no-visit)
+
+navier_shear_layer-3d-enstrophy-amr-test-par: navier_shear_layer
+	@$(call mfem-test,$<, $(RUN_MPI), Shear-layer 3D enstrophy AMR,-dim 3 -nx 8 -ny 4 -nz 4 -lx 4 -ly 1 -lz 0.5 -no-per-z -o 2 -Re 100 -dt 0.0005 -tf 0.005 -amr -amr-t 0.002 -amr-th 0.5 -amr-check -amr-rebalance -no-visit)
 
 # Generate an error message if the MFEM library is not built and exit
 $(MFEM_LIB_FILE):

@@ -184,6 +184,29 @@ public:
    /// Initialize forms, solvers and preconditioners.
    void Setup(real_t dt);
 
+   /** Prepare physical BDF history for a pending mesh topology/partition change.
+    *
+    * This must be called before the caller refines or rebalances @a pmesh when
+    * history is to be preserved. The subsequent UpdateAfterMeshChange() call
+    * applies the finite-element transfer to the saved history fields.
+    */
+   void PrepareForMeshChange(bool preserve_time_history = true);
+
+   /**
+    * Update the solver after the mesh has been refined.
+    *
+    * The caller must refine the ParMesh before calling this method. Physical
+    * velocity and pressure GridFunctions are transferred to the updated FE
+    * spaces; work vectors, operators, solvers, and preconditioners are then
+    * recreated for the new mesh. When @a restart_time_integrator is true, the
+    * velocity history is reset so the caller can restart BDF bootstrapping.
+    */
+   void UpdateAfterMeshChange(real_t dt,
+                              bool restart_time_integrator = true);
+
+   /// Whether all three linear solves converged during the last time step.
+   bool LastStepConverged() const { return last_step_converged; }
+
    /// Compute solution at the next time step t+dt.
    /**
     * This method can be called with the default value @a provisional which
@@ -307,6 +330,9 @@ public:
    /// Compute CFL
    real_t ComputeCFL(ParGridFunction &u, real_t dt);
 
+   /// Return the Euclidean norm of the discrete divergence of the velocity.
+   real_t ComputeDiscreteDivergenceNorm();
+
    /// Set the number of modes to cut off in the interpolation filter
    void SetCutoffModes(int c) { filter_cutoff_modes = c; }
 
@@ -352,6 +378,12 @@ protected:
                      Vector &X,
                      Vector &B,
                      int copy_interior = 0);
+
+   /// Destroy objects that depend on the current finite element spaces.
+   void ClearSetupObjects();
+
+   /// Release temporary GridFunctions used to transfer BDF history.
+   void ClearMeshChangeData();
 
    /// Enable/disable debug output.
    bool debug = false;
@@ -445,6 +477,11 @@ protected:
 
    ParGridFunction pn_gf, resp_gf;
 
+   // Temporary old-space GridFunctions used only between
+   // PrepareForMeshChange() and UpdateAfterMeshChange().
+   ParGridFunction *unm1_mesh_change_gf = nullptr;
+   ParGridFunction *unm2_mesh_change_gf = nullptr;
+
    // Full-vector essential velocity boundary attributes.
    Array<int> vel_ess_attr;
 
@@ -513,6 +550,8 @@ protected:
 
    // Iteration counts.
    int iter_mvsolve = 0, iter_spsolve = 0, iter_hsolve = 0;
+
+   bool last_step_converged = true;
 
    // Residuals.
    real_t res_mvsolve = 0.0, res_spsolve = 0.0, res_hsolve = 0.0;

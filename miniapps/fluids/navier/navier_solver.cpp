@@ -386,6 +386,203 @@ void NavierSolver::Setup(real_t dt)
    sw_setup.Stop();
 }
 
+void NavierSolver::ClearSetupObjects()
+{
+   // Solvers keep references to their preconditioners and operators.
+   delete MvInv;
+   MvInv = nullptr;
+   delete MvInvPC;
+   MvInvPC = nullptr;
+
+   delete SpInv;
+   SpInv = nullptr;
+   delete SpInvOrthoPC;
+   SpInvOrthoPC = nullptr;
+   delete SpInvPC;
+   SpInvPC = nullptr;
+   delete lor;
+   lor = nullptr;
+
+   delete HInv;
+   HInv = nullptr;
+   delete HInvPC;
+   HInvPC = nullptr;
+
+   // The handles can own constrained operators built by the forms.
+   Mv.Clear();
+   Sp.Clear();
+   D.Clear();
+   G.Clear();
+   H.Clear();
+
+   delete FText_gfcoeff;
+   FText_gfcoeff = nullptr;
+   delete FText_bdr_form;
+   FText_bdr_form = nullptr;
+   delete g_bdr_form;
+   g_bdr_form = nullptr;
+   delete f_form;
+   f_form = nullptr;
+
+   delete N;
+   N = nullptr;
+   delete Mv_form;
+   Mv_form = nullptr;
+   delete Sp_form;
+   Sp_form = nullptr;
+   delete D_form;
+   D_form = nullptr;
+   delete G_form;
+   G_form = nullptr;
+   delete H_form;
+   H_form = nullptr;
+
+   delete mass_lf;
+   mass_lf = nullptr;
+   volume = 0.0;
+
+   delete vfes_filter;
+   vfes_filter = nullptr;
+   delete vfec_filter;
+   vfec_filter = nullptr;
+}
+
+void NavierSolver::ClearMeshChangeData()
+{
+   delete unm1_mesh_change_gf;
+   unm1_mesh_change_gf = nullptr;
+   delete unm2_mesh_change_gf;
+   unm2_mesh_change_gf = nullptr;
+}
+
+void NavierSolver::PrepareForMeshChange(bool preserve_time_history)
+{
+   ClearMeshChangeData();
+   if (!preserve_time_history) { return; }
+
+   // These GridFunctions must be constructed while vfes still represents the
+   // old mesh. GridFunction::Update() will then prolong them after the caller
+   // changes the mesh topology or MPI partition.
+   unm1_mesh_change_gf = new ParGridFunction(vfes);
+   unm1_mesh_change_gf->SetFromTrueDofs(unm1);
+   unm2_mesh_change_gf = new ParGridFunction(vfes);
+   unm2_mesh_change_gf->SetFromTrueDofs(unm2);
+}
+
+void NavierSolver::UpdateAfterMeshChange(real_t dt,
+                                          bool restart_time_integrator)
+{
+   MFEM_VERIFY(pmesh != nullptr, "A valid ParMesh is required for AMR.");
+
+   const bool transfer_time_history = !restart_time_integrator;
+   MFEM_VERIFY(!transfer_time_history ||
+               (unm1_mesh_change_gf != nullptr &&
+                unm2_mesh_change_gf != nullptr),
+               "Call PrepareForMeshChange(true) before changing the mesh "
+               "when preserving BDF history.");
+
+   const int old_vtrue = vfes->GetTrueVSize();
+   const int old_ptrue = pfes->GetTrueVSize();
+
+   // Update the spaces first. GridFunction::Update() then applies MFEM's
+   // finite-element transfer operator to the old physical fields.
+   vfes->Update();
+   un_gf.Update();
+   if (transfer_time_history)
+   {
+      unm1_mesh_change_gf->Update();
+      unm2_mesh_change_gf->Update();
+   }
+
+   pfes->Update();
+   pn_gf.Update();
+
+   // un_next is only scratch storage after an accepted step. Start it from
+   // the transferred current velocity rather than retaining stale data.
+   un_next_gf.SetSpace(vfes);
+   un_next_gf = un_gf;
+
+   // Derived fields are recomputed on the new mesh when needed.
+   curlu_gf.SetSpace(vfes);
+   curlu_gf = 0.0;
+   curlcurlu_gf.SetSpace(vfes);
+   curlcurlu_gf = 0.0;
+   Lext_gf.SetSpace(vfes);
+   Lext_gf = 0.0;
+   FText_gf.SetSpace(vfes);
+   FText_gf = 0.0;
+   resu_gf.SetSpace(vfes);
+   resu_gf = 0.0;
+   resp_gf.SetSpace(pfes);
+   resp_gf = 0.0;
+
+   const int nv = vfes->GetTrueVSize();
+   const int np = pfes->GetTrueVSize();
+
+   un.SetSize(nv);
+   un_next.SetSize(nv);
+   unm1.SetSize(nv);
+   unm2.SetSize(nv);
+   fn.SetSize(nv);
+   Nun.SetSize(nv);
+   Nunm1.SetSize(nv);
+   Nunm2.SetSize(nv);
+   Fext.SetSize(nv);
+   FText.SetSize(nv);
+   Lext.SetSize(nv);
+   resu.SetSize(nv);
+   tmp1.SetSize(nv);
+
+   pn.SetSize(np);
+   resp.SetSize(np);
+   FText_bdr.SetSize(np);
+   g_bdr.SetSize(np);
+
+   un_gf.GetTrueDofs(un);
+   un_next = un;
+   un_next_gf.SetFromTrueDofs(un_next);
+   pn_gf.GetTrueDofs(pn);
+
+   fn = 0.0;
+   Nun = 0.0;
+   Nunm1 = 0.0;
+   Nunm2 = 0.0;
+   Fext = 0.0;
+   FText = 0.0;
+   Lext = 0.0;
+   resu = 0.0;
+   tmp1 = 0.0;
+   resp = 0.0;
+   FText_bdr = 0.0;
+   g_bdr = 0.0;
+
+   if (restart_time_integrator)
+   {
+      unm1 = un;
+      unm2 = un;
+      dthist[0] = dt;
+      dthist[1] = dt;
+      dthist[2] = dt;
+      cur_step = 0;
+   }
+   else
+   {
+      unm1_mesh_change_gf->GetTrueDofs(unm1);
+      unm2_mesh_change_gf->GetTrueDofs(unm2);
+   }
+
+   ClearSetupObjects();
+   Setup(dt);
+   ClearMeshChangeData();
+
+   if (verbose && pmesh->GetMyRank() == 0)
+   {
+      mfem::out << "AMR update: velocity true DOFs " << old_vtrue << " -> "
+                << nv << ", pressure true DOFs " << old_ptrue << " -> "
+                << np << std::endl;
+   }
+}
+
 void NavierSolver::UpdateTimestepHistory(real_t dt)
 {
    // Rotate values in time step history
@@ -631,6 +828,8 @@ void NavierSolver::Step(real_t &time, real_t dt, int current_step,
    sw_hsolve.Stop();
    iter_hsolve = HInv->GetNumIterations();
    res_hsolve = HInv->GetFinalNorm();
+   last_step_converged = MvInv->GetConverged() && SpInv->GetConverged()
+                         && HInv->GetConverged();
    H_form->RecoverFEMSolution(X2, resu_gf, un_next_gf);
 
    un_next_gf.GetTrueDofs(un_next);
@@ -752,6 +951,18 @@ void NavierSolver::Orthogonalize(Vector &v)
    MPI_Allreduce(&loc_size, &global_size, 1, MPI_INT, MPI_SUM, pfes->GetComm());
 
    v -= global_sum / static_cast<real_t>(global_size);
+}
+
+real_t NavierSolver::ComputeDiscreteDivergenceNorm()
+{
+   Vector div(pfes->GetTrueVSize());
+   D->Mult(un, div);
+
+   real_t local_norm_sq = div * div;
+   real_t global_norm_sq = 0.0;
+   MPI_Allreduce(&local_norm_sq, &global_norm_sq, 1,
+                 MPITypeMap<real_t>::mpi_type, MPI_SUM, pmesh->GetComm());
+   return sqrt(global_norm_sq);
 }
 
 
@@ -1407,29 +1618,10 @@ void NavierSolver::PrintInfo()
 
 NavierSolver::~NavierSolver()
 {
-   delete FText_gfcoeff;
-   delete g_bdr_form;
-   delete FText_bdr_form;
-   delete mass_lf;
-   delete Mv_form;
-   delete N;
-   delete Sp_form;
-   delete D_form;
-   delete G_form;
-   delete HInvPC;
-   delete HInv;
-   delete H_form;
-   delete SpInv;
-   delete MvInvPC;
-   delete SpInvOrthoPC;
-   delete SpInvPC;
-   delete lor;
-   delete f_form;
-   delete MvInv;
-   delete vfec;
-   delete pfec;
+   ClearMeshChangeData();
+   ClearSetupObjects();
    delete vfes;
    delete pfes;
-   delete vfec_filter;
-   delete vfes_filter;
+   delete vfec;
+   delete pfec;
 }

@@ -8,6 +8,9 @@
 // - Top/bottom: free-slip walls (v=0, tangential velocity unconstrained)
 // - Outflow: natural/Neumann (do not mark as essential)
 // - VisIt output (VisItDataCollection)
+// - Scalar AMR is supported. With -amr -pa, flow operators use partial
+//   assembly while scalar DG transport uses full assembly: the current DG
+//   face partial-assembly path is not safe to rebuild on a nonconforming mesh.
 //
 // Example runs:
 // 2D (default):
@@ -22,7 +25,38 @@
 //   mpirun -n 8 ./navier_shear_layer -dim 3 -nx 64 -ny 32 -nz 32 -lx 4 -ly 1 -lz 1 -nmodes 3 -nper 4 -no-vis -visit
 // mpirun -n 8 ./navier_shear_layer -dim 3 -nx 32 -ny 16 -nz 8 -lx 4 -ly 1 -lz 0.5 -nmodes 3 -nper 4 -no-vis -visit -dt 0.001 -tf 1.0 -Re 2000 -pa -delta 0.01 -eps 0.08
 // mpirun -n 8 ./navier_shear_layer -dim 3 -nx 128 -ny 32 -nz 16 -lx 4 -ly 1 -lz 0.5 -nmodes 3 -nper 4 -no-vis -visit -dt 0.0005 -tf 8.0 -Re 2000 -pa -delta 0.01 -eps 0.08
+//
+// 2D AMR smoke test (vorticity/enstrophy marker with passive-dye transfer):
+//   mpirun -n 2 ./navier_shear_layer -dim 2 -nx 16 -ny 8 -o 2 -Re 100 \
+//     -dt 0.001 -tf 0.02 -amr -amr-t 0.005 -amr-th 0.5 \
+//     -amr-check -amr-rebalance -no-vis -visit -dc 5 \
+//     -run shear_layer_amr_smoke
+// 2D AMR using the dye mixing band 0.3 <= c <= 0.7:
+//   mpirun -n 2 ./navier_shear_layer -dim 2 -nx 16 -ny 8 -o 2 -Re 100 \
+//     -dt 0.001 -tf 0.02 -amr -amr-t 0.005 -amr-dye-mixing \
+//     -amr-dye-min 0.3 -amr-dye-max 0.7 -amr-check -amr-rebalance \
+//     -no-vis -visit -dc 5 -run shear_layer_dye_amr
+// Simple moving dye AMR: no DOF/event/marking caps; dye range is 0.3 <= c <= 0.8.
+//   mpirun -n 2 ./navier_shear_layer -dim 2 -nx 16 -ny 8 -o 2 -Re 500 \
+//     -dt 0.001 -tf 3.0 -pa -amr-dye-dynamic -amr-t 0.005 \
+//     -amr-max-level 1 -amr-check -amr-rebalance -no-vis -visit -dc 5 \
+//     -run shear_layer_dye_dynamic -nper 4 -delta 0.01 -eps 0.08
+// Add -amr-dye-enstrophy to also refine high-enstrophy vortex regions.
+// Moving 2D scalar-gradient AMR (unlimited events, bounded mesh growth):
+//   mpirun -n 2 ./navier_shear_layer -dim 2 -nx 16 -ny 8 -o 2 -Re 500 \
+//     -dt 0.0005 -tf 3.0 -pa -amr -amr-t 0.005 -amr-i 25 \
+//     -amr-max-events 0 -amr-max-marked 32 -amr-max-dofs 100000 \
+//     -amr-dye-gradient -amr-dye-grad-th 0.5 \
+//     -amr-dye-grad-coarsen-th 0.1 -amr-dye-grad-inlet-buffer 0.75 -amr-coarsen \
+//     -amr-check -amr-rebalance -no-vis -visit -dc 5 \
+//     -run shear_layer_moving_amr -nmodes 3 -nper 4 -delta 0.01 -eps 0.08
 
+// 3D AMR using a broad dye mixing band for this coarse smoke mesh:
+//   mpirun -n 2 ./navier_shear_layer -dim 3 -nx 8 -ny 4 -nz 4 \
+//     -lx 4 -ly 1 -lz 0.5 -o 2 -Re 100 -dt 0.0005 -tf 0.005 \
+//     -amr -amr-t 0.002 -amr-dye-mixing -amr-dye-min 0.05 -amr-dye-max 0.95 \
+//     -amr-check -amr-rebalance -no-per-z -no-vis -visit -dc 5 \
+//     -run shear_layer_3d_dye_amr
 
 #include "mfem.hpp"
 #include "navier_solver.hpp"
@@ -71,6 +105,28 @@ struct s_NavierContext
    bool   filter                     = false;
    bool   oversample                 = false;
    real_t alpha                      = 0.0;
+   bool   amr                        = false;
+   real_t amr_time                   = 0.01;
+   real_t amr_threshold              = 0.5;
+   bool   amr_dye_mixing             = false;
+   real_t amr_dye_min                = 0.3;
+   real_t amr_dye_max                = 0.8;
+   bool   amr_dye_dynamic            = false;
+   bool   amr_dye_enstrophy          = false;
+   int    amr_max_level              = 0;
+   bool   amr_dye_gradient           = false;
+   real_t amr_dye_gradient_threshold = 0.5;
+   real_t amr_dye_gradient_coarsen_threshold = 0.1;
+   real_t amr_dye_gradient_inlet_buffer = 0.0;
+   bool   amr_coarsen                = false;
+   int    amr_interval               = 0;
+   int    amr_max_events             = 1;
+   int    amr_max_dofs               = 0;
+   int    amr_max_marked_global      = 0;
+   bool   amr_preserve_history       = true;
+   bool   amr_rebalance              = false;
+   bool   amr_check                  = false;
+   std::string run_name              = "navier_shear_layer";
 
 
 } ctx;
@@ -471,6 +527,331 @@ static void ComputeQCriterion(ParGridFunction &u, ParGridFunction &q)
    }
 }
 
+struct MarkCandidate
+{
+   real_t priority;
+   int element;
+};
+
+// On this Cartesian shear-layer mesh, isotropic refinement reduces element
+// volume by 2^dim. This provides a simple global AMR-depth cap without using
+// a DOF budget or a per-event marking cap.
+static bool IsBelowAMRLevel(ParMesh &pmesh, int element,
+                            real_t root_element_volume,
+                            int max_level)
+{
+   if (max_level <= 0) { return true; }
+   const int dim = pmesh.Dimension();
+   const real_t finest_allowed_volume = root_element_volume
+                                        / std::pow(real_t(2), dim * max_level);
+   return pmesh.GetElementVolume(element)
+          > finest_allowed_volume * (real_t(1.0) + real_t(1e-12));
+}
+
+// Select the same globally highest-priority candidates on every rank, then
+// return only the local element indices owned by this rank. This makes the
+// AMR cap exact rather than a per-rank approximation.
+static Array<int> SelectGlobalCandidates(const std::vector<MarkCandidate> &local,
+                                         int global_limit,
+                                         MPI_Comm comm)
+{
+   int rank = 0;
+   int nranks = 0;
+   MPI_Comm_rank(comm, &rank);
+   MPI_Comm_size(comm, &nranks);
+
+   const int local_count = static_cast<int>(local.size());
+   std::vector<int> counts(nranks), displacements(nranks);
+   MPI_Allgather(&local_count, 1, MPI_INT, counts.data(), 1, MPI_INT, comm);
+
+   int global_count = 0;
+   for (int r = 0; r < nranks; ++r)
+   {
+      displacements[r] = global_count;
+      global_count += counts[r];
+   }
+
+   std::vector<real_t> local_priorities(local_count);
+   std::vector<int> local_elements(local_count);
+   for (int i = 0; i < local_count; ++i)
+   {
+      local_priorities[i] = local[i].priority;
+      local_elements[i] = local[i].element;
+   }
+
+   std::vector<real_t> all_priorities(global_count);
+   std::vector<int> all_elements(global_count);
+   MPI_Allgatherv(local_priorities.data(), local_count,
+                  MPITypeMap<real_t>::mpi_type, all_priorities.data(),
+                  counts.data(), displacements.data(),
+                  MPITypeMap<real_t>::mpi_type, comm);
+   MPI_Allgatherv(local_elements.data(), local_count, MPI_INT,
+                  all_elements.data(), counts.data(), displacements.data(),
+                  MPI_INT, comm);
+
+   struct GlobalCandidate
+   {
+      real_t priority;
+      int rank;
+      int element;
+   };
+   std::vector<GlobalCandidate> all_candidates;
+   all_candidates.reserve(global_count);
+   for (int r = 0; r < nranks; ++r)
+   {
+      for (int i = 0; i < counts[r]; ++i)
+      {
+         const int j = displacements[r] + i;
+         all_candidates.push_back({all_priorities[j], r, all_elements[j]});
+      }
+   }
+   std::sort(all_candidates.begin(), all_candidates.end(),
+             [](const GlobalCandidate &a, const GlobalCandidate &b)
+   {
+      if (a.priority != b.priority) { return a.priority > b.priority; }
+      if (a.rank != b.rank) { return a.rank < b.rank; }
+      return a.element < b.element;
+   });
+
+   const int selected_count = global_limit > 0
+                              ? std::min(global_limit, global_count)
+                              : global_count;
+   Array<int> selected;
+   for (int i = 0; i < selected_count; ++i)
+   {
+      if (all_candidates[i].rank == rank)
+      {
+         selected.Append(all_candidates[i].element);
+      }
+   }
+   return selected;
+}
+
+// Elementwise, volume-normalized enstrophy:
+//   int_K |curl(u)|^2 / |K|.
+// This is evaluated directly from the velocity gradient so the AMR marker
+// remains valid before and after a nonconforming mesh update.
+static void ComputeElementEnstrophy(ParGridFunction &u, Vector &indicator)
+{
+   FiniteElementSpace *fes = u.FESpace();
+   const int dim = fes->GetMesh()->Dimension();
+   MFEM_VERIFY(dim == 2 || dim == 3,
+               "The shear-layer AMR marker requires a 2D or 3D mesh.");
+   MFEM_VERIFY(fes->GetVDim() == dim,
+               "The shear-layer AMR marker requires a physical velocity field.");
+
+   indicator.SetSize(fes->GetNE());
+   Array<int> vdofs;
+   Vector local_u;
+   DenseMatrix dshape, grad_hat, grad;
+
+   for (int e = 0; e < fes->GetNE(); ++e)
+   {
+      const FiniteElement *fe = fes->GetFE(e);
+      const int ndof = fe->GetDof();
+      const IntegrationRule &ir = IntRules.Get(fe->GetGeomType(),
+                                                2 * fe->GetOrder() + 2);
+      fes->GetElementVDofs(e, vdofs);
+      u.GetSubVector(vdofs, local_u);
+      DenseMatrix u_dofs(local_u.GetData(), ndof, fes->GetVDim());
+      ElementTransformation *T = fes->GetElementTransformation(e);
+      dshape.SetSize(ndof, dim);
+
+      real_t enstrophy = 0.0;
+      real_t volume = 0.0;
+      for (int q = 0; q < ir.GetNPoints(); ++q)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         T->SetIntPoint(&ip);
+         fe->CalcDShape(ip, dshape);
+         grad_hat.SetSize(fes->GetVDim(), dim);
+         MultAtB(u_dofs, dshape, grad_hat);
+         grad.SetSize(fes->GetVDim(), dim);
+         Mult(grad_hat, T->InverseJacobian(), grad);
+
+         real_t omega2 = 0.0;
+         if (dim == 2)
+         {
+            const real_t omega = grad(1, 0) - grad(0, 1);
+            omega2 = omega * omega;
+         }
+         else
+         {
+            const real_t omega_x = grad(2, 1) - grad(1, 2);
+            const real_t omega_y = grad(0, 2) - grad(2, 0);
+            const real_t omega_z = grad(1, 0) - grad(0, 1);
+            omega2 = omega_x * omega_x + omega_y * omega_y
+                     + omega_z * omega_z;
+         }
+         const real_t weight = ip.weight * T->Weight();
+         enstrophy += weight * omega2;
+         volume += weight;
+      }
+      indicator(e) = volume > 0.0 ? enstrophy / volume : 0.0;
+   }
+}
+
+static void ComputeVorticity(NavierSolver &flowsolver,
+                             ParGridFunction &u,
+                             ParGridFunction &w)
+{
+   if (u.ParFESpace()->GetParMesh()->Dimension() == 2)
+   {
+      flowsolver.ComputeCurl2D(u, w);
+   }
+   else
+   {
+      flowsolver.ComputeCurl3D(u, w);
+   }
+}
+
+// Mark an element when its sampled dye range overlaps the requested mixing
+// band. For the default 0 <= dye <= 1, [0.3, 0.7] tracks the interface rather
+// than either pure stream.
+static void ComputeDyeMixingCandidates(ParGridFunction &dye,
+                                        real_t lower,
+                                        real_t upper,
+                                        std::vector<MarkCandidate> &candidates)
+{
+   FiniteElementSpace *fes = dye.FESpace();
+   candidates.clear();
+
+   for (int e = 0; e < fes->GetNE(); ++e)
+   {
+      const FiniteElement *fe = fes->GetFE(e);
+      const IntegrationRule &ir = IntRules.Get(fe->GetGeomType(),
+                                                2 * fe->GetOrder() + 2);
+      ElementTransformation *T = fes->GetElementTransformation(e);
+      real_t dye_min = std::numeric_limits<real_t>::infinity();
+      real_t dye_max = -std::numeric_limits<real_t>::infinity();
+
+      for (int q = 0; q < ir.GetNPoints(); ++q)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         T->SetIntPoint(&ip);
+         const real_t dye_value = dye.GetValue(*T, ip);
+         dye_min = std::min(dye_min, dye_value);
+         dye_max = std::max(dye_max, dye_value);
+      }
+
+      if (dye_max >= lower && dye_min <= upper)
+      {
+         // Prefer elements whose sampled dye range has the greatest overlap
+         // with the requested mixing band. This preserves the sharpest/more
+         // strongly mixed portions when a global marking cap is active.
+         const real_t overlap = std::min(dye_max, upper)
+                                - std::max(dye_min, lower);
+         candidates.push_back({std::max(overlap, real_t(0.0)), e});
+      }
+   }
+}
+
+// Elementwise, volume-normalized scalar-gradient magnitude:
+//   int_K |grad(c)|^2 / |K|.
+// Unlike a broad dye-value band, this follows the sharp scalar sheets that
+// wrap around the shear-layer rollers.
+static void ComputeElementDyeGradient(ParGridFunction &dye, Vector &indicator)
+{
+   FiniteElementSpace *fes = dye.FESpace();
+   const int dim = fes->GetMesh()->Dimension();
+   indicator.SetSize(fes->GetNE());
+
+   Array<int> vdofs;
+   Vector local_dye;
+   DenseMatrix dshape, dye_dofs, grad_hat, grad;
+   for (int e = 0; e < fes->GetNE(); ++e)
+   {
+      const FiniteElement *fe = fes->GetFE(e);
+      const int ndof = fe->GetDof();
+      const IntegrationRule &ir = IntRules.Get(fe->GetGeomType(),
+                                                2 * fe->GetOrder() + 2);
+      fes->GetElementVDofs(e, vdofs);
+      dye.GetSubVector(vdofs, local_dye);
+      dye_dofs.UseExternalData(local_dye.GetData(), ndof, 1);
+      ElementTransformation *T = fes->GetElementTransformation(e);
+      dshape.SetSize(ndof, dim);
+
+      real_t gradient_energy = 0.0;
+      real_t volume = 0.0;
+      for (int q = 0; q < ir.GetNPoints(); ++q)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         T->SetIntPoint(&ip);
+         fe->CalcDShape(ip, dshape);
+         grad_hat.SetSize(1, dim);
+         MultAtB(dye_dofs, dshape, grad_hat);
+         grad.SetSize(1, dim);
+         Mult(grad_hat, T->InverseJacobian(), grad);
+
+         real_t gradient_squared = 0.0;
+         for (int d = 0; d < dim; ++d)
+         {
+            gradient_squared += grad(0, d) * grad(0, d);
+         }
+         const real_t weight = ip.weight * T->Weight();
+         gradient_energy += weight * gradient_squared;
+         volume += weight;
+      }
+      indicator(e) = volume > 0.0 ? gradient_energy / volume : 0.0;
+   }
+}
+
+// The prescribed inflow profile remains sharp for the whole calculation and
+// otherwise dominates a global gradient threshold. Zero its contribution in
+// a user-selected buffer so the adaptive budget can follow downstream rollers.
+static void MaskDyeGradientInletBuffer(ParGridFunction &dye,
+                                       real_t inlet_buffer,
+                                       Vector &indicator)
+{
+   if (inlet_buffer <= 0.0) { return; }
+
+   FiniteElementSpace *fes = dye.FESpace();
+   Vector center(fes->GetMesh()->SpaceDimension());
+   for (int e = 0; e < fes->GetNE(); ++e)
+   {
+      const FiniteElement *fe = fes->GetFE(e);
+      ElementTransformation *T = fes->GetElementTransformation(e);
+      T->Transform(Geometries.GetCenter(fe->GetGeomType()), center);
+      if (center(0) < g_xmin + inlet_buffer)
+      {
+         indicator(e) = 0.0;
+      }
+   }
+}
+
+// Use a binary keep/error field for derefinement. With the max aggregation
+// below, a refined parent is coarsened only when every child is outside the
+// dye mixing band, providing hysteresis against immediate refine/coarsen
+// oscillation at an active interface.
+static void ComputeDyeMixingKeepError(ParGridFunction &dye,
+                                       real_t lower,
+                                       real_t upper,
+                                       Array<real_t> &element_error)
+{
+   FiniteElementSpace *fes = dye.FESpace();
+   element_error.SetSize(fes->GetNE());
+
+   for (int e = 0; e < fes->GetNE(); ++e)
+   {
+      const FiniteElement *fe = fes->GetFE(e);
+      const IntegrationRule &ir = IntRules.Get(fe->GetGeomType(),
+                                                2 * fe->GetOrder() + 2);
+      ElementTransformation *T = fes->GetElementTransformation(e);
+      real_t dye_min = std::numeric_limits<real_t>::infinity();
+      real_t dye_max = -std::numeric_limits<real_t>::infinity();
+
+      for (int q = 0; q < ir.GetNPoints(); ++q)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         T->SetIntPoint(&ip);
+         const real_t dye_value = dye.GetValue(*T, ip);
+         dye_min = std::min(dye_min, dye_value);
+         dye_max = std::max(dye_max, dye_value);
+      }
+      element_error[e] = (dye_max >= lower && dye_min <= upper) ? 1.0 : 0.0;
+   }
+}
+
 
 
 static void ComputeWallDiagnostics(ParGridFunction &u,
@@ -672,7 +1053,12 @@ public:
    virtual ~PassiveScalarSolverBase() = default;
    virtual void Initialize() = 0;
    virtual void Step(real_t dt) = 0;
+   virtual void PrepareForMeshChange() = 0;
+   virtual void UpdateAfterMeshChange() = 0;
    virtual ParGridFunction *GetField() = 0;
+   virtual void ComputeMinMaxMass(real_t &global_min,
+                                  real_t &global_max,
+                                  real_t &global_mass) const = 0;
    virtual void PrintDiagnostics(int step, real_t t, real_t dt) const = 0;
    virtual const char *DiscName() const = 0;
 };
@@ -724,15 +1110,16 @@ private:
       {
          HypreParMatrix &M_mat = *M_op.As<HypreParMatrix>();
          M_prec = new HypreSmoother(M_mat, HypreSmoother::Jacobi);
+         M_solver.SetPreconditioner(*M_prec);
       }
       else
       {
          Array<int> empty;
          M_prec = new OperatorJacobiSmoother(mass_form, empty);
+         M_solver.SetPreconditioner(*M_prec);
       }
 
       M_solver.SetOperator(*M_op);
-      M_solver.SetPreconditioner(*M_prec);
       M_solver.iterative_mode = false;
       M_solver.SetRelTol(1e-10);
       M_solver.SetAbsTol(0.0);
@@ -1042,6 +1429,17 @@ private:
    Vector scalar_tdof;
    real_t scalar_time = 0.0;
 
+   void BuildTransportOperator()
+   {
+      oper = std::make_unique<DGScalarTransportOperator>(scalar_fes, velocity,
+                                                         inflow_marker,
+                                                         diff_kappa,
+                                                         scalar_order,
+                                                         use_pa);
+      ode_solver = std::make_unique<RK3SSPSolver>();
+      ode_solver->Init(*oper);
+   }
+
 public:
    DGPassiveScalarSolver(ParMesh *pmesh,
                          int order,
@@ -1068,14 +1466,7 @@ public:
       scalar_gf = 0.0;
       unit_mass_lf.AddDomainIntegrator(new DomainLFIntegrator(one));
       unit_mass_lf.Assemble();
-
-      oper = std::make_unique<DGScalarTransportOperator>(scalar_fes, velocity,
-                                                         inflow_marker,
-                                                         diff_kappa,
-                                                         scalar_order,
-                                                         use_pa);
-      ode_solver = std::make_unique<RK3SSPSolver>();
-      ode_solver->Init(*oper);
+      BuildTransportOperator();
       scalar_tdof.SetSize(scalar_fes.GetTrueVSize());
    }
 
@@ -1096,6 +1487,34 @@ public:
       scalar_gf.SetFromTrueDofs(scalar_tdof);
       ApplyBoundPreservingLimiter();
       scalar_gf.GetTrueDofs(scalar_tdof);
+   }
+
+   void PrepareForMeshChange() override
+   {
+      // PA scalar operators own element data associated with the old mesh.
+      // Destroy them before GeneralRefinement/Rebalance changes that mesh.
+      ode_solver.reset();
+      oper.reset();
+   }
+
+   void UpdateAfterMeshChange() override
+   {
+      // The field is updated in place, allowing MFEM to prolong the existing
+      // transported dye rather than projecting the initial condition again.
+      // The scalar time is intentionally preserved across this operation.
+      scalar_fes.Update();
+      scalar_gf.Update();
+      unit_mass_lf.Update();
+      unit_mass_lf.Assemble();
+      scalar_tdof.SetSize(scalar_fes.GetTrueVSize());
+      scalar_gf.GetTrueDofs(scalar_tdof);
+      BuildTransportOperator();
+
+      if (use_limiter)
+      {
+         ApplyBoundPreservingLimiter();
+         scalar_gf.GetTrueDofs(scalar_tdof);
+      }
    }
 
    void ApplyBoundPreservingLimiter()
@@ -1172,7 +1591,7 @@ public:
 
    void ComputeMinMaxMass(real_t &global_min,
                           real_t &global_max,
-                          real_t &global_mass) const
+                          real_t &global_mass) const override
    {
       const Vector &loc = scalar_gf;
       real_t local_min = std::numeric_limits<real_t>::infinity();
@@ -1243,6 +1662,18 @@ private:
    Vector scalar_tdof;
    real_t scalar_time = 0.0;
 
+   void BuildTransportOperator()
+   {
+      oper = std::make_unique<CGScalarTransportOperator>(scalar_fes, velocity,
+                                                         ess_tdof_list,
+                                                         diff_kappa,
+                                                         use_supg,
+                                                         supg_c,
+                                                         use_pa);
+      ode_solver = std::make_unique<RK3SSPSolver>();
+      ode_solver->Init(*oper);
+   }
+
 public:
    CGPassiveScalarSolver(ParMesh *pmesh,
                          int order,
@@ -1271,14 +1702,7 @@ public:
       scalar_fes.GetEssentialTrueDofs(inflow_marker, ess_tdof_list);
       unit_mass_lf.AddDomainIntegrator(new DomainLFIntegrator(one));
       unit_mass_lf.Assemble();
-      oper = std::make_unique<CGScalarTransportOperator>(scalar_fes, velocity,
-                                                         ess_tdof_list,
-                                                         diff_kappa,
-                                                         use_supg,
-                                                         supg_c,
-                                                         use_pa);
-      ode_solver = std::make_unique<RK3SSPSolver>();
-      ode_solver->Init(*oper);
+      BuildTransportOperator();
       scalar_tdof.SetSize(scalar_fes.GetTrueVSize());
    }
 
@@ -1304,11 +1728,34 @@ public:
       scalar_gf.GetTrueDofs(scalar_tdof);
    }
 
+   void PrepareForMeshChange() override
+   {
+      ode_solver.reset();
+      oper.reset();
+   }
+
+   void UpdateAfterMeshChange() override
+   {
+      scalar_fes.Update();
+      scalar_gf.Update();
+      scalar_fes.GetEssentialTrueDofs(inflow_marker, ess_tdof_list);
+
+      // Preserve the transported interior field while restoring the newly
+      // numbered nonzero inflow degrees of freedom.
+      scalar_gf.ProjectBdrCoefficient(inflow_coeff, inflow_marker);
+      scalar_gf.SetTrueVector();
+      unit_mass_lf.Update();
+      unit_mass_lf.Assemble();
+      scalar_tdof.SetSize(scalar_fes.GetTrueVSize());
+      scalar_gf.GetTrueDofs(scalar_tdof);
+      BuildTransportOperator();
+   }
+
    ParGridFunction *GetField() override { return &scalar_gf; }
 
    void ComputeMinMaxMass(real_t &global_min,
                           real_t &global_max,
-                          real_t &global_mass) const
+                          real_t &global_mass) const override
    {
       const Vector &loc = scalar_gf;
       real_t local_min = std::numeric_limits<real_t>::infinity();
@@ -1452,6 +1899,70 @@ int main(int argc, char *argv[])
                   "Write VisIt output in binary (if supported).");
    args.AddOption(&ctx.data_dump_cycle, "-dc", "--dump-cycle",
                   "Write VisIt output every N steps (0 => every step).");
+   args.AddOption(&ctx.amr, "-amr", "--enable-amr", "-no-amr", "--disable-amr",
+                  "Enable vorticity/enstrophy-driven AMR (2D/3D)." );
+   args.AddOption(&ctx.amr_time, "-amr-t", "--amr-time",
+                  "Time at or after which to begin AMR.");
+   args.AddOption(&ctx.amr_threshold, "-amr-th", "--amr-threshold",
+                  "Refine elements at or above this fraction of maximum enstrophy.");
+   args.AddOption(&ctx.amr_dye_mixing,
+                  "-amr-dye-mixing", "--amr-dye-mixing",
+                  "-amr-enstrophy", "--amr-enstrophy",
+                  "Use dye mixing-band AMR instead of the default enstrophy sensor.");
+   args.AddOption(&ctx.amr_dye_min, "-amr-dye-min", "--amr-dye-min",
+                  "Lower dye value defining the AMR mixing band.");
+   args.AddOption(&ctx.amr_dye_max, "-amr-dye-max", "--amr-dye-max",
+                  "Upper dye value defining the AMR mixing band.");
+   args.AddOption(&ctx.amr_dye_dynamic,
+                  "-amr-dye-dynamic", "--amr-dye-dynamic",
+                  "-no-amr-dye-dynamic", "--no-amr-dye-dynamic",
+                  "Use simple moving AMR: refine/coarsen from the dye band with no event, DOF, or marking cap.");
+   args.AddOption(&ctx.amr_dye_enstrophy,
+                  "-amr-dye-enstrophy", "--amr-dye-enstrophy",
+                  "-no-amr-dye-enstrophy", "--no-amr-dye-enstrophy",
+                  "In simple moving-dye AMR, also refine high-enstrophy cells and retain them while enstrophy is high.");
+   args.AddOption(&ctx.amr_max_level, "-amr-max-level", "--amr-max-level",
+                  "Maximum refinement level relative to the starting Cartesian mesh; zero disables the level cap.");
+   args.AddOption(&ctx.amr_dye_gradient,
+                  "-amr-dye-gradient", "--amr-dye-gradient",
+                  "-no-amr-dye-gradient", "--no-amr-dye-gradient",
+                  "Use the scalar-gradient AMR sensor instead of dye-band or enstrophy marking.");
+   args.AddOption(&ctx.amr_dye_gradient_threshold,
+                  "-amr-dye-grad-th", "--amr-dye-gradient-threshold",
+                  "Refine above this fraction of the global maximum elementwise dye-gradient magnitude.");
+   args.AddOption(&ctx.amr_dye_gradient_coarsen_threshold,
+                  "-amr-dye-grad-coarsen-th", "--amr-dye-gradient-coarsen-threshold",
+                  "Coarsen below this lower fraction of the global maximum dye-gradient magnitude.");
+   args.AddOption(&ctx.amr_dye_gradient_inlet_buffer,
+                  "-amr-dye-grad-inlet-buffer", "--amr-dye-gradient-inlet-buffer",
+                  "Ignore the prescribed inflow scalar gradient over this x-distance when using -amr-dye-gradient.");
+   args.AddOption(&ctx.amr_coarsen,
+                  "-amr-coarsen", "--amr-coarsen",
+                  "-no-amr-coarsen", "--no-amr-coarsen",
+                  "Coarsen refined dye regions after they leave the mixing band.");
+   args.AddOption(&ctx.amr_interval, "-amr-i", "--amr-interval",
+                  "Repeat AMR every this many steps after the first event; zero performs one event.");
+   args.AddOption(&ctx.amr_max_events, "-amr-max-events", "--amr-max-events",
+                  "Maximum number of AMR events; zero permits unlimited events.");
+   args.AddOption(&ctx.amr_max_dofs, "-amr-max-dofs", "--amr-max-dofs",
+                  "Do not start AMR when velocity true DOFs reach this ceiling; zero disables it.");
+   args.AddOption(&ctx.amr_max_marked_global,
+                  "-amr-max-marked", "--amr-max-marked-global",
+                  "Globally refine at most this many marked elements per AMR event; zero disables the cap.");
+   args.AddOption(&ctx.amr_preserve_history,
+                  "-amr-history", "--amr-preserve-history",
+                  "-amr-restart-bdf", "--amr-restart-bdf",
+                  "Transfer BDF history instead of restarting BDF1 after AMR.");
+   args.AddOption(&ctx.amr_rebalance,
+                  "-amr-rebalance", "--amr-rebalance",
+                  "-no-amr-rebalance", "--no-amr-rebalance",
+                  "Rebalance after refinement and transfer state a second time.");
+   args.AddOption(&ctx.amr_check,
+                  "-amr-check", "--amr-check",
+                  "-no-amr-check", "--no-amr-check",
+                  "Fail if no AMR event occurs, the post-AMR flow solve fails, or dye mass transfer fails.");
+   args.AddOption(&ctx.run_name, "-run", "--run-name",
+                  "Prefix for the VisIt output directory and collection.");
 
    args.AddOption(&g_Utop, "-Utop", "--Utop", "Upper-stream asymptotic speed in the shear profile.");
    args.AddOption(&g_Ubot, "-Ubot", "--Ubot", "Lower-stream asymptotic speed in the shear profile.");
@@ -1510,7 +2021,33 @@ int main(int argc, char *argv[])
       if (myid == 0) { args.PrintUsage(std::cout); }
       return 1;
    }
+   if (ctx.amr_dye_dynamic)
+   {
+      // Simple moving-mesh mode: the current dye band is the only sensor.
+      // It intentionally removes the event, DOF, and marking caps.
+      ctx.amr = true;
+      ctx.amr_dye_mixing = true;
+      ctx.amr_dye_gradient = false;
+      ctx.amr_coarsen = true;
+      ctx.amr_max_events = 0;
+      ctx.amr_max_dofs = 0;
+      ctx.amr_max_marked_global = 0;
+      if (ctx.amr_interval <= 0) { ctx.amr_interval = 25; }
+      if (ctx.amr_max_level <= 0) { ctx.amr_max_level = 1; }
+   }
    if (myid == 0) { args.PrintOptions(std::cout); }
+   if (myid == 0 && ctx.amr_dye_dynamic)
+   {
+      std::cout << "[AMR] Simple moving-dye mode: band ["
+                << ctx.amr_dye_min << ", " << ctx.amr_dye_max
+                << "], max level " << ctx.amr_max_level
+                << ", cadence " << ctx.amr_interval
+                << " steps, unlimited events"
+                << (ctx.amr_dye_enstrophy
+                    ? ", plus enstrophy at " + std::to_string(ctx.amr_threshold)
+                    : "")
+                << ".\n";
+   }
 
    if (dim != 2 && dim != 3)
    {
@@ -1519,6 +2056,41 @@ int main(int argc, char *argv[])
    }
    g_dim = dim;
 
+   MFEM_VERIFY(!ctx.amr || (ctx.amr_threshold > 0.0 && ctx.amr_threshold <= 1.0),
+               "The AMR enstrophy threshold must be in (0, 1].");
+   MFEM_VERIFY(!ctx.amr || g_dim != 3 || !g_per_z,
+               "3D AMR currently requires -no-per-z: periodic-z AMR is not "
+               "yet valid for the shear-layer flow/scalar operator path.");
+   MFEM_VERIFY(!ctx.amr_dye_mixing || g_use_scalar,
+               "Dye-mixing AMR requires the passive scalar; remove -no-scalar.");
+   MFEM_VERIFY(!ctx.amr_dye_mixing || ctx.amr_dye_min < ctx.amr_dye_max,
+               "The dye-mixing lower bound must be smaller than the upper bound.");
+   MFEM_VERIFY(!ctx.amr_dye_mixing || !ctx.amr_dye_gradient,
+               "Choose either -amr-dye-mixing or -amr-dye-gradient, not both.");
+   MFEM_VERIFY(!ctx.amr_dye_gradient || g_use_scalar,
+               "Dye-gradient AMR requires the passive scalar; remove -no-scalar.");
+   MFEM_VERIFY(!ctx.amr_dye_gradient
+               || (ctx.amr_dye_gradient_threshold > 0.0
+                   && ctx.amr_dye_gradient_threshold <= 1.0),
+               "The dye-gradient refinement threshold must be in (0, 1].");
+   MFEM_VERIFY(!ctx.amr_dye_gradient
+               || (ctx.amr_dye_gradient_coarsen_threshold >= 0.0
+                   && ctx.amr_dye_gradient_coarsen_threshold
+                      < ctx.amr_dye_gradient_threshold),
+               "The dye-gradient coarsening threshold must be nonnegative and below the refinement threshold.");
+   MFEM_VERIFY(!ctx.amr_dye_gradient || ctx.amr_dye_gradient_inlet_buffer >= 0.0,
+               "The dye-gradient inlet buffer cannot be negative.");
+   MFEM_VERIFY(!ctx.amr_coarsen
+               || (ctx.amr_dye_mixing || ctx.amr_dye_gradient),
+               "Dye-based AMR coarsening requires a dye AMR sensor.");
+   MFEM_VERIFY(!ctx.amr || ctx.amr_max_events >= 0,
+               "The AMR maximum event count cannot be negative.");
+   MFEM_VERIFY(!ctx.amr || ctx.amr_max_marked_global >= 0,
+               "The global AMR marking cap cannot be negative.");
+   MFEM_VERIFY(!ctx.amr || ctx.amr_max_level >= 0,
+               "The AMR maximum level cannot be negative.");
+   MFEM_VERIFY(!ctx.amr_dye_enstrophy || ctx.amr_dye_dynamic,
+               "-amr-dye-enstrophy requires -amr-dye-dynamic.");
 
    ctx.kinvis = 1.0 / ctx.reynum;
 
@@ -1543,10 +2115,15 @@ int main(int argc, char *argv[])
                                    /*sfc_ordering=*/true);
    }
 
-
    mesh.SetCurvature(ctx.order, /*discont=*/false);
 
    for (int lev = 0; lev < ctx.ref_levels; lev++) { mesh.UniformRefinement(); }
+
+   if (ctx.amr)
+   {
+      // The currently validated 3D AMR path uses the non-periodic z mesh.
+      mesh.EnsureNCMesh();
+   }
 
    std::unique_ptr<Mesh> periodic_mesh;
    Mesh *mesh_ptr = &mesh;
@@ -1562,6 +2139,16 @@ int main(int argc, char *argv[])
    }
 
    ParMesh pmesh(MPI_COMM_WORLD, *mesh_ptr);
+
+   real_t local_root_element_volume = 0.0;
+   for (int e = 0; e < pmesh.GetNE(); ++e)
+   {
+      local_root_element_volume = std::max(local_root_element_volume,
+                                           pmesh.GetElementVolume(e));
+   }
+   real_t root_element_volume = 0.0;
+   MPI_Allreduce(&local_root_element_volume, &root_element_volume, 1,
+                 MPITypeMap<real_t>::mpi_type, MPI_MAX, pmesh.GetComm());
 
    if (myid == 0)
    {
@@ -1620,6 +2207,7 @@ ParGridFunction *p = flowsolver.GetCurrentPressure();
 w = flowsolver.GetCurrentVorticity();
 ParGridFunction q_gf(p->ParFESpace());
 q_gf = 0.0;
+ComputeVorticity(flowsolver, *u, *w);
 ComputeQCriterion(*u, q_gf);
 
 if (myid == 0)
@@ -1648,6 +2236,10 @@ PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
    ParGridFunction *dye = nullptr;
    if (g_use_scalar)
    {
+      // DG face PA data is not safely rebuilt on the current NC AMR path.
+      // Keep -pa enabled for the flow solver, but use robust full assembly
+      // for scalar transport whenever the mesh can change.
+      const bool scalar_pa = ctx.pa && !ctx.amr;
       const real_t scalar_kappa = (g_scalar_kappa >= 0.0) ? g_scalar_kappa : ctx.kinvis;
       const int scalar_order = (g_scalar_order >= 0) ? g_scalar_order : ctx.order;
       Array<int> inflow_marker(pmesh.bdr_attributes.Max());
@@ -1658,7 +2250,7 @@ PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
          scalar_solver = std::make_unique<CGPassiveScalarSolver>(&pmesh, scalar_order,
                                                                  inflow_marker, *u,
                                                                  scalar_kappa,
-                                                                 ctx.pa,
+                                                                 scalar_pa,
                                                                  g_scalar_supg,
                                                                  g_scalar_supg_c);
       }
@@ -1668,7 +2260,7 @@ PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
                                                                  inflow_marker, *u,
                                                                  scalar_kappa,
                                                                  g_scalar_limit,
-                                                                 ctx.pa);
+                                                                 scalar_pa);
       }
       scalar_solver->Initialize();
       dye = scalar_solver->GetField();
@@ -1681,7 +2273,7 @@ PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
                    << ((g_scalar_delta > 0.0) ? g_scalar_delta : g_delta)
                    << ", order = " << scalar_order
                    << ", time integrator = explicit RK3SSP"
-                   << ", assembly = " << (ctx.pa ? "PA" : "full");
+                   << ", assembly = " << (scalar_pa ? "PA" : "full");
          if (g_scalar_cg)
          {
             std::cout << ", discretization = H1/CG"
@@ -1695,6 +2287,10 @@ PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
                       << ", limiter = "
                       << (g_scalar_limit ? "bound-preserving on" : "off");
          }
+         if (ctx.pa && ctx.amr)
+         {
+            std::cout << ", scalar PA disabled for NC AMR";
+         }
          std::cout << std::endl;
       }
       scalar_solver->PrintDiagnostics(/*step=*/0, /*t=*/0.0, ctx.dt);
@@ -1706,10 +2302,10 @@ PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
    std::unique_ptr<VisItDataCollection> visit_dc;
    if (ctx.visit)
    {
-      const char *visit_dir = "navier_shear_layer_visit";
+      const std::string visit_dir = ctx.run_name + "_visit";
       if (myid == 0)
       {
-         const int rc = mkdir(visit_dir, 0755);
+         const int rc = mkdir(visit_dir.c_str(), 0755);
          if (rc != 0 && errno != EEXIST)
          {
             MFEM_ABORT("Failed to create VisIt output directory.");
@@ -1718,7 +2314,7 @@ PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
       MPI_Barrier(MPI_COMM_WORLD);
 
       const std::string visit_prefix =
-         std::string(visit_dir) + "/navier_shear_layer";
+         visit_dir + "/" + ctx.run_name;
       visit_dc = std::make_unique<VisItDataCollection>(visit_prefix.c_str(), &pmesh);
       visit_dc->SetPrecision(8);
       // Some MFEM builds support binary toggle; if not, this is harmless.
@@ -1753,10 +2349,371 @@ PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
    const real_t t_final = ctx.t_final;
 
    int step = 0;
+   int amr_events = 0;
+   int last_amr_step = -1;
+   bool saw_post_amr_step = false;
+   bool post_amr_solves_converged = true;
+   real_t max_scalar_mass_transfer_change = 0.0;
    while (t < t_final - 0.5*dt)
    {
       flowsolver.Step(t, dt, step);
+      const int cycle = step + 1;
+      bool amr_this_step = false;
+
+      if (last_amr_step >= 0 && cycle > last_amr_step)
+      {
+         saw_post_amr_step = true;
+         post_amr_solves_converged = post_amr_solves_converged
+                                     && flowsolver.LastStepConverged();
+      }
+
+      ComputeVorticity(flowsolver, *u, *w);
       ComputeQCriterion(*u, q_gf);
+
+      const bool first_amr_event = amr_events == 0;
+      const bool recurring_amr_event = ctx.amr_interval > 0
+                                       && cycle % ctx.amr_interval == 0;
+      const bool amr_is_scheduled = ctx.amr
+                                    && (ctx.amr_max_events == 0
+                                        || amr_events < ctx.amr_max_events)
+                                    && t >= ctx.amr_time
+                                    && (first_amr_event || recurring_amr_event);
+      if (amr_is_scheduled)
+      {
+         // MFEM selects complete sibling groups internally, so derefinement
+         // cannot use the flow solver's pre-change history-transfer callback.
+         // Restart BDF after a successful coarsen; the current velocity,
+         // pressure, and dye fields still transfer through GridFunction::Update().
+         bool coarsened = false;
+         bool refined = false;
+         long long coarsen_elements_before = 0;
+         int coarsen_velocity_dofs_before = 0;
+         real_t coarsen_scalar_min_before = 0.0;
+         real_t coarsen_scalar_max_before = 0.0;
+         real_t coarsen_scalar_mass_before = 0.0;
+         if (ctx.amr_coarsen && amr_events > 0)
+         {
+            MFEM_VERIFY(dye != nullptr,
+                        "Dye-based AMR coarsening requires an initialized scalar field.");
+            coarsen_elements_before = pmesh.GetGlobalNE();
+            coarsen_velocity_dofs_before = u->ParFESpace()->GlobalTrueVSize();
+            if (scalar_solver)
+            {
+               scalar_solver->ComputeMinMaxMass(coarsen_scalar_min_before,
+                                                coarsen_scalar_max_before,
+                                                coarsen_scalar_mass_before);
+            }
+            Array<real_t> keep_error;
+            if (ctx.amr_dye_gradient)
+            {
+               Vector gradient_indicator;
+               ComputeElementDyeGradient(*dye, gradient_indicator);
+               MaskDyeGradientInletBuffer(*dye,
+                                          ctx.amr_dye_gradient_inlet_buffer,
+                                          gradient_indicator);
+               const real_t local_max = gradient_indicator.Size()
+                                        ? gradient_indicator.Max() : 0.0;
+               real_t global_max = 0.0;
+               MPI_Allreduce(&local_max, &global_max, 1,
+                             MPITypeMap<real_t>::mpi_type, MPI_MAX,
+                             pmesh.GetComm());
+               keep_error.SetSize(gradient_indicator.Size());
+               const real_t inverse_global_max = global_max > 0.0
+                                                 ? 1.0 / global_max : 0.0;
+               for (int e = 0; e < keep_error.Size(); ++e)
+               {
+                  keep_error[e] = gradient_indicator(e) * inverse_global_max;
+               }
+               coarsened = pmesh.DerefineByError(
+                  keep_error, ctx.amr_dye_gradient_coarsen_threshold,
+                  /*nc_limit=*/0, /*op=*/2);
+            }
+            else
+            {
+               ComputeDyeMixingKeepError(*dye, ctx.amr_dye_min,
+                                          ctx.amr_dye_max, keep_error);
+               if (ctx.amr_dye_enstrophy)
+               {
+                  Vector enstrophy;
+                  ComputeElementEnstrophy(*u, enstrophy);
+                  const real_t local_max = enstrophy.Size() ? enstrophy.Max() : 0.0;
+                  real_t global_max = 0.0;
+                  MPI_Allreduce(&local_max, &global_max, 1,
+                                MPITypeMap<real_t>::mpi_type, MPI_MAX,
+                                pmesh.GetComm());
+                  const real_t keep_threshold = 0.5 * ctx.amr_threshold * global_max;
+                  for (int e = 0; e < keep_error.Size(); ++e)
+                  {
+                     if (enstrophy(e) >= keep_threshold && enstrophy(e) > 0.0)
+                     {
+                        keep_error[e] = 1.0;
+                     }
+                  }
+               }
+               coarsened = pmesh.DerefineByError(keep_error, 0.5,
+                                                  /*nc_limit=*/0, /*op=*/2);
+            }
+            if (coarsened)
+            {
+               if (scalar_solver)
+               {
+                  scalar_solver->PrepareForMeshChange();
+               }
+
+               StopWatch amr_timer;
+               amr_timer.Start();
+               flowsolver.UpdateAfterMeshChange(dt, /*restart_time_integrator=*/true);
+               if (scalar_solver) { scalar_solver->UpdateAfterMeshChange(); }
+
+               if (ctx.amr_rebalance)
+               {
+                  if (scalar_solver) { scalar_solver->PrepareForMeshChange(); }
+                  flowsolver.PrepareForMeshChange(/*preserve_time_history=*/false);
+                  pmesh.Rebalance();
+                  flowsolver.UpdateAfterMeshChange(dt, /*restart_time_integrator=*/true);
+                  if (scalar_solver) { scalar_solver->UpdateAfterMeshChange(); }
+               }
+               amr_timer.Stop();
+
+               u = flowsolver.GetCurrentVelocity();
+               p = flowsolver.GetCurrentPressure();
+               w = flowsolver.GetCurrentVorticity();
+               q_gf.SetSpace(p->ParFESpace());
+               q_gf = 0.0;
+               ComputeVorticity(flowsolver, *u, *w);
+               ComputeQCriterion(*u, q_gf);
+               if (scalar_solver) { dye = scalar_solver->GetField(); }
+               if (ctx.visit) { visit_dc->SetMesh(MPI_COMM_WORLD, &pmesh); }
+
+               const long long elements_after = pmesh.GetGlobalNE();
+               real_t scalar_min_after = 0.0, scalar_max_after = 0.0;
+               real_t scalar_mass_after = 0.0, scalar_mass_relative_change = 0.0;
+               if (scalar_solver)
+               {
+                  scalar_solver->ComputeMinMaxMass(scalar_min_after,
+                                                   scalar_max_after,
+                                                   scalar_mass_after);
+                  scalar_mass_relative_change =
+                     std::abs(scalar_mass_after - coarsen_scalar_mass_before)
+                     / std::max(std::abs(coarsen_scalar_mass_before), real_t(1e-30));
+                  max_scalar_mass_transfer_change = std::max(
+                     max_scalar_mass_transfer_change, scalar_mass_relative_change);
+               }
+               if (myid == 0)
+               {
+                  std::cout << "\n[AMR] event " << (amr_events + 1)
+                            << " at t = " << t << ": coarsened elements "
+                            << coarsen_elements_before << " -> " << elements_after
+                            << ", velocity true DOFs " << coarsen_velocity_dofs_before
+                            << " -> " << u->ParFESpace()->GlobalTrueVSize()
+                            << ", BDF restarted\n";
+                  if (scalar_solver)
+                  {
+                     std::cout << "[AMR] dye min/max " << coarsen_scalar_min_before
+                               << " / " << coarsen_scalar_max_before << " -> "
+                               << scalar_min_after << " / " << scalar_max_after
+                               << ", mass " << coarsen_scalar_mass_before << " -> "
+                               << scalar_mass_after << " (relative change "
+                               << scalar_mass_relative_change << ")\n";
+                  }
+               }
+            }
+         }
+
+         // Re-evaluate and refine on the transferred mesh even after a
+         // successful coarsen. This lets the AMR region move with the roller
+         // instead of alternating between coarsening and refinement events.
+         const int velocity_dofs_before = u->ParFESpace()->GlobalTrueVSize();
+         const bool can_refine = ctx.amr_max_dofs == 0
+                                 || velocity_dofs_before < ctx.amr_max_dofs;
+         std::vector<MarkCandidate> local_candidates;
+         if (ctx.amr_dye_gradient)
+         {
+            MFEM_VERIFY(dye != nullptr,
+                        "Dye-gradient AMR requires an initialized scalar field.");
+            Vector indicator;
+            ComputeElementDyeGradient(*dye, indicator);
+            MaskDyeGradientInletBuffer(*dye,
+                                       ctx.amr_dye_gradient_inlet_buffer,
+                                       indicator);
+            const real_t local_max = indicator.Size() ? indicator.Max() : 0.0;
+            real_t global_max = 0.0;
+            MPI_Allreduce(&local_max, &global_max, 1,
+                          MPITypeMap<real_t>::mpi_type, MPI_MAX, pmesh.GetComm());
+            const real_t threshold = ctx.amr_dye_gradient_threshold * global_max;
+            for (int e = 0; e < pmesh.GetNE(); ++e)
+            {
+               if (indicator(e) >= threshold && indicator(e) > 0.0)
+               {
+                  local_candidates.push_back({indicator(e), e});
+               }
+            }
+         }
+         else if (ctx.amr_dye_enstrophy)
+         {
+            std::vector<MarkCandidate> dye_candidates;
+            ComputeDyeMixingCandidates(*dye, ctx.amr_dye_min,
+                                       ctx.amr_dye_max, dye_candidates);
+            std::vector<real_t> priority(pmesh.GetNE(), 0.0);
+            for (const MarkCandidate &candidate : dye_candidates)
+            {
+               priority[candidate.element] = 1.0;
+            }
+
+            Vector enstrophy;
+            ComputeElementEnstrophy(*u, enstrophy);
+            const real_t local_max = enstrophy.Size() ? enstrophy.Max() : 0.0;
+            real_t global_max = 0.0;
+            MPI_Allreduce(&local_max, &global_max, 1,
+                          MPITypeMap<real_t>::mpi_type, MPI_MAX, pmesh.GetComm());
+            const real_t threshold = ctx.amr_threshold * global_max;
+            for (int e = 0; e < pmesh.GetNE(); ++e)
+            {
+               if (enstrophy(e) >= threshold && enstrophy(e) > 0.0)
+               {
+                  priority[e] = std::max(priority[e], enstrophy(e) / global_max);
+               }
+            }
+            for (int e = 0; e < pmesh.GetNE(); ++e)
+            {
+               if (priority[e] > 0.0) { local_candidates.push_back({priority[e], e}); }
+            }
+         }
+         else if (ctx.amr_dye_mixing)
+         {
+            ComputeDyeMixingCandidates(*dye, ctx.amr_dye_min,
+                                       ctx.amr_dye_max, local_candidates);
+            for (MarkCandidate &candidate : local_candidates)
+            {
+               candidate.priority *= pmesh.GetElementSize(candidate.element, 1);
+            }
+         }
+         else
+         {
+            Vector indicator;
+            ComputeElementEnstrophy(*u, indicator);
+            const real_t local_max = indicator.Size() ? indicator.Max() : 0.0;
+            real_t global_max = 0.0;
+            MPI_Allreduce(&local_max, &global_max, 1,
+                          MPITypeMap<real_t>::mpi_type, MPI_MAX, pmesh.GetComm());
+            const real_t threshold = ctx.amr_threshold * global_max;
+            for (int e = 0; e < pmesh.GetNE(); ++e)
+            {
+               if (indicator(e) >= threshold && indicator(e) > 0.0)
+               {
+                  local_candidates.push_back(
+                     {indicator(e) * pmesh.GetElementSize(e, 1), e});
+               }
+            }
+         }
+
+         if (ctx.amr_max_level > 0)
+         {
+            local_candidates.erase(
+               std::remove_if(local_candidates.begin(), local_candidates.end(),
+                              [&](const MarkCandidate &candidate)
+            {
+               return !IsBelowAMRLevel(pmesh, candidate.element,
+                                       root_element_volume, ctx.amr_max_level);
+            }), local_candidates.end());
+         }
+
+         const int local_eligible = static_cast<int>(local_candidates.size());
+         int global_eligible = 0;
+         MPI_Allreduce(&local_eligible, &global_eligible, 1, MPI_INT, MPI_SUM,
+                       pmesh.GetComm());
+         if (global_eligible > 0 && can_refine)
+         {
+            Array<int> refine_elements = SelectGlobalCandidates(
+               local_candidates, ctx.amr_max_marked_global, pmesh.GetComm());
+            refine_elements.Sort();
+            int local_marked = refine_elements.Size();
+            int global_marked = 0;
+            MPI_Allreduce(&local_marked, &global_marked, 1, MPI_INT, MPI_SUM,
+                          pmesh.GetComm());
+            if (global_marked > 0)
+            {
+               const long long elements_before = pmesh.GetGlobalNE();
+               real_t scalar_min_before = 0.0, scalar_max_before = 0.0;
+               real_t scalar_mass_before = 0.0;
+               if (scalar_solver)
+               {
+                  scalar_solver->ComputeMinMaxMass(scalar_min_before,
+                                                   scalar_max_before,
+                                                   scalar_mass_before);
+                  scalar_solver->PrepareForMeshChange();
+               }
+               StopWatch amr_timer;
+               amr_timer.Start();
+               flowsolver.PrepareForMeshChange(ctx.amr_preserve_history);
+               pmesh.GeneralRefinement(refine_elements);
+               flowsolver.UpdateAfterMeshChange(dt, !ctx.amr_preserve_history);
+               if (scalar_solver) { scalar_solver->UpdateAfterMeshChange(); }
+               refined = true;
+
+               if (ctx.amr_rebalance)
+               {
+                  if (scalar_solver) { scalar_solver->PrepareForMeshChange(); }
+                  flowsolver.PrepareForMeshChange(ctx.amr_preserve_history);
+                  pmesh.Rebalance();
+                  flowsolver.UpdateAfterMeshChange(dt, !ctx.amr_preserve_history);
+                  if (scalar_solver) { scalar_solver->UpdateAfterMeshChange(); }
+               }
+               amr_timer.Stop();
+
+               u = flowsolver.GetCurrentVelocity();
+               p = flowsolver.GetCurrentPressure();
+               w = flowsolver.GetCurrentVorticity();
+               q_gf.SetSpace(p->ParFESpace());
+               q_gf = 0.0;
+               ComputeVorticity(flowsolver, *u, *w);
+               ComputeQCriterion(*u, q_gf);
+               if (scalar_solver) { dye = scalar_solver->GetField(); }
+               if (ctx.visit) { visit_dc->SetMesh(MPI_COMM_WORLD, &pmesh); }
+
+               const long long elements_after = pmesh.GetGlobalNE();
+               real_t scalar_min_after = 0.0, scalar_max_after = 0.0;
+               real_t scalar_mass_after = 0.0, scalar_mass_relative_change = 0.0;
+               if (scalar_solver)
+               {
+                  scalar_solver->ComputeMinMaxMass(scalar_min_after,
+                                                   scalar_max_after,
+                                                   scalar_mass_after);
+                  scalar_mass_relative_change =
+                     std::abs(scalar_mass_after - scalar_mass_before)
+                     / std::max(std::abs(scalar_mass_before), real_t(1e-30));
+                  max_scalar_mass_transfer_change = std::max(
+                     max_scalar_mass_transfer_change, scalar_mass_relative_change);
+               }
+               if (myid == 0)
+               {
+                  std::cout << "\n[AMR] event " << (amr_events + 1)
+                            << " at t = " << t << ": elements "
+                            << elements_before << " -> " << elements_after
+                            << ", marked " << global_marked << " of "
+                            << global_eligible << " eligible"
+                            << (ctx.amr_max_marked_global > 0
+                                ? " (global cap "
+                                + std::to_string(ctx.amr_max_marked_global) + ")"
+                                : " (all eligible)")
+                            << ", sensor "
+                            << (ctx.amr_dye_gradient ? "dye gradient"
+                                : (ctx.amr_dye_enstrophy ? "dye band OR enstrophy"
+                                   : (ctx.amr_dye_mixing ? "dye mixing band" : "enstrophy")))
+                            << ", velocity true DOFs " << velocity_dofs_before
+                            << " -> " << u->ParFESpace()->GlobalTrueVSize()
+                            << "\n";
+               }
+            }
+         }
+         if (coarsened || refined)
+         {
+            ++amr_events;
+            last_amr_step = cycle;
+            amr_this_step = true;
+         }
+      }
+
       if (scalar_solver)
       {
          scalar_solver->Step(dt);
@@ -1767,9 +2724,9 @@ PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
       if (ctx.visit)
       {
          const int dump_every = (ctx.data_dump_cycle <= 0) ? 1 : ctx.data_dump_cycle;
-         if (step % dump_every == 0)
+         if (amr_this_step || cycle % dump_every == 0)
          {
-            visit_dc->SetCycle(step);
+            visit_dc->SetCycle(cycle);
             visit_dc->SetTime(t);
             visit_dc->Save();
          }
@@ -1783,18 +2740,18 @@ PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
                         /*x=*/10, /*y=*/10, /*w=*/500, /*h=*/350, /*vec=*/true);
       }
 
-      if (step % 10 == 0)
+      if (cycle % 10 == 0)
       {
-         PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, step, t);
+         PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, cycle, t);
          if (scalar_solver)
          {
-            scalar_solver->PrintDiagnostics(step, t, dt);
+            scalar_solver->PrintDiagnostics(cycle, t, dt);
          }
       }
 
-      if (myid == 0 && (step % 10 == 0))
+      if (myid == 0 && (cycle % 10 == 0))
       {
-         std::cout << "step " << step
+         std::cout << "step " << cycle
                    << "  t = " << t
                    << "  dt = " << dt
                    << "  CFL(u) = " << cfl << "\n";
@@ -1804,5 +2761,24 @@ PrintSlipWallDiagnostics(*u, top_attr, bottom_attr, /*step=*/0, /*t=*/0.0);
    }
 
    flowsolver.PrintTimingData();
+   if (ctx.amr_check)
+   {
+      const bool passed = amr_events > 0 && saw_post_amr_step
+                          && post_amr_solves_converged
+                          && max_scalar_mass_transfer_change <= 1e-10;
+      if (!passed)
+      {
+         if (myid == 0)
+         {
+            std::cerr << "[AMR] check failed: events=" << amr_events
+                      << ", post-AMR step observed=" << saw_post_amr_step
+                      << ", post-AMR solves converged="
+                      << post_amr_solves_converged
+                      << ", max scalar mass transfer change="
+                      << max_scalar_mass_transfer_change << std::endl;
+         }
+         return 1;
+      }
+   }
    return 0;
 }
